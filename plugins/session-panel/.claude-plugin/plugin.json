@@ -1,5 +1,6 @@
 {
   "name": "session-panel",
   "version": "0.1.0",
-  "description": "Live session stats side pane for the Claude desktop Code tab"
+  "description": "Live session stats side pane for the Claude desktop Code tab",
+  "types": "./types/index.d.ts"
 }

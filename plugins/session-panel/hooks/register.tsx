@@ -1,322 +1,408 @@
-// SPIKE: a throwaway module that probes how the engine APIs really behave. Task 3 replaces it.
-// Observations are kept in memory and copied to .spike/results.json, at most once per 2 s.
-// Every hook only observes: it returns what next(e) returned.
-// Helpers that take `$` sit at the top level: `claude plugin validate` follows `$` only into those.
-// The main loop and the subagents have separate rings, so a busy subagent cannot evict main-loop entries.
-import type { EngineInterface, Register } from 'claude-code'
+// Wiring of the session-panel mod: engine events fill the `$.state` atoms and a command toggles the pane.
+// Every hook only observes: it returns what next(e) returned (the command hook answers its own command). Until
+// view.tsx takes over, the pane is a text dump of the atoms.
+// `claude plugin validate` follows `$` only into top-level functions of this file, so every helper that takes `$`
+// sits here. The atoms are declared here too: read() and update() refuse a reference written in another file.
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, Register, SessionContextUsage, SessionCost, SessionRateLimit } from 'claude-code'
+
+import {
+  addAgentCost, attributeCost, computeTurnStats, fmtDuration, fmtPct, fmtRate, fmtTokens, fmtTtft, fmtUsd, pushLog,
+  redact, shortType, shorten, toolLabel,
+} from './stats'
+import type { AgentRow, AgentStatus, Interval, LogKind, StepTiming, TurnStats, Usage } from './stats'
+
+const usageAtom = atom({ plugin: 'session-panel', key: 'usage' } as const, { rateLimits: [] })
+const projectAtom = atom({ plugin: 'session-panel', key: 'project' } as const, { name: '', branch: null })
+const mcpAtom = atom({ plugin: 'session-panel', key: 'mcp' } as const, null)
+const turnAtom = atom({ plugin: 'session-panel', key: 'turn' } as const, null)
+const lastTurnAtom = atom({ plugin: 'session-panel', key: 'lastTurn' } as const, null)
+const agentsAtom = atom({ plugin: 'session-panel', key: 'agents' } as const, {})
+const logAtom = atom({ plugin: 'session-panel', key: 'log' } as const, [])
+const collapsedAtom = atom({ plugin: 'session-panel', key: 'collapsed' } as const, {})
 
 const PANE = 'session-panel'
-const RESULTS_PATH = '/home/philarete/projects/claude_mods/.spike/results.json'
-const WRITE_DELAY_MS = 2000
-const MCP_PROBE_DELAY_MS = 5000
+const TICK_MS = 30_000
 
-type Results = {
-  engine: unknown
-  time: unknown
-  pane: unknown[]
-  // Running totals: the rings below forget old entries, these do not.
-  counters: { mainSteps: number; agentSteps: number; mainCost: number; agentCost: number }
-  steps: unknown[]
-  agentSteps: unknown[]
-  cost: unknown[]
-  agentCost: unknown[]
-  mcp: unknown
-  spawn: unknown[]
-  agentComplete: unknown[]
-  agentList: unknown[]
-  measure: unknown[]
-  postTool: unknown[]
-  toolCalls: unknown[]
-  agentToolCalls: unknown[]
-  breakdown: unknown
+// The words $.agent.list() uses for how a subagent ended; any other word (`running` too) leaves the row as it is.
+const LISTED_STATUS: Record<string, AgentStatus> = { completed: 'done', failed: 'failed', killed: 'stopped' }
+
+// The cost.usd reading that the next request is charged against. It is null until a reading sets it: the first one
+// after the module loads (the start of the session), and the first one after a /clear.
+let lastUsd: number | null = null
+
+// The cost readings run one after another, each against the one before it: none overtakes another.
+let costQueue: Promise<void> = Promise.resolve()
+
+// ISO 8601 to epoch ms, which is what the `usage` value keeps; undefined when there is none or it does not parse.
+const toMs = (iso: string | undefined): number | undefined => {
+  const ms = iso === undefined ? Number.NaN : Date.parse(iso)
+
+  return Number.isNaN(ms) ? undefined : ms
 }
 
-// A reload starts these over, which is fine for a spike.
-const results: Results = {
-  engine: null,
-  time: null,
-  pane: [],
-  counters: { mainSteps: 0, agentSteps: 0, mainCost: 0, agentCost: 0 },
-  steps: [],
-  agentSteps: [],
-  cost: [],
-  agentCost: [],
-  mcp: null,
-  spawn: [],
-  agentComplete: [],
-  agentList: [],
-  measure: [],
-  postTool: [],
-  toolCalls: [],
-  agentToolCalls: [],
-  breakdown: null,
-}
-let isWritePending = false
-let lastWrite = 'never'
+// The figures of session.measure and of usage(), as the `usage` value keeps them. The percent is worked out here, of
+// `window`: the engine's own is of the model's window, not of a smaller compaction window.
+const usageFields = (
+  from: { context: SessionContextUsage; rateLimits: SessionRateLimit[]; cost?: SessionCost },
+  window: number,
+) => ({
+  contextTokens: from.context.tokens,
+  contextWindow: window,
+  contextPct: from.context.tokens === undefined ? undefined : (from.context.tokens * 100) / window,
+  costUsd: from.cost?.usd,
+  rateLimits: from.rateLimits.map(r => ({ kind: r.kind, percentUsed: r.percentUsed, resetsAt: toMs(r.resetsAt) })),
+})
 
-// Runs one probe; a failure becomes data ({ error }) instead of breaking the hook.
-const attempt = async (probe: () => unknown): Promise<unknown> => {
-  try {
-    return await probe()
-  } catch (err) {
-    return { error: String(err) }
-  }
+// The log line of a subagent that has ended.
+const agentOutcome = (status: AgentStatus, row: AgentRow, durationMs: number, answer: string): string => {
+  if (status !== 'done') return status
+  const took = [`done ${fmtDuration(durationMs)}`, ...(row.costUsd === null ? [] : [fmtUsd(row.costUsd)])].join(' · ')
+  const said = shorten(redact(answer), 80)
+
+  return said === '' ? took : `${took} — ${said}`
 }
 
-// Appends an entry to a list that keeps only its last `max` entries.
-const keepLast = (list: unknown[], entry: unknown, max: number): void => {
-  list.push(entry)
-  list.splice(0, list.length - max)
-}
+const dash = (x: number | null, format: (n: number) => string): string => (x === null ? '—' : format(x))
 
-// Writes the results to disk. The caller drops a rejection: nothing here may break a timer.
-const flush = async ($: EngineInterface): Promise<void> => {
-  isWritePending = false
-  try {
-    await $.fs.write(RESULTS_PATH, JSON.stringify(results, null, 2))
-    lastWrite = new Date(await $.clock.now()).toTimeString().slice(0, 8)
-  } catch (err) {
-    lastWrite = `failed: ${String(err)}`
-  }
-  $.ui.invalidate('ui.render')
-}
+// The last turn on one line, in the display formats (temporary: view.tsx draws the real thing).
+const fmtTurnLine = (t: TurnStats): string =>
+  [
+    `elapsed ${fmtDuration(t.elapsedMs)}`,
+    `model ${fmtDuration(t.modelMs)}`,
+    `tools ${fmtDuration(t.toolMs)}`,
+    `ttft ${dash(t.ttftMs, fmtTtft)}`,
+    `response ${dash(t.responseRate, fmtRate)}`,
+    `whole ${dash(t.wholeTurnRate, fmtRate)}`,
+    `steps ${t.steps}`,
+    `${fmtTokens(t.tokensIn)}↑ ${fmtTokens(t.tokensOut)}↓`,
+    `cache ${dash(t.cachePct, pct => fmtPct(pct, 0))}`,
+    `cost ${dash(t.costUsd, fmtUsd)}`,
+  ].join(' · ')
 
-// Asks for a write 2 s after the first change; later changes ride along.
-const schedule = ($: EngineInterface): void => {
-  if (isWritePending) {
-    return
-  }
-  isWritePending = true
-  $.clock.after(WRITE_DELAY_MS, () => {
-    flush($).catch(() => undefined)
+// Runs the job in a dispatch of its own, so that the hook that asked for it returns at once; a failure is dropped.
+function inBackground($: EngineInterface, job: () => Promise<void>): void {
+  $.clock.after(1, () => {
+    job().catch(() => undefined)
   })
 }
 
-// Records the session cost the engine reports right now, in the ring of the loop the sample belongs to.
-const sampleCost = async ($: EngineInterface, event: string, agentId: string | null): Promise<void> => {
-  const t = await $.clock.now()
-  const usd = await attempt(async () => (await $.session.usage()).cost?.usd ?? null)
-  const isAgent = agentId !== null
-  keepLast(isAgent ? results.agentCost : results.cost, { t, event, agentId, usd }, 30)
-  results.counters[isAgent ? 'agentCost' : 'mainCost'] += 1
-  schedule($)
+// Puts a line on top of the log.
+async function addLog($: EngineInterface, at: number, who: string, text: string, kind: LogKind): Promise<void> {
+  await update($, logAtom, list => pushLog(list, { at, who, text, kind }))
 }
 
-// Opens the pane the way the real mod will and records whether the engine placed it.
-const probePane = async ($: EngineInterface, event: string, e: { surface?: string | null }): Promise<void> => {
-  const result = await attempt(() => $.ui.open({ id: PANE, title: 'Session' }))
-  const surfaces = await $.session.surfaces()
-  keepLast(results.pane, { event, surface: e.surface ?? null, surfaces, result }, 10)
+// Whose line it is: `main`, or the type of the subagent that ran.
+async function whoIs($: EngineInterface, agentId: string | undefined): Promise<string> {
+  if (agentId === undefined) return 'main'
+  const row = (await read($, agentsAtom))[agentId]
+
+  return row === undefined ? 'agent' : shortType(row.type)
 }
 
-// Calls the built-in WaitForMcpServers tool and times it. Runs from a timer, never inside a hook.
-const probeMcp = async ($: EngineInterface): Promise<void> => {
-  const startedAt = await $.clock.now()
+// Reads the usage figures with the context breakdown: the skill count and the MCP servers come from it.
+async function refreshUsage($: EngineInterface): Promise<void> {
+  const now = await $.session.usage({ breakdown: 'summary' })
+  const { breakdown } = now.context
+  // WaitForMcpServers is not there for a module: every server that has tools in the context counts as connected.
+  const names = [...new Set(breakdown?.mcpTools.map(tool => tool.serverName))]
+  // The window is the breakdown's: a compaction window under the model's shows up only there. Without one, the window
+  // held stands, and the model's is the last resort.
+  await update($, usageAtom, held => ({
+    ...held,
+    ...usageFields(now, breakdown?.rawMaxTokens ?? held.contextWindow ?? now.context.window),
+    skills: breakdown?.skills?.totalSkills,
+  }))
+  const servers = names.map(name => ({ name, status: 'connected' as const }))
+  await update($, mcpAtom, () => ({ servers, exact: false }))
+}
+
+// The branch; the short commit on a detached HEAD; null outside a git repository or when git fails.
+async function gitBranch($: EngineInterface, root: string): Promise<string | null> {
+  const init = { cwd: root, timeoutMs: 5000 }
   try {
-    const result = await $.tool.call({ tool: 'WaitForMcpServers' })
-    const ms = (await $.clock.now()) - startedAt
-    results.mcp = { ok: result.deny === undefined && result.isError !== true, ms, result }
-  } catch (err) {
-    results.mcp = { ok: false, ms: (await $.clock.now()) - startedAt, error: String(err) }
+    const named = await $.process.run(['git', 'branch', '--show-current'], init)
+    if (named.exitCode !== 0) return null
+    const branch = named.stdout.trim()
+    if (branch !== '') return branch
+    const head = await $.process.run(['git', 'rev-parse', '--short', 'HEAD'], init)
+
+    return head.exitCode === 0 ? head.stdout.trim() : null
+  } catch {
+    return null
   }
-  schedule($)
 }
 
-// The same record for a tool that succeeded and for one that failed.
-const recordPostTool = (
-  $: EngineInterface,
-  e: { tool_name: string; duration_ms?: number; agent_id?: string },
-): void => {
-  keepLast(
-    results.postTool,
-    {
-      keys: Object.keys(e),
-      tool_name: e.tool_name,
-      duration_ms: e.duration_ms ?? null,
-      agent_id: e.agent_id ?? null,
-    },
-    10,
-  )
-  schedule($)
+// Reads the project name (the folder of the session root) and its branch.
+async function refreshProject($: EngineInterface): Promise<void> {
+  const root = await $.session.root()
+  const branch = await gitBranch($, root)
+  await update($, projectAtom, () => ({ name: root.replace(/^.*[\\/]/, ''), branch }))
+}
+
+// Takes how a subagent ended from the engine's own list, for a row that is still running: our events missed it.
+async function syncAgents($: EngineInterface): Promise<void> {
+  const listed = await $.agent.list()
+  const now = await $.clock.now()
+  await update($, agentsAtom, rows => {
+    const synced = { ...rows }
+    for (const info of listed) {
+      const row = synced[info.id]
+      const status = LISTED_STATUS[info.status]
+      // An outcome that an event has recorded stands, whatever the list says later.
+      if (row?.status === 'running' && status !== undefined) synced[info.id] = { ...row, status, endedAt: now }
+    }
+
+    return synced
+  })
+}
+
+// Takes a cost reading, shows it as Total, and charges what is new since the last reading to the agent whose request
+// has just stopped. The main loop's share is not kept anywhere: Session is Total less the subagents. The engine books
+// a request as it stops, so a timer takes the reading, off the stream.
+function chargeCost($: EngineInterface, agentId: string | undefined): Promise<void> {
+  const charged = costQueue.then(() => readAndCharge($, agentId))
+  costQueue = charged.catch(() => undefined)
+
+  return charged
+}
+
+async function readAndCharge($: EngineInterface, agentId: string | undefined): Promise<void> {
+  const { cost } = await $.session.usage()
+  if (cost === undefined) return
+  // The first reading, and one under the last (the ledger started over), only set the baseline.
+  const charged =
+    lastUsd === null || cost.usd < lastUsd ? { delta: 0, lastUsd: cost.usd } : attributeCost(lastUsd, cost.usd)
+  lastUsd = charged.lastUsd
+  await update($, usageAtom, held => ({ ...held, costUsd: cost.usd }))
+  if (agentId === undefined || charged.delta === 0) return
+  await update($, agentsAtom, rows => {
+    const row = rows[agentId]
+
+    return row === undefined ? rows : { ...rows, [agentId]: addAgentCost(row, charged.delta) }
+  })
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    const ran = await next(e)
-    $.clock.after(MCP_PROBE_DELAY_MS, () => {
-      probeMcp($).catch(() => undefined)
+    const started = await next(e)
+    await $.command.register({ name: 'session-panel', description: 'Open or close the session stats pane' })
+    await chargeCost($, undefined) // the baseline, and the first Total
+    // The store holds the map this mod wrote itself.
+    const saved = await $.store.get('collapsed')
+    if (saved !== undefined) await update($, collapsedAtom, () => saved as Record<string, boolean>)
+    inBackground($, () => refreshUsage($))
+    inBackground($, () => refreshProject($))
+    let ticks = 0
+    $.clock.every(TICK_MS, () => {
+      ticks += 1
+      $.ui.invalidate('ui.render')
+      syncAgents($).catch(() => undefined)
+      if (ticks % 2 === 0) refreshUsage($).catch(() => undefined)
     })
-    results.engine = await attempt(async () => (await $.session.version()).version)
-    results.time = await attempt(() => ({
-      toTimeString: new Date().toTimeString(),
-      tzOffset: new Date().getTimezoneOffset(),
-      tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    }))
-    await probePane($, 'session.start', e)
-    results.breakdown = await attempt(async () => {
-      const breakdown = (await $.session.usage({ breakdown: 'summary' })).context.breakdown ?? null
-      const isLarge = JSON.stringify(breakdown).length > 2000
+    if ((await $.session.surfaces()).includes('desktop')) await $.ui.open({ id: PANE, title: 'Session' })
 
-      return isLarge ? { skills: breakdown?.skills, mcpTools: breakdown?.mcpTools } : breakdown
-    })
-    schedule($)
-
-    return ran
+    return started
   })
 
   on('session.attach', async ($, e, next) => {
-    const ran = await next(e)
-    await probePane($, 'session.attach', e)
-    schedule($)
+    const attached = await next(e)
+    if (e.surface === 'desktop') await $.ui.open({ id: PANE, title: 'Session' })
 
-    return ran
+    return attached
   })
 
-  on('turn.start', async ($, e, next) => {
-    const ran = await next(e)
-    await sampleCost($, 'turn.start', null)
-
-    return ran
-  })
-
-  // One model request. Records when the first chunk of each kind arrives, as ms after tStart, all via
-  // $.clock.now(): at most 7 awaits per step (tStart, then the first chunk of each of the 6 kinds).
-  // Chunks pass on unchanged.
-  on('turn.step', async function* ($, e, next) {
-    const tStart = await $.clock.now()
-    const kinds: string[] = []
-    const kindCounts: Record<string, number> = {}
-    const firstAt: Record<string, number> = {}
-
-    for await (const chunk of next(e)) {
-      if (kinds.length < 15) {
-        kinds.push(chunk.kind)
-      }
-      kindCounts[chunk.kind] = (kindCounts[chunk.kind] ?? 0) + 1
-      if (firstAt[chunk.kind] === undefined) {
-        firstAt[chunk.kind] = (await $.clock.now()) - tStart
-      }
-      if (chunk.kind === 'stop') {
-        const { agentId } = e
-        const isAgent = agentId !== undefined
-        const { usage } = chunk
-        keepLast(
-          isAgent ? results.agentSteps : results.steps,
-          {
-            keys: Object.keys(e),
-            agentId: agentId ?? null,
-            turnId: e.turnId,
-            model: e.model,
-            kinds: [...kinds],
-            kindCounts: { ...kindCounts },
-            // tStart is the clock itself; every t* after it is ms since tStart.
-            tStart,
-            tFirstAny: Math.min(...Object.values(firstAt)),
-            tFirstThinking: firstAt.thinking ?? null,
-            tFirstText: firstAt.text ?? null,
-            tFirstTool: firstAt.tool ?? null,
-            tFirstInput: firstAt.input ?? null,
-            tEnd: firstAt.stop ?? null,
-            outputTokens: usage?.output_tokens ?? null,
-            usage,
-          },
-          12,
-        )
-        results.counters[isAgent ? 'agentSteps' : 'mainSteps'] += 1
-        // A subagent step: sample the cost now and again later. Timers keep the stream free of awaits.
-        if (isAgent) {
-          $.clock.after(1, () => {
-            sampleCost($, 'agent-stop', agentId).catch(() => undefined)
-          })
-          $.clock.after(1500, () => {
-            sampleCost($, 'agent-stop+1.5s', agentId).catch(() => undefined)
-          })
-        }
-        schedule($)
-      }
-
-      yield chunk
+  on('session.end', async ($, e, next) => {
+    // A /clear starts the conversation over. The module, its timers and the pane carry on; the ledger starts over.
+    if (e.reason === 'clear') {
+      lastUsd = null
+      await update($, turnAtom, () => turnAtom.initial)
+      await update($, lastTurnAtom, () => lastTurnAtom.initial)
+      await update($, agentsAtom, () => agentsAtom.initial)
+      await update($, logAtom, () => logAtom.initial)
     }
+
+    return next(e)
   })
 
-  on('turn.complete', async ($, e, next) => {
-    const ran = await next(e)
-    const at = await $.clock.now()
-    await sampleCost($, 'turn.complete', e.agentId ?? null)
-    keepLast(results.agentList, { at, agentId: e.agentId ?? null, list: await attempt(() => $.agent.list()) }, 3)
-    if (e.agentId !== undefined) {
-      keepLast(
-        results.agentComplete,
-        {
-          agentId: e.agentId,
-          at,
-          keys: Object.keys(e),
-          reason: e.reason,
-          isAborted: e.isAborted,
-          durationMs: e.durationMs,
-          usage: e.usage ?? null,
-          answerType: typeof e.answer,
-        },
-        5,
-      )
-    }
-    schedule($)
+  // A pane that is open but waits undrawn is not shown: asking for it again places it.
+  on('command.run', { command: 'session-panel' }, async $ => {
+    if ((await $.ui.panes()).some(pane => pane.id === PANE && pane.isPlaced)) {
+      await $.ui.close({ id: PANE })
 
-    return ran
+      return { text: 'Session pane closed.' }
+    }
+    const opened = await $.ui.open({ id: PANE, title: 'Session' })
+
+    return { text: opened.isPlaced ? 'Session pane opened.' : `Session pane is not shown: ${opened.reason}` }
   })
 
   on('session.measure', async ($, e, next) => {
-    const ran = await next(e)
-    keepLast(results.measure, { changed: e.changed, keys: Object.keys(e) }, 10)
-    await sampleCost($, 'session.measure', null)
+    const measured = await next(e)
+    // A measure brings the model's window only: it stands in when none is held, and never replaces the breakdown's.
+    await update($, usageAtom, held => ({ ...held, ...usageFields(e, held.contextWindow ?? e.context.window) }))
 
-    return ran
+    return measured
   })
 
-  on('agent.spawn', async ($, e, next) => {
-    const ran = await next(e)
-    keepLast(results.spawn, { keys: Object.keys(e), result: ran }, 5)
-    schedule($)
+  on('turn.start', async ($, e, next) => {
+    const started = await next(e)
+    const now = await $.clock.now()
+    const { cost } = await $.session.usage()
+    await update($, turnAtom, () => ({
+      turnId: e.turnId, startedAt: now, costAtStart: cost?.usd ?? null, steps: [], toolIntervals: [],
+    }))
+    // A turn the engine started on its own opens with a tag (<task-notification>), a person's prompt does not. A turn
+    // with no text (a continuation) is no line of the log.
+    if (e.text.trim() !== '') {
+      const tag = /^<([^\s>/]+)/.exec(e.text)?.[1]
+      await addLog($, now, tag === undefined ? 'you' : 'engine', tag ?? shorten(redact(e.text), 70), 'info')
+    }
 
-    return ran
+    return started
   })
 
-  // Times every tool call as this hook sees it. classic.PostToolUse(Failure) did not fire in a live run.
+  // One model request, main loop or subagent. The chunks pass on as they are; only the first chunk and the stop are
+  // timed, so the stream waits on at most three clock reads.
+  on('turn.step', async function* ($, e, next) {
+    const tStart = await $.clock.now()
+    let tFirst: number | null = null
+    let tEnd: number | null = null
+    let usage: Usage = {}
+    let hasTool = false
+    let hasText = false
+    const stream = next(e)
+    for await (const chunk of stream) {
+      // The first chunk of any kind is the start of the response, the engine's own chunks included.
+      if (tFirst === null) tFirst = await $.clock.now()
+      if (chunk.kind === 'tool') hasTool = true
+      if (chunk.kind === 'text') hasText = true
+      if (chunk.kind === 'stop') {
+        tEnd = await $.clock.now()
+        usage = chunk.usage ?? {}
+        $.clock.after(1, () => {
+          chargeCost($, e.agentId).catch(() => undefined)
+        })
+      }
+      yield chunk
+    }
+    if (tEnd !== null && e.agentId === undefined) {
+      const step: StepTiming = { tStart, tFirst, tEnd, usage, hasTool, hasText }
+      await update($, turnAtom, acc => acc && { ...acc, steps: [...acc.steps, step] })
+    }
+
+    return await stream.result
+  })
+
   on('tool.call', async ($, e, next) => {
     const t0 = await $.clock.now()
     const ran = await next(e)
     const t1 = await $.clock.now()
-    const outcome = ran.deny !== undefined ? 'deny' : ran.isError === true ? 'error' : 'ok'
-    keepLast(
-      e.agentId === undefined ? results.toolCalls : results.agentToolCalls,
-      { tool: e.tool, agentId: e.agentId ?? null, ms: t1 - t0, outcome },
-      20,
-    )
-    schedule($)
+    if (e.agentId === undefined) {
+      const interval: Interval = [t0, t1]
+      await update($, turnAtom, acc => acc && { ...acc, toolIntervals: [...acc.toolIntervals, interval] })
+    }
+    const isFailed = ran.deny !== undefined || ran.isError === true
+    const outcome = ran.deny !== undefined ? ' denied' : isFailed ? ' ✗' : ` ✓ ${fmtDuration(t1 - t0)}`
+    const label = shorten(redact(toolLabel(e.tool, e, await $.session.root())), 64 - outcome.length)
+    await addLog($, t1, await whoIs($, e.agentId), `${label}${outcome}`, isFailed ? 'error' : 'ok')
 
     return ran
   })
 
-  on('classic.PostToolUse', ($, e, next) => {
-    recordPostTool($, e)
+  on('turn.complete', async ($, e, next) => {
+    const done = await next(e)
+    if (e.agentId === undefined) {
+      const acc = await read($, turnAtom)
+      if (acc !== null) {
+        const { cost } = await $.session.usage()
+        await update($, lastTurnAtom, () => computeTurnStats(acc, e.durationMs, e.usage, cost?.usd ?? null))
+        await update($, turnAtom, () => null)
+      }
+      inBackground($, () => refreshProject($))
 
-    return next(e)
+      return done
+    }
+    const { agentId } = e
+    const now = await $.clock.now()
+    // The agent's last request may not be charged yet: a reading in line with the others settles that before the row
+    // is read.
+    await chargeCost($, agentId)
+    const status: AgentStatus = e.isAborted ? 'stopped' : e.reason === 'answer' ? 'done' : 'failed'
+    const rows = await update($, agentsAtom, held => {
+      const row = held[agentId]
+
+      return row === undefined ? held : { ...held, [agentId]: { ...row, status, endedAt: now } }
+    })
+    const row = rows[agentId]
+    if (row !== undefined) {
+      const text = agentOutcome(status, row, e.durationMs, e.answer)
+      await addLog($, now, shortType(row.type), text, status === 'done' ? 'ok' : 'error')
+    }
+
+    return done
   })
 
-  on('classic.PostToolUseFailure', ($, e, next) => {
-    recordPostTool($, e)
+  on('agent.spawn', async ($, e, next) => {
+    const spawned = await next(e)
+    if (spawned.agentId !== undefined) {
+      const { agentId } = spawned
+      const now = await $.clock.now()
+      const type = e.subagentType ?? e.name ?? 'agent'
+      const row: AgentRow = {
+        id: agentId, description: e.description, type, model: spawned.model, status: 'running', startedAt: now,
+        endedAt: null, costUsd: null,
+      }
+      await update($, agentsAtom, rows => ({ ...rows, [agentId]: row }))
+      await addLog($, now, 'main', `spawned · ${type}: ${e.description}`, 'info')
+    }
 
-    return next(e)
+    return spawned
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, ($, e) => {
+  on('session.compact', async ($, e, next) => {
+    const compacted = await next(e)
+    // Only a compaction of the main conversation that stands: not a skip, not a subagent's, not a precompute.
+    if (
+      e.agentId === undefined && compacted.skip === undefined && compacted.tokensBefore !== undefined &&
+      compacted.tokensAfter !== undefined
+    ) {
+      const text = `compacted ${fmtTokens(compacted.tokensBefore)} → ${fmtTokens(compacted.tokensAfter)}`
+      await addLog($, await $.clock.now(), 'main', text, 'info')
+      inBackground($, () => refreshUsage($))
+    }
+
+    return compacted
+  })
+
+  on('classic.CwdChanged', async ($, e, next) => {
+    const changed = await next(e)
+    inBackground($, () => refreshProject($))
+
+    return changed
+  })
+
+  // Temporary view: one line per atom, then the last turn in the display formats.
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const c = results.counters
+    const lastTurn = await read($, lastTurnAtom)
+    const dump = {
+      usage: await read($, usageAtom),
+      project: await read($, projectAtom),
+      mcp: await read($, mcpAtom),
+      turn: await read($, turnAtom),
+      lastTurn,
+      agents: await read($, agentsAtom),
+      log: await read($, logAtom),
+      collapsed: await read($, collapsedAtom),
+    }
 
     return (
       <Box flexDirection="column">
-        <Text>{`spike: ${c.mainSteps + c.agentSteps} steps, ${c.mainCost + c.agentCost} cost samples`}</Text>
-        <Text dimColor>{`last write: ${lastWrite}`}</Text>
+        {Object.entries(dump).map(([key, value]) => (
+          <Text>{shorten(`${key}: ${JSON.stringify(value)}`, 200)}</Text>
+        ))}
+        {lastTurn !== null && <Text>{`last turn: ${fmtTurnLine(lastTurn)}`}</Text>}
       </Box>
     )
   })
