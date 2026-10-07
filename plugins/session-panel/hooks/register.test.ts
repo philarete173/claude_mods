@@ -18,9 +18,6 @@ const mirrorsStats: [
 const ROOT = '/work/online_shop'
 const START = { cwd: ROOT, surface: 'desktop', isInteractive: true } as const
 const RUN = { args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } } as const
-const PANE_PROPS = {
-  title: 'Session', isFocused: false, bodyColumns: 40, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {},
-} as const
 // The engine refuses a compaction with no messages, in the input and in the result.
 const MESSAGES: SessionMessage[] = [{ role: 'user', text: 'hi', toolUses: [] }]
 const PANE_UP: UiPane = { id: 'session-panel', title: 'Session', isShown: true, isFocused: false, isPlaced: true }
@@ -109,6 +106,7 @@ type World = {
   spawns: number
   breakdowns: number // how many usage() calls asked for the context breakdown
   usageLag: number // how long usage() takes, in mock ms
+  usageFails: boolean // usage() rejects
   tokens: number | undefined // context.tokens of usage(): none before the first response of the window
   rawMaxTokens: number | undefined // the window the breakdown measures against; undefined: no breakdown in usage()
   usageInFlight: number
@@ -136,6 +134,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
     spawns: 0,
     breakdowns: 0,
     usageLag: 0,
+    usageFails: false,
     tokens: undefined,
     rawMaxTokens: 1_000_000,
     usageInFlight: 0,
@@ -194,6 +193,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
     w.maxUsageInFlight = Math.max(w.maxUsageInFlight, w.usageInFlight)
     if (w.usageLag > 0) await clock.sleep(w.usageLag)
     w.usageInFlight -= 1
+    if (w.usageFails) throw new Error('usage is not available')
     if (e.breakdown !== undefined) w.breakdowns += 1
     const breakdown = {
       rawMaxTokens: w.rawMaxTokens,
@@ -202,6 +202,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
         { name: 'mcp__codebase-memory__search_graph', serverName: 'codebase-memory', tokens: 1, isLoaded: true },
         { name: 'mcp__codebase-memory__trace_path', serverName: 'codebase-memory', tokens: 1, isLoaded: true },
         { name: 'mcp__issue-hub__search', serverName: 'issue-hub', tokens: 1, isLoaded: true },
+        { name: 'mcp__ccd_session__mark', serverName: 'ccd_session', tokens: 1, isLoaded: true },
       ],
     }
 
@@ -308,6 +309,22 @@ test('session.start registers the command and opens the pane when a desktop is a
   expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session' }])
 })
 
+test('a cost reading that fails stops neither the timer, the store read nor the opening of the pane', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock, { collapsed: { log: true } })
+    w.usageFails = true
+
+    await $.session.start(START)
+    await clock.advance(30_000)
+
+    expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session' }])
+    expect(w.invalidated).toEqual(['ui.render']) // the timer is running
+    const state = await readState($)
+    expect(state.collapsed).toEqual({ log: true })
+    expect(state.project).toEqual({ name: 'online_shop', branch: 'master' })
+  })
+
 test('without a desktop the pane waits for the command; an attaching desktop opens it', async ($, on) => {
   const w = bottom(on, mock.clock(on))
   w.surfaces = ['terminal']
@@ -328,19 +345,6 @@ test('the collapsed map is loaded from the store on start', WITH_READER, async (
   await $.session.start(START)
 
   expect((await readState($)).collapsed).toEqual({ log: true })
-})
-
-test('the pane draws lastTurn on every surface', WITH_READER, async ($, on) => {
-  bottom(on, mock.clock(on))
-  await $.session.start(START)
-
-  for (const surface of ['desktop', 'terminal'] as const) {
-    const ui = await $.ui.mount({
-      plugin: 'session-panel', surface, component: 'Pane', requestId: 'session-panel', props: PANE_PROPS,
-    })
-    expect(await ui.find({ type: 'Text', text: /^lastTurn: / })).toBeDefined()
-    await ui.unmount()
-  }
 })
 
 test('the command opens the pane, closes it when it is shown, and says why when it is not placed', async ($, on) => {
@@ -379,6 +383,7 @@ test('start-up reads project, branch, skills and MCP servers in the background',
   await clock.advance(1)
   const state = await readState($)
   expect(state.project).toEqual({ name: 'online_shop', branch: 'master' })
+  // The app's own server (ccd_session) is not listed.
   expect(state.mcp).toEqual({
     servers: [{ name: 'codebase-memory', status: 'connected' }, { name: 'issue-hub', status: 'connected' }],
     exact: false,
@@ -511,6 +516,22 @@ test('without a breakdown the window is the model\'s and the percent is worked o
     })
     expect(await shown()).toMatchObject({ contextTokens: 250_000, contextWindow: 1_000_000, contextPct: 25 })
   })
+
+test('a window of 0 gives no percent: the context is unread, never NaN or Infinity', WITH_READER, async ($, on) => {
+  bottom(on, mock.clock(on))
+  const shown = async () => (await readState($)).usage
+  // The model's window is all there is before a breakdown, and here it reads 0.
+  const measure = (tokens: number) =>
+    $.session.measure({ context: { window: 0, tokens, percent: 0 }, rateLimits: [], changed: ['context'] })
+
+  // Tokens over a window of 0 come to Infinity, none over none to NaN: neither is written down (the state is JSON, and
+  // would keep either as null).
+  await measure(100)
+  expect(await shown()).toMatchObject({ contextTokens: 100, contextWindow: 0 })
+  expect((await shown()).contextPct).toBeUndefined()
+  await measure(0)
+  expect((await shown()).contextPct).toBeUndefined()
+})
 
 test('a main turn ends as lastTurn: step timing, tool time, cost and log; everything passes through', SLOW_READER,
   async ($, on) => {
@@ -731,7 +752,7 @@ test('a subagent: its row, the cost of each step by the cost.usd delta, its outc
   expect(state.turn?.turnId).toBe('t1')
 })
 
-test('an aborted subagent is stopped and one that ended on an error is failed', WITH_READER, async ($, on) => {
+test('a stopped subagent is a note in the log, a failed one is an error', WITH_READER, async ($, on) => {
   bottom(on, mock.clock(on))
   await $.session.start(START)
   await $.agent.spawn(SPAWN)
@@ -745,8 +766,24 @@ test('an aborted subagent is stopped and one that ended on an error is failed', 
   expect(state.agents.a2?.status).toBe('failed')
   expect(state.log.slice(0, 2).map(entry => [entry.who, entry.text, entry.kind])).toEqual([
     ['engineer', 'failed', 'error'],
-    ['engineer', 'stopped', 'error'],
+    ['engineer', 'stopped', 'info'], // somebody stopped it: that is news, not an error
   ])
+})
+
+test('a subagent that ends while the cost cannot be read is still logged and closed', WITH_READER, async ($, on) => {
+  const w = bottom(on, mock.clock(on, { now: 1_000_000 }))
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  w.usageFails = true
+
+  const completed = await $.turn.complete({
+    answer: 'ok', durationMs: 5000, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer',
+  })
+
+  expect(completed).toEqual({ text: 'ok' })
+  const state = await readState($)
+  expect(state.agents.a1?.status).toBe('done')
+  expect(state.log[0]).toMatchObject({ who: 'engineer', text: 'done 5.0s — ok', kind: 'ok' })
 })
 
 test('a subagent that ends right after its last step is logged with that step charged', SLOW_READER, async ($, on) => {
@@ -895,6 +932,7 @@ test('the first cost reading, and one under the last, only set the baseline', TI
 test('a /clear starts the panel over, and the next cost reading is a baseline', SLOW_READER, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = bottom(on, clock)
+  w.tokens = 90_000 // a response has filled the window: 9% of the 1M window
   await $.session.start(START)
   await clock.advance(1)
   await $.turn.start({ text: 'go', turnId: 't1' })
@@ -909,6 +947,7 @@ test('a /clear starts the panel over, and the next cost reading is a baseline', 
   expect(before.turn?.turnId).toBe('t2')
   expect(Object.keys(before.agents)).toEqual(['a1'])
   expect(before.log.length).toBeGreaterThan(0)
+  expect(before.usage).toMatchObject({ contextTokens: 90_000, contextPct: 9 })
 
   // Any other end of the session leaves the panel as it is.
   expect(await $.session.end({ reason: 'other', sessionId: 's1', resume: { id: 's1' } })).toEqual({ sessionId: 's1' })
@@ -918,7 +957,12 @@ test('a /clear starts the panel over, and the next cost reading is a baseline', 
   const after = await readState($)
   expect([after.turn, after.lastTurn, after.agents, after.log]).toEqual([null, null, {}, []])
   expect(after.project).toEqual(before.project)
-  expect(after.usage).toEqual(before.usage)
+  // The context reads empty until the next response; the window, the cost, the limits and the skills are the session's.
+  const { contextTokens, contextPct, ...kept } = before.usage
+  expect([contextTokens, contextPct]).toEqual([90_000, 9])
+  expect(after.usage).toEqual(kept)
+  expect(after.usage.contextTokens).toBeUndefined()
+  expect(after.usage.contextPct).toBeUndefined()
   expect(w.closed).toEqual([])
 
   // The new session's ledger may start above the old reading: its first reading is a baseline all the same.

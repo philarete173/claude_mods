@@ -186,8 +186,9 @@ test('pushLog', () => {
 })
 
 test('shortType', () => {
-  expect(shortType('plugin:code-reviewer')).toBe('code-revie')
+  expect(shortType('plugin:code-reviewer')).toBe('code-reviewer')
   expect(shortType('engineer')).toBe('engineer')
+  expect(shortType('feature-dev:a-very-long-agent-type')).toBe('a-very-long-ag')
 })
 
 test('shorten', () => {

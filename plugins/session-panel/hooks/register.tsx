@@ -1,16 +1,19 @@
-// Wiring of the session-panel mod: engine events fill the `$.state` atoms and a command toggles the pane.
-// Every hook only observes: it returns what next(e) returned (the command hook answers its own command). Until
-// view.tsx takes over, the pane is a text dump of the atoms.
+// Wiring of the session-panel mod: engine events fill the `$.state` atoms, a command toggles the pane, and view.tsx
+// draws the pane from the atoms. Every hook only observes: it returns what next(e) returned (the command hook answers
+// its own command).
 // `claude plugin validate` follows `$` only into top-level functions of this file, so every helper that takes `$`
-// sits here. The atoms are declared here too: read() and update() refuse a reference written in another file.
+// sits here, the presses of the pane included. The atoms are declared here too: read() and update() refuse a
+// reference written in another file.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionContextUsage, SessionCost, SessionRateLimit } from 'claude-code'
 
 import {
-  addAgentCost, attributeCost, computeTurnStats, fmtDuration, fmtPct, fmtRate, fmtTokens, fmtTtft, fmtUsd, pushLog,
-  redact, shortType, shorten, toolLabel,
+  addAgentCost, attributeCost, computeTurnStats, fmtDuration, fmtTokens, fmtUsd, pushLog, redact, shortType, shorten,
+  toolLabel,
 } from './stats'
-import type { AgentRow, AgentStatus, Interval, LogKind, StepTiming, TurnStats, Usage } from './stats'
+import type { AgentRow, AgentStatus, Interval, LogKind, StepTiming, Usage } from './stats'
+import { renderPane } from './view'
+import type { PaneData, SectionId } from './view'
 
 const usageAtom = atom({ plugin: 'session-panel', key: 'usage' } as const, { rateLimits: [] })
 const projectAtom = atom({ plugin: 'session-panel', key: 'project' } as const, { name: '', branch: null })
@@ -41,6 +44,14 @@ const toMs = (iso: string | undefined): number | undefined => {
   return Number.isNaN(ms) ? undefined : ms
 }
 
+// The share of `window` that the tokens fill, in percent; undefined when there are no tokens, or when the sum does not
+// come to a number: a window of 0 makes it Infinity or NaN, which the state would keep as null and the pane not draw.
+const percentOf = (tokens: number | undefined, window: number): number | undefined => {
+  const pct = tokens === undefined ? Number.NaN : (tokens * 100) / window
+
+  return Number.isFinite(pct) ? pct : undefined
+}
+
 // The figures of session.measure and of usage(), as the `usage` value keeps them. The percent is worked out here, of
 // `window`: the engine's own is of the model's window, not of a smaller compaction window.
 const usageFields = (
@@ -49,7 +60,7 @@ const usageFields = (
 ) => ({
   contextTokens: from.context.tokens,
   contextWindow: window,
-  contextPct: from.context.tokens === undefined ? undefined : (from.context.tokens * 100) / window,
+  contextPct: percentOf(from.context.tokens, window),
   costUsd: from.cost?.usd,
   rateLimits: from.rateLimits.map(r => ({ kind: r.kind, percentUsed: r.percentUsed, resetsAt: toMs(r.resetsAt) })),
 })
@@ -62,23 +73,6 @@ const agentOutcome = (status: AgentStatus, row: AgentRow, durationMs: number, an
 
   return said === '' ? took : `${took} — ${said}`
 }
-
-const dash = (x: number | null, format: (n: number) => string): string => (x === null ? '—' : format(x))
-
-// The last turn on one line, in the display formats (temporary: view.tsx draws the real thing).
-const fmtTurnLine = (t: TurnStats): string =>
-  [
-    `elapsed ${fmtDuration(t.elapsedMs)}`,
-    `model ${fmtDuration(t.modelMs)}`,
-    `tools ${fmtDuration(t.toolMs)}`,
-    `ttft ${dash(t.ttftMs, fmtTtft)}`,
-    `response ${dash(t.responseRate, fmtRate)}`,
-    `whole ${dash(t.wholeTurnRate, fmtRate)}`,
-    `steps ${t.steps}`,
-    `${fmtTokens(t.tokensIn)}↑ ${fmtTokens(t.tokensOut)}↓`,
-    `cache ${dash(t.cachePct, pct => fmtPct(pct, 0))}`,
-    `cost ${dash(t.costUsd, fmtUsd)}`,
-  ].join(' · ')
 
 // Runs the job in a dispatch of its own, so that the hook that asked for it returns at once; a failure is dropped.
 function inBackground($: EngineInterface, job: () => Promise<void>): void {
@@ -100,12 +94,19 @@ async function whoIs($: EngineInterface, agentId: string | undefined): Promise<s
   return row === undefined ? 'agent' : shortType(row.type)
 }
 
+// Folds or unfolds a section of the pane, and keeps the map in the store, where the next session finds it.
+async function toggleSection($: EngineInterface, id: SectionId): Promise<void> {
+  const folded = await update($, collapsedAtom, held => ({ ...held, [id]: held[id] !== true }))
+  await $.store.set('collapsed', folded)
+}
+
 // Reads the usage figures with the context breakdown: the skill count and the MCP servers come from it.
 async function refreshUsage($: EngineInterface): Promise<void> {
   const now = await $.session.usage({ breakdown: 'summary' })
   const { breakdown } = now.context
-  // WaitForMcpServers is not there for a module: every server that has tools in the context counts as connected.
-  const names = [...new Set(breakdown?.mcpTools.map(tool => tool.serverName))]
+  // WaitForMcpServers is not there for a module: every server that has tools in the context counts as connected. The
+  // desktop app's own servers (`ccd_…`) are not the person's: they are neither listed nor counted.
+  const names = [...new Set(breakdown?.mcpTools.map(tool => tool.serverName))].filter(name => !name.startsWith('ccd_'))
   // The window is the breakdown's: a compaction window under the model's shows up only there. Without one, the window
   // held stands, and the model's is the last resort.
   await update($, usageAtom, held => ({
@@ -187,7 +188,8 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     await $.command.register({ name: 'session-panel', description: 'Open or close the session stats pane' })
-    await chargeCost($, undefined) // the baseline, and the first Total
+    // The baseline, and the first Total. A reading that fails must not stop the timer or the opening of the pane.
+    await chargeCost($, undefined).catch(() => undefined)
     // The store holds the map this mod wrote itself.
     const saved = await $.store.get('collapsed')
     if (saved !== undefined) await update($, collapsedAtom, () => saved as Record<string, boolean>)
@@ -213,13 +215,15 @@ export const register: Register = on => {
   })
 
   on('session.end', async ($, e, next) => {
-    // A /clear starts the conversation over. The module, its timers and the pane carry on; the ledger starts over.
+    // A /clear starts the conversation over. The module, its timers and the pane carry on; the ledger starts over, and
+    // the context reads empty until the next response (the window, the cost and the limits are the session's still).
     if (e.reason === 'clear') {
       lastUsd = null
       await update($, turnAtom, () => turnAtom.initial)
       await update($, lastTurnAtom, () => lastTurnAtom.initial)
       await update($, agentsAtom, () => agentsAtom.initial)
       await update($, logAtom, () => logAtom.initial)
+      await update($, usageAtom, held => ({ ...held, contextTokens: undefined, contextPct: undefined }))
     }
 
     return next(e)
@@ -326,8 +330,8 @@ export const register: Register = on => {
     const { agentId } = e
     const now = await $.clock.now()
     // The agent's last request may not be charged yet: a reading in line with the others settles that before the row
-    // is read.
-    await chargeCost($, agentId)
+    // is read. A reading that fails leaves the row as it is: the outcome is logged all the same.
+    await chargeCost($, agentId).catch(() => undefined)
     const status: AgentStatus = e.isAborted ? 'stopped' : e.reason === 'answer' ? 'done' : 'failed'
     const rows = await update($, agentsAtom, held => {
       const row = held[agentId]
@@ -337,7 +341,9 @@ export const register: Register = on => {
     const row = rows[agentId]
     if (row !== undefined) {
       const text = agentOutcome(status, row, e.durationMs, e.answer)
-      await addLog($, now, shortType(row.type), text, status === 'done' ? 'ok' : 'error')
+      // A subagent that failed is an error in the log; one that was stopped is news, not a fault.
+      const kind: LogKind = status === 'done' ? 'ok' : status === 'stopped' ? 'info' : 'error'
+      await addLog($, now, shortType(row.type), text, kind)
     }
 
     return done
@@ -382,28 +388,27 @@ export const register: Register = on => {
     return changed
   })
 
-  // Temporary view: one line per atom, then the last turn in the display formats.
+  // The pane. Reading the atoms here subscribes it: a write to one draws it again. The view gets plain values and the
+  // elements of the surface, never `$`; a press on a header runs toggleSection, which is where `$` goes. The press does
+  // not wait for it, and a write that fails (the store) is not a failed press: the section has folded all the same.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
-    const lastTurn = await read($, lastTurnAtom)
-    const dump = {
+    const els = $.ui.resolve(e)
+    const data: PaneData = {
       usage: await read($, usageAtom),
       project: await read($, projectAtom),
       mcp: await read($, mcpAtom),
-      turn: await read($, turnAtom),
-      lastTurn,
+      lastTurn: await read($, lastTurnAtom),
       agents: await read($, agentsAtom),
       log: await read($, logAtom),
       collapsed: await read($, collapsedAtom),
+      now: await $.clock.now(),
+      surface: e.surface,
     }
 
-    return (
-      <Box flexDirection="column">
-        {Object.entries(dump).map(([key, value]) => (
-          <Text>{shorten(`${key}: ${JSON.stringify(value)}`, 200)}</Text>
-        ))}
-        {lastTurn !== null && <Text>{`last turn: ${fmtTurnLine(lastTurn)}`}</Text>}
-      </Box>
-    )
+    return renderPane(els, data, e.props, {
+      onToggle: id => {
+        toggleSection($, id).catch(() => undefined)
+      },
+    })
   })
 }
