@@ -267,7 +267,7 @@ const headers = async (ui: Pane): Promise<string[]> =>
 const summaries = async (ui: Pane): Promise<Record<string, unknown>> =>
   Object.fromEntries(headerRows(await ui.drawn()).map(header => [header.id, header.summary]))
 
-// The meters of the pane: the Svg elements that say a percent. The icons and the rules say nothing (alt is empty).
+// The meters of the pane: the Svg elements that say a percent. The icons and the rules carry the label of their row.
 const meters = async (ui: Pane) => (await ui.findAll({ type: 'Svg' })).filter(el => /%$/.test(String(el.props.alt)))
 
 const STATUSES: string[] = ['running', 'done', 'failed', 'stopped']
@@ -436,6 +436,10 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
       expect(shown, surface).toContain('📁 online_shop')
       expect(shown, surface).toContain('🌿 master')
     }
+    // The desktop drops an image whose alt is empty: every Svg of the mounted pane has one.
+    const images = await ui.findAll({ type: 'Svg' })
+    expect(images.every(el => typeof el.props.alt === 'string' && el.props.alt.trim() !== ''), surface).toBe(true)
+    expect(images.length > 0, surface).toBe(surface === 'desktop')
     // The sections come in the mockup's order, all unfolded, each with its summary beside it.
     expect(await headers(ui)).toEqual([
       '▾ Usage', '▾ Turn stats', '▾ Subagents', '▾ MCP', '▾ Context sources', '▾ Log',
@@ -481,7 +485,9 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
       ['●\u00a0', 'success'], ['●\u00a0', 'success'],
     ])
     for (const name of ['codebase-memory', 'issue-hub']) {
-      expect((await ui.find({ type: 'Text', text: name }))?.props.color, `${surface}: ${name}`).toBeUndefined()
+      const server = await ui.find({ type: 'Text', text: name })
+      expect(server, `${surface}: ${name}`).toBeDefined()
+      expect(server?.props.color, `${surface}: ${name}`).toBeUndefined()
     }
     expect(await has(ui, 'ccd_'), `${surface}: ccd_`).toBe(false)
     for (const text of ['Skills', /^52$/, 'MCP servers']) {
@@ -697,7 +703,9 @@ test('the percent, the meter and the ring turn amber from 80% and red from 95%',
       [950_000, '95.0%', 'error', '#e5484d'],
     ] as const) {
       await measure($, tokens, limits)
-      expect((await ui.find({ type: 'Text', text }))?.props.color, `${surface} ${text}`).toBe(color)
+      const percent = await ui.find({ type: 'Text', text })
+      expect(percent, `${surface} ${text}`).toBeDefined()
+      expect(percent?.props.color, `${surface} ${text}`).toBe(color)
       if (surface === 'desktop') {
         const [context] = await meters(ui)
         expect(String(context?.props.source), `${surface} ${text}`).toContain(`fill="${fill}"/></svg>`)
@@ -768,9 +776,9 @@ test('a turn of one tool step hides Response and Steps; the cache is green from 
     })
     for (const surface of SURFACES) {
       const ui = await mountPane($, surface)
-      expect((await ui.find({ type: 'Text', text: new RegExp(`^${text}$`) }))?.props.color, `${surface} ${text}`).toBe(
-        color,
-      )
+      const cache = await ui.find({ type: 'Text', text: new RegExp(`^${text}$`) })
+      expect(cache, `${surface} ${text}`).toBeDefined()
+      expect(cache?.props.color, `${surface} ${text}`).toBe(color)
       await ui.unmount()
     }
   }
@@ -937,7 +945,6 @@ test('a press folds the section and does not fail when the store cannot be writt
   }
 })
 
-
 // ---- The structure of the tree, drawn without the engine ----
 
 const isType = (text: string): boolean => text.startsWith('@')
@@ -966,15 +973,40 @@ test('no row can outgrow the pane: every cell is fixed or flexible, and cut text
       }
     }
   }
+})
 
-  // The check has teeth: v1's row, whose cells could not shrink below their text, is found.
-  const text: Node = { type: 'Text', props: { wrap: 'truncate' }, children: ['a long description'] }
-  const v1: Node = {
-    type: 'Box',
-    props: { flexDirection: 'row' },
-    children: [{ type: 'Box', props: { flexShrink: 1 }, children: [text] }],
-  }
-  expect(rowProblems(v1)).toHaveLength(2)
+test('the row check reports each way a row can outgrow the pane, and passes the cells that cannot', () => {
+  const box = (props: Record<string, unknown>, ...children: Node[]): Node => ({ type: 'Box', props, children })
+  const cut = (text: string): Node => ({ type: 'Text', props: { wrap: 'truncate' }, children: [text] })
+  const dim = (text: string): Node => ({ type: 'Text', props: { dimColor: true }, children: [text] })
+  const image: Node = { type: 'Svg', props: { alt: 'rule', width: 1600, height: 1 }, children: [] }
+  const flex = { flexDirection: 'row', flexShrink: 1, minWidth: 0, overflow: 'hidden' }
+  const fixed = { flexDirection: 'row', flexShrink: 0 }
+  const row = (...cells: Node[]): Node => box({ flexDirection: 'row' }, ...cells)
+
+  // v1's row: a cell that cannot shrink below its text, with a cut text in a Box that does not clip.
+  expect(rowProblems(row(box({ flexShrink: 1 }, cut('a long description')))), 'v1').toHaveLength(2)
+  // A flexible cell needs its minWidth of 0 and its clip, both: either alone is the v1 mistake.
+  expect(rowProblems(row(box({ ...flex, minWidth: undefined }, cut('a')))), 'no minWidth').not.toEqual([])
+  expect(rowProblems(row(box({ ...flex, overflow: undefined }, cut('a')))), 'no clip').not.toEqual([])
+  // (a) An image that is not in a clipping cell, or in a fixed slot with a width.
+  const unclipped = rowProblems(box({ flexDirection: 'row', marginTop: 1 }, image))
+  expect(unclipped, 'an image in a Box that does not clip').toHaveLength(1)
+  expect(unclipped[0], 'an image in a Box that does not clip').toContain('image')
+  expect(rowProblems(row(box(fixed, image))), 'an image in a fixed cell without a width').toHaveLength(1)
+  // (b) A cut text that shares its cell with another child.
+  const shared = rowProblems(row(box(flex, cut('a description'), dim('@type'))))
+  expect(shared, 'a cut text that shares its cell').toHaveLength(1)
+  expect(shared[0], 'a cut text that shares its cell').toContain('cut text')
+  // (c) A fixed cell that holds a cut text but has no width.
+  const sizeless = rowProblems(row(box({ ...fixed, overflow: 'hidden' }, cut('who'))))
+  expect(sizeless, 'a fixed cell with no width').toHaveLength(1)
+  expect(sizeless[0], 'a fixed cell with no width').toContain('cut text')
+
+  // The cells the pane is made of pass: a flexible cell, a fixed one with a width, an image in a clipping Box or slot.
+  const sized = { ...fixed, width: 7, overflow: 'hidden' }
+  const cells = [box(flex, cut('a')), box(sized, cut('b')), box(flex, image), box({ ...fixed, width: 2 }, image)]
+  expect(rowProblems(row(...cells))).toEqual([])
 })
 
 test('the texts that can overrun a row carry the truncation props; the values never do', () => {
@@ -997,6 +1029,12 @@ test('the texts that can overrun a row carry the truncation props; the values ne
       expect(placed, `${surface}: ${text}`).toBeDefined()
       expect(placed?.node.props?.wrap, `${surface}: ${text}`).toBeUndefined()
     }
+    // A long type is already cut to 14 characters by shortType, with an ellipsis, so the row never cuts it again.
+    const types = flat(tree).filter(({ node }) => node.type === 'Text' && isType(textsOf(node)[0] ?? ''))
+    const typeTexts = types.map(({ node }) => textsOf(node)[0] ?? '')
+    expect(typeTexts, surface).toContain('@minimal-chang…')
+    expect(typeTexts.every(text => text.length <= 1 + 14), surface).toBe(true)
+    expect(types.every(({ node }) => node.props?.wrap === undefined), surface).toBe(true)
   }
 })
 
@@ -1073,14 +1111,16 @@ test('a header is an icon, a bold title, a dim chevron that folds, and a summary
     expect(rows.map(row => row.summary), surface).toEqual([
       '5-hour 3%', '~62 tok/s', '2/10', '3', '77 skills · 3 MCP', undefined,
     ])
-    for (const { cells, label } of rows) {
+    for (const { cells, label, title: name } of rows) {
       // On the desktop an icon slot comes first; the terminal draws none.
       const [slot, title, chevron, summary, ...rest] = surface === 'desktop' ? cells : [undefined, ...cells]
       expect(rest, surface).toEqual([])
       if (surface === 'desktop') {
         expect(slot?.props, surface).toMatchObject({ flexShrink: 0, width: 2 })
+        // The desktop draws no image whose alt is empty: the icon carries the title that is drawn in bold beside it.
         expect(childrenOf(slot).map(image => [image.type, image.props?.alt, image.props?.width, image.props?.height]))
-          .toEqual([['Svg', '', 14, 14]])
+          .toEqual([['Svg', name, 14, 14]])
+        expect(textsOf(title), surface).toEqual([name])
       }
       // The title holds its size, so it is never cut; it is a Text, in bold.
       expect(isFixed(title), surface).toBe(true)
@@ -1121,12 +1161,52 @@ test('the desktop draws an icon for each section and for the project; the termin
   expect(line?.props?.marginTop ?? 0).toBe(0)
 })
 
+// The desktop drops an Svg whose alt is empty without a word: the validator accepts the tree, the image is not drawn
+// and its slot and margins stay. So every image carries a label: a meter its percent, the rest the label of their row.
+test('every image on the desktop has a non-empty alt, so none of them is dropped', () => {
+  const alts = (tree: unknown): unknown[] =>
+    flat(tree).filter(({ node }) => node.type === 'Svg').map(({ node }) => node.props?.alt)
+  const everyKind = (['running', 'done', 'failed', 'stopped'] as const).map((status, i) => agent(20 + i, status))
+  const statuses = { ...FULL, agents: Object.fromEntries(everyKind.map(row => [row.id, row])) }
+  const folded = { ...FULL, collapsed: Object.fromEntries(SECTIONS.map(id => [id, true])) }
+  const cases: Array<[name: string, data: PaneData]> = [
+    ['full', FULL], ['a subagent of every status', statuses], ['folded', folded], ['empty', EMPTY],
+  ]
+
+  // At the narrowest and the widest body the tests use.
+  for (const bodyColumns of [8, 120]) {
+    for (const [name, data] of cases) {
+      const images = alts(draw(onSurface(data, 'desktop'), bodyColumns))
+      expect(images.length, `${name} at ${bodyColumns} columns`).toBeGreaterThan(0)
+      for (const alt of images) {
+        const isLabelled = typeof alt === 'string' && alt.trim() !== ''
+        expect(isLabelled, `${name} at ${bodyColumns} columns: alt ${JSON.stringify(alt)}`).toBe(true)
+      }
+    }
+  }
+
+  // The top block: the ring says `Context` with a reading and without one; then the meter, the folder and the branch.
+  const [top, ...sections] = childrenOf(draw(onSurface(FULL, 'desktop')))
+  expect(alts(top)).toEqual(['Context', 'Context 88.2%', 'Project', 'Branch'])
+  expect(alts(childrenOf(draw(onSurface(EMPTY, 'desktop')))[0])).toEqual(['Context'])
+  // Each section: its rule, then its icon, which says the title drawn in bold beside it.
+  expect(sections.map(section => alts(section).slice(0, 2))).toEqual(TITLES.map(title => ['rule', title]))
+  expect(alts(draw(onSurface(EMPTY, 'desktop')))).toEqual(['Context', 'rule', 'Turn stats'])
+  // A status icon says its status: it is the only place that does.
+  const agents = childrenOf(draw(onSurface(statuses, 'desktop')))[3]
+  expect(alts(agents).slice(2).sort()).toEqual(['done', 'failed', 'running', 'stopped'])
+  // Only a meter says a percent, so the `/%$/` filter of the tests finds the meters and nothing else.
+  expect(alts(draw(onSurface(FULL, 'desktop'))).filter(alt => /%$/.test(String(alt)))).toEqual([
+    'Context 88.2%', '5-hour 3%', 'Weekly 84%', 'Spend 120%', 'some_new_window 5%',
+  ])
+})
+
 test('the divider is an image cut by its Box on the desktop and a text rule on the terminal', () => {
   const rules = flat(draw(onSurface(FULL, 'desktop'))).filter(({ node }) => isRuleNode(node))
   expect(rules).toHaveLength(6)
   for (const { node, parent } of rules) {
     // A line 1 px tall in a clipping Box with room around it; it is wider than any pane, so the Box cuts it.
-    expect(node.props).toMatchObject({ height: 1, alt: '' })
+    expect(node.props).toMatchObject({ height: 1, alt: 'rule' })
     expect(parent?.props).toMatchObject({ overflow: 'hidden', marginTop: 1, marginBottom: 1 })
     expect(String(node.props?.source)).toContain('preserveAspectRatio="none"')
   }
@@ -1138,8 +1218,45 @@ test('the divider is an image cut by its Box on the desktop and a text rule on t
     for (const { node, parent } of lines) {
       expect(textsOf(node)[0]).toBe('─'.repeat(bodyColumns))
       expect(node.props).toMatchObject({ dimColor: true, wrap: 'truncate' })
+      expect(parent?.type).toBe('Box')
       expect(parent?.props?.marginTop).toBeUndefined()
     }
+  }
+})
+
+// `'─'.repeat` throws on a negative count, and a throw while the pane is drawn blanks the whole pane.
+test('a body of 0 columns, or fewer, draws an empty rule on the terminal and does not throw', () => {
+  for (const bodyColumns of [0, -1, -40]) {
+    for (const data of [FULL, EMPTY]) {
+      const sections = childrenOf(draw(onSurface(data, 'terminal'), bodyColumns)).slice(1)
+      expect(sections.length, `${bodyColumns} columns`).toBeGreaterThan(0)
+      for (const section of sections) {
+        const rule = childrenOf(section)[0]
+        expect(rule?.type, `${bodyColumns} columns`).toBe('Text')
+        expect(textsOf(rule).join(''), `${bodyColumns} columns`).toBe('')
+        expect(rule?.props, `${bodyColumns} columns`).toMatchObject({ dimColor: true, wrap: 'truncate' })
+      }
+    }
+    // The desktop keeps the least width of its meters, so no image gets a negative or a zero width.
+    const widths = flat(draw(onSurface(FULL, 'desktop'), bodyColumns))
+      .filter(({ node }) => node.type === 'Svg' && /%$/.test(String(node.props?.alt)))
+      .map(({ node }) => node.props?.width)
+    expect(widths, `${bodyColumns} columns`).toEqual([48, 40, 40, 40, 40])
+  }
+})
+
+test('the engine draws a terminal body of 0 columns, or fewer, with empty rules', SLOW, async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  await seed($, clock, bottom(on, clock))
+
+  for (const bodyColumns of [0, -3]) {
+    // `drawn` rejects with the engine's refusal when its validation does not accept the tree.
+    const ui = await mountPane($, 'terminal', { ...PANE_PROPS, bodyColumns })
+    const sections = childrenOf(await ui.drawn()).slice(1)
+    expect(sections, `${bodyColumns} columns`).toHaveLength(6)
+    const rules = sections.map(section => textsOf(childrenOf(section)[0]).join(''))
+    expect(rules, `${bodyColumns} columns`).toEqual(Array(6).fill(''))
+    await ui.unmount()
   }
 })
 
@@ -1219,6 +1336,15 @@ test('partial states draw what they have and leave the rest out', () => {
   }
 })
 
+test('the placeholder of an empty Turn stats is cut by a narrow pane, not wrapped', () => {
+  for (const surface of SURFACES) {
+    const placeholder = textNode(draw(onSurface(EMPTY, surface), 8), 'No completed turn yet')
+    expect(placeholder, surface).toBeDefined()
+    expect(placeholder?.node.props, surface).toMatchObject({ dimColor: true, wrap: 'truncate' })
+    expect(isFlex(placeholder?.parent), surface).toBe(true)
+  }
+})
+
 test('the MCP servers wrap as whole chips: a green dot, the name in the plain colour, and a long name cut', () => {
   for (const surface of SURFACES) {
     const tree = draw(onSurface(FULL, surface))
@@ -1236,6 +1362,7 @@ test('the MCP servers wrap as whole chips: a green dot, the name in the plain co
       // The no-break space keeps the gap between the dot and the name.
       expect(textsOf(dot), surface).toEqual(['●\u00a0'])
       expect(isFlex(name), surface).toBe(true)
+      expect(childrenOf(name)[0]?.type, surface).toBe('Text')
       expect(childrenOf(name)[0]?.props?.color, surface).toBeUndefined()
       expect(childrenOf(name)[0]?.props?.wrap, surface).toBe('truncate')
     }
@@ -1256,6 +1383,7 @@ test('the top block is the session and its total, the context, the cost split, t
     const [head, label, bar, , last] = childrenOf(top)
     expect(head?.props, surface).toMatchObject({ justifyContent: 'space-between' })
     expect(childrenOf(head).map(cell => isFixed(cell)), surface).toEqual([true, true])
+    expect(textNode(head, '$148.59'), surface).toBeDefined()
     expect(textNode(head, '$148.59')?.node.props?.bold, surface).toBeUndefined()
     // The context: its label and `tokens / window` at the right edge; then the meter, and the percent at the right
     // edge, in the colour of its threshold.

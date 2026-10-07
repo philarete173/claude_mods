@@ -211,21 +211,22 @@ function meter(d: Draw, pct: number, alt: string, widthPx: number): RenderElemen
 }
 
 // The rule above a section: an image in a Box that cuts it to the pane, with room around it. The terminal draws a text
-// rule, one row, as v1's blank line was.
+// rule, one row, as v1's blank line was. The desktop draws no Svg whose alt is empty, so the rule says `rule`.
 function divider(d: Draw): RenderElement {
   const { Box, Text, Svg } = d.ui
   if (Svg === undefined) return <Text dimColor wrap="truncate">{'─'.repeat(Math.max(0, d.cols))}</Text>
 
   return (
     <Box flexDirection="row" marginTop={1} marginBottom={1} overflow="hidden">
-      <Svg source={RULE_SVG} alt="" width={RULE_PX} height={1} />
+      <Svg source={RULE_SVG} alt="rule" width={RULE_PX} height={1} />
     </Box>
   )
 }
 
-// A 14 px icon in a 2-cell slot, so the text after it starts at 3 cells on every row that has one. `alt=""` marks a
-// decorative icon: the title or label beside it says the same. A surface with no Svg draws no slot at all.
-function iconSlot(d: Draw, source: string, alt = ''): RenderElement | null {
+// A 14 px icon in a 2-cell slot, so the text after it starts at 3 cells on every row that has one. The desktop draws no
+// Svg whose alt is empty (the validator accepts it, the image is dropped and its slot stays), so a decorative icon
+// carries the label of its row. A surface with no Svg draws no slot at all.
+function iconSlot(d: Draw, source: string, alt: string): RenderElement | null {
   const { Box, Svg } = d.ui
   if (Svg === undefined) return null
 
@@ -287,7 +288,7 @@ function section(d: Draw, id: SectionId, title: string, summary: string, body: R
     <Box flexDirection="column">
       {divider(d)}
       <Box flexDirection="row" alignItems="center" columnGap={1}>
-        {iconSlot(d, ICON[id])}
+        {iconSlot(d, ICON[id], title)}
         <Box flexDirection="row" flexShrink={0}>
           <Text bold>{title}</Text>
         </Box>
@@ -321,7 +322,7 @@ function contextRows(d: Draw): RenderElement[] {
   if (contextPct === undefined || !Number.isFinite(contextPct)) {
     return [
       <Box flexDirection="row" alignItems="center" columnGap={1}>
-        {iconSlot(d, ringSvg(undefined))}
+        {iconSlot(d, ringSvg(undefined), 'Context')}
         {label}
         {endText(d, '—', { dimColor: true })}
       </Box>,
@@ -333,7 +334,7 @@ function contextRows(d: Draw): RenderElement[] {
 
   return [
     <Box flexDirection="row" alignItems="center" columnGap={1}>
-      {iconSlot(d, ringSvg(contextPct))}
+      {iconSlot(d, ringSvg(contextPct), 'Context')}
       {label}
       {endText(d, note, { dimColor: true })}
     </Box>,
@@ -353,16 +354,16 @@ function contextRows(d: Draw): RenderElement[] {
 function projectRow(d: Draw): RenderElement {
   const { Box, Svg } = d.ui
   const { name, branch } = d.data.project
-  const group = (iconSvg: string, emoji: string, text: string): RenderElement => (
+  const group = (iconSvg: string, alt: string, emoji: string, text: string): RenderElement => (
     <Box flexDirection="row" alignItems="center" columnGap={1} flexShrink={1} minWidth={0} overflow="hidden">
-      {Svg === undefined ? shrinkText(d, `${emoji} ${text}`) : [iconSlot(d, iconSvg), shrinkText(d, text)]}
+      {Svg === undefined ? shrinkText(d, `${emoji} ${text}`) : [iconSlot(d, iconSvg, alt), shrinkText(d, text)]}
     </Box>
   )
 
   return (
     <Box flexDirection="row" justifyContent="space-between" columnGap={2} marginTop={Svg === undefined ? 0 : 1}>
-      {group(ICON.folder, '📁', name)}
-      {branch !== null && group(ICON.branch, '🌿', branch)}
+      {group(ICON.folder, 'Project', '📁', name)}
+      {branch !== null && group(ICON.branch, 'Branch', '🌿', branch)}
     </Box>
   )
 }
@@ -433,11 +434,12 @@ function usageSection(d: Draw): RenderElement | null {
 
 type Line = [label: string, value: string | null, color?: string]
 
-// The last finished turn; a row whose figure is unknown is left out.
+// The last finished turn; a row whose figure is unknown is left out. With none, a dim line that a narrow pane cuts.
 function turnSection(d: Draw): RenderElement {
-  const { Text } = d.ui
   const turn = d.data.lastTurn
-  if (turn === null) return section(d, 'turn', 'Turn stats', '', [<Text dimColor>No completed turn yet</Text>])
+  if (turn === null) {
+    return section(d, 'turn', 'Turn stats', '', [shrinkText(d, 'No completed turn yet', { dimColor: true })])
+  }
   const lines: Line[] = [
     ['Response', orNull(turn.responseRate, fmtRate)],
     ['Whole turn', orNull(turn.wholeTurnRate, fmtRate)],

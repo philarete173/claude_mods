@@ -197,7 +197,16 @@ test('pushLog', () => {
 test('shortType', () => {
   expect(shortType('plugin:code-reviewer')).toBe('code-reviewer')
   expect(shortType('engineer')).toBe('engineer')
-  expect(shortType('feature-dev:a-very-long-agent-type')).toBe('a-very-long-ag')
+  // At most 14 characters: a longer type is cut to its first 13 and marked with an ellipsis.
+  expect(shortType('feature-dev:a-very-long-agent-type')).toBe('a-very-long-a…')
+  expect(shortType('frontend-developer')).toBe('frontend-deve…')
+  expect(shortType('abcdefghijklmno')).toBe('abcdefghijklm…') // 15 characters: one too many
+  expect(shortType('minimal-change')).toBe('minimal-change') // exactly 14: left as it is
+  // The length is the type's own: a long plugin prefix does not count.
+  expect(shortType('a-plugin-with-a-very-long-name:engineer')).toBe('engineer')
+  for (const type of ['x:minimal-change-engineer', 'frontend-developer', 'a', '']) {
+    expect(shortType(type).length, type).toBeLessThanOrEqual(14)
+  }
 })
 
 test('shorten', () => {

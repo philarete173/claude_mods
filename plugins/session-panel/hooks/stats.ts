@@ -160,9 +160,13 @@ export function pushLog(log: LogEntry[], entry: LogEntry, max?: number): LogEntr
   return [entry, ...log].slice(0, max ?? 60)
 }
 
-// The agent type without its plugin prefix, cut to 14 characters (the most the `who` column of the log takes).
+const TYPE_MAX = 14 // the most the `who` column of the log takes
+
+// The agent type without its plugin prefix, at most 14 characters: a longer one is cut to 13 and ends in an ellipsis.
 export function shortType(type: string): string {
-  return type.slice(type.lastIndexOf(':') + 1).slice(0, 14)
+  const name = type.slice(type.lastIndexOf(':') + 1)
+
+  return name.length > TYPE_MAX ? `${name.slice(0, TYPE_MAX - 1)}…` : name
 }
 
 // The patterns below are copied verbatim from claude-flightdeck/hooks/core.ts, commit f31daca
