@@ -1,5 +1,7 @@
 # Session Panel: visual spec v2
 
+> Changes after the approved preview: every Svg carries a non-empty alt (§5.2, §11); the subagent `@type` sits in a column of its own (§6.7); the log's `who` column is 13 cells on the desktop. The HTML preview `docs/design/session-panel-preview.html` stays the approved v2 mock-up and predates these changes.
+
 Date: 2026-10-07. Status: proposal. The user approves the look in `docs/design/session-panel-preview.html` before implementation.
 
 Scope: presentation only. The sections, their content, the formats and every formula of `2026-10-07-session-panel-design.md` §3–§4 stay as they are. Where the two specs differ on looks, this one replaces §3.1 of the main spec. Engine 2.1.288. "d.ts" below means `plugin-authoring/types/claude-code.d.ts` of that engine, cited by line.
@@ -10,7 +12,7 @@ Scope: presentation only. The sections, their content, the formats and every for
    - a 1 px rule with 8 px of space above and below;
    - then a header row: line icon, **bold title**, dim chevron, and a dim summary pushed to the right.
 2. **No row can outgrow the pane.** Every row is built from fixed cells (`flexShrink={0}`, width in cells) and at most two flexible cells (`flexShrink={1}` + `minWidth={0}` + `overflow="hidden"`, text `wrap="truncate"`).
-3. **Columns that must line up have fixed cell widths:** time, who, status mark, cost, percent and limit label. Nothing is aligned by character count.
+3. **Columns that must line up have fixed cell widths:** time, who, status mark, subagent `@type`, cost, percent and limit label. Nothing is aligned by character count.
 4. **Icons.** 14 px line icons share one neutral grey, `#8a8a8a`, readable on dark and light. The Context ring draws the percent in the meter's colours. Subagent status icons are shape-coded.
 5. **The top block is a header card:**
    - Session and the total;
@@ -68,7 +70,7 @@ Every horizontal row is `<Box flexDirection="row">`, and each child is one of tw
 
 | Kind | Props | Holds |
 |---|---|---|
-| FIXED | `flexShrink={0}`; `width={n}` in cells when it is a column | icons, titles, values, percents, costs, times, the `who` column |
+| FIXED | `flexShrink={0}`; `width={n}` in cells when it is a column | icons, titles, values, percents, costs, times, the `who` column, the subagent `@type` column |
 | FLEX | `flexShrink={1}` `minWidth={0}` `overflow="hidden"` (l.798, l.808, l.828); `flexGrow={1}` when it must take the remaining room | exactly one `Text wrap="truncate"` (l.11886) |
 
 - A `Text` that may be cut is never a direct child of a row. It sits alone in a FLEX `Box`.
@@ -158,8 +160,13 @@ const LIMIT_LABEL_CELLS = 7 // `5-hour`, `Weekly`, `Spend`
 const LIMIT_PCT_CELLS = 5 // `100%`
 const COST_CELLS = 7 // `$148.59`, `<$0.001`
 const TIME_CELLS = 8 // `22:09:07`
-const WHO_CELLS = 12 // desktop: `minimal-change` in the system font
-const WHO_CELLS_MAX = 14 // terminal: the longest `who` shortType keeps
+// The desktop widths of an agent type are measured on the live pane, in the app's own font. In the log,
+// `minimal-change` takes about 96 px: 13 cells (104 px) keep it whole. In a subagent row the widest `@type` is a cut
+// one, `@frontend-deve…` or `@minimal-chang…`, about 111 px: 15 cells (120 px) keep it whole, with a margin.
+const WHO_CELLS = 13 // desktop: the `who` of the log
+const WHO_CELLS_MAX = TYPE_MAX // terminal: the longest `who` that shortType keeps
+const TYPE_CELLS = 15 // desktop: the `@type` of a subagent
+const TYPE_CELLS_MAX = TYPE_MAX + 1 // terminal: the `@` and the longest type that shortType keeps
 const TEXT_METER_CELLS = 10 // unchanged
 const RULE_PX = 1600 // the divider image; the Box around it cuts it to the pane
 const MAX_AGENT_ROWS = 8 // unchanged
@@ -202,13 +209,15 @@ const RULE_SVG =
   `<svg xmlns="http://www.w3.org/2000/svg" width="${RULE_PX}" height="1" viewBox="0 0 ${RULE_PX} 1"` +
   ` preserveAspectRatio="none"><rect width="${RULE_PX}" height="1" fill="#808080" fill-opacity="0.35"/></svg>`
 
+// The rule above a section: an image in a Box that cuts it to the pane, with room around it. The terminal draws a text
+// rule, one row, as v1's blank line was. The desktop draws no Svg whose alt is empty, so the rule says `rule`.
 function divider(d: Draw): RenderElement {
   const { Box, Text, Svg } = d.ui
-  if (Svg === undefined) return <Text dimColor wrap="truncate">{'─'.repeat(d.cols)}</Text>
+  if (Svg === undefined) return <Text dimColor wrap="truncate">{'─'.repeat(Math.max(0, d.cols))}</Text>
 
   return (
     <Box flexDirection="row" marginTop={1} marginBottom={1} overflow="hidden">
-      <Svg source={RULE_SVG} alt="" width={RULE_PX} height={1} />
+      <Svg source={RULE_SVG} alt="rule" width={RULE_PX} height={1} />
     </Box>
   )
 }
@@ -224,8 +233,10 @@ How the rule gets the exact pane width:
 ### 5.2 Icon slot
 
 ```tsx
-// A 14 px icon in a 2-cell slot, so the text after it starts at 3 cells on every row that has one.
-function iconSlot(d: Draw, source: string, alt = ''): RenderElement | null {
+// A 14 px icon in a 2-cell slot, so the text after it starts at 3 cells on every row that has one. The desktop draws no
+// Svg whose alt is empty (the validator accepts it, the image is dropped and its slot stays), so a decorative icon
+// carries the label of its row. A surface with no Svg draws no slot at all.
+function iconSlot(d: Draw, source: string, alt: string): RenderElement | null {
   const { Box, Svg } = d.ui
   if (Svg === undefined) return null
 
@@ -237,7 +248,7 @@ function iconSlot(d: Draw, source: string, alt = ''): RenderElement | null {
 }
 ```
 
-`alt=""` marks a decorative icon: the title or label next to it already says the same. If the validator refuses an empty `alt` (§11), pass the title or label of the row.
+Every Svg needs a non-empty `alt`. The desktop draws no image whose `alt` is empty: the validator accepts it, the image is dropped, and its slot stays (found on the first live render, §11 check 4). A decorative icon carries the label of its row: a section icon its title, the ring `Context`, the folder `Project`, the branch `Branch`. The rule says `rule`.
 
 ### 5.3 Text cells
 
@@ -249,6 +260,17 @@ function shrinkText(d: Draw, text: string, style: Partial<TextProps> = {}): Rend
   return (
     <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
       <Text {...style} wrap="truncate">{text}</Text>
+    </Box>
+  )
+}
+
+// FLEX, left, and it grows: takes the room that is left, so the cells after it start at the same x on every row.
+function growText(d: Draw, text: string): RenderElement {
+  const { Box, Text } = d.ui
+
+  return (
+    <Box flexDirection="row" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+      <Text wrap="truncate">{text}</Text>
     </Box>
   )
 }
@@ -276,7 +298,7 @@ function section(d: Draw, id: SectionId, title: string, summary: string, body: R
     <Box flexDirection="column">
       {divider(d)}
       <Box flexDirection="row" alignItems="center" columnGap={1}>
-        {iconSlot(d, ICON[id])}
+        {iconSlot(d, ICON[id], title)}
         <Box flexDirection="row" flexShrink={0}>
           <Text bold>{title}</Text>
         </Box>
@@ -349,7 +371,7 @@ function contextRows(d: Draw): RenderElement[] {
   if (contextPct === undefined || !Number.isFinite(contextPct)) {
     return [
       <Box flexDirection="row" alignItems="center" columnGap={1}>
-        {iconSlot(d, ringSvg(undefined))}
+        {iconSlot(d, ringSvg(undefined), 'Context')}
         {label}
         {endText(d, '—', { dimColor: true })}
       </Box>,
@@ -361,7 +383,7 @@ function contextRows(d: Draw): RenderElement[] {
 
   return [
     <Box flexDirection="row" alignItems="center" columnGap={1}>
-      {iconSlot(d, ringSvg(contextPct))}
+      {iconSlot(d, ringSvg(contextPct), 'Context')}
       {label}
       {endText(d, note, { dimColor: true })}
     </Box>,
@@ -401,16 +423,16 @@ At the default width (≈ 45 columns) this gives 304 px. The bar ends about 25 p
 function projectRow(d: Draw): RenderElement {
   const { Box, Svg } = d.ui
   const { name, branch } = d.data.project
-  const group = (icon: string, emoji: string, text: string): RenderElement => (
+  const group = (iconSvg: string, alt: string, emoji: string, text: string): RenderElement => (
     <Box flexDirection="row" alignItems="center" columnGap={1} flexShrink={1} minWidth={0} overflow="hidden">
-      {Svg === undefined ? shrinkText(d, `${emoji} ${text}`) : [iconSlot(d, icon), shrinkText(d, text)]}
+      {Svg === undefined ? shrinkText(d, `${emoji} ${text}`) : [iconSlot(d, iconSvg, alt), shrinkText(d, text)]}
     </Box>
   )
 
   return (
     <Box flexDirection="row" justifyContent="space-between" columnGap={2} marginTop={Svg === undefined ? 0 : 1}>
-      {group(ICON.folder, '📁', name)}
-      {branch !== null && group(ICON.branch, '🌿', branch)}
+      {group(ICON.folder, 'Project', '📁', name)}
+      {branch !== null && group(ICON.branch, 'Branch', '🌿', branch)}
     </Box>
   )
 }
@@ -477,28 +499,30 @@ At ≈ 45 columns this gives 160 px. Limit meters line up with each other: same 
 
 ### 6.6 Turn stats
 
-Same rows and the same summary as v1, drawn with `row()` (§6.4); Cache stays `success` from 50 %. With no completed turn, the body is `<Text dimColor>No completed turn yet</Text>` and the summary is empty.
+Same rows and the same summary as v1, drawn with `row()` (§6.4); Cache stays `success` from 50 %. With no completed turn, the body is `shrinkText(d, 'No completed turn yet', { dimColor: true })`, so a narrow pane cuts it instead of wrapping it, and the summary is empty.
 
 ### 6.7 Subagent row
 
 ```tsx
-function agentRow(d: Draw, agent: AgentRow): RenderElement {
+function agentRow(d: Draw, agent: AgentRow, typeCells: number): RenderElement {
   const { Box, Text, Svg } = d.ui
-  const mark = AGENT_MARKS[agent.status] // the terminal glyphs, unchanged
+  const mark = AGENT_MARKS[agent.status]
 
   return (
     <Box flexDirection="row" alignItems="center" columnGap={1}>
       {Svg === undefined ? (
         <Box flexDirection="row" width={1} flexShrink={0}>
-          <Text color={mark.color} dimColor={mark.isDim}>{mark.glyph}</Text>
+          <Text color={mark.color} dimColor={mark.isDim}>
+            {mark.glyph}
+          </Text>
         </Box>
       ) : (
         iconSlot(d, STATUS_SVG[agent.status], agent.status)
       )}
       <Box flexDirection="row" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden" columnGap={1}>
-        {shrinkText(d, agent.description)}
-        <Box flexDirection="row" flexShrink={0}>
-          <Text dimColor>{`@${shortType(agent.type)}`}</Text>
+        {growText(d, agent.description)}
+        <Box flexDirection="row" width={typeCells} flexShrink={0} overflow="hidden">
+          <Text dimColor wrap="truncate">{`@${shortType(agent.type)}`}</Text>
         </Box>
       </Box>
       <Box flexDirection="row" width={COST_CELLS} flexShrink={0} justifyContent="flex-end">
@@ -507,16 +531,43 @@ function agentRow(d: Draw, agent: AgentRow): RenderElement {
     </Box>
   )
 }
+
+function agentsSection(d: Draw): RenderElement | null {
+  const { Box, Text, Svg } = d.ui
+  const agents = orderAgents(Object.values(d.data.agents))
+  if (agents.length === 0) return null
+  const running = agents.filter(agent => agent.status === 'running').length
+  const summary = running > 0 ? `${running}/${agents.length}` : String(agents.length)
+  const shown = agents.slice(0, MAX_AGENT_ROWS)
+  // One width for the type column of every row, as for the `who` of the log: the terminal takes the longest `@type`
+  // that is drawn, the desktop a width of its own.
+  const longest = Math.max(...shown.map(agent => `@${shortType(agent.type)}`.length))
+  const typeCells = Svg === undefined ? Math.min(TYPE_CELLS_MAX, longest) : TYPE_CELLS
+  const rows = shown.map(agent => agentRow(d, agent, typeCells))
+  const more = agents.length - MAX_AGENT_ROWS
+  if (more > 0) {
+    // The icon slot and its gap on the desktop, the one-cell mark and its gap on the terminal.
+    rows.push(
+      <Box flexDirection="row" paddingLeft={Svg === undefined ? 2 : 3}>
+        <Text dimColor>{`+${more} more`}</Text>
+      </Box>,
+    )
+  }
+
+  return section(d, 'agents', 'Subagents', summary, rows)
+}
 ```
 
-The row has three parts:
+The row has four columns. The description and the `@type` column sit in one group, between the mark and the cost:
 
 1. **Status mark** (FIXED).
-2. **Name group** (FLEX, grows).
-   - Inside it, the description is the only part that cuts.
-   - `@type` follows the description and stays whole: it is FIXED. Any shrink at all would put an ellipsis on it.
-   - In a pane narrower than about 220 px, the group's `overflow="hidden"` clips the type instead of letting it out of the row.
-3. **Cost** (FIXED, 7 cells, right-aligned). Costs line up on their right edge, and every description ends at the same x.
+2. **Description** (FLEX, grows: `growText`). It takes the rest of the row, so the `@type` column starts at the same x on every row.
+3. **`@type`** (FIXED, `typeCells` wide).
+   - Desktop: `TYPE_CELLS`, 15 cells (120 px). The cut types `@frontend-deve…` and `@minimal-chang…` measure about 111 px on the live pane.
+   - Terminal: the longest `@type` drawn, at most `TYPE_CELLS_MAX` (15).
+4. **Cost** (FIXED, `COST_CELLS`, 7 cells, right-aligned). Costs line up on their right edge, and every description ends at the same x.
+
+In a pane too narrow for the type column, every description is 0 wide and the group clips the column at the same x on every row.
 
 The status icon's `alt` is the status word (`running`, `done`, `failed`, `stopped`): the icon is the only place that says it.
 
@@ -560,7 +611,8 @@ return section(d, 'mcp', 'MCP', String(mcp.servers.length), [
 
 ```tsx
 const lines = d.data.log.slice(0, MAX_LOG_ROWS)
-const whoCells = Svg === undefined ? Math.min(WHO_CELLS_MAX, Math.max(...lines.map(line => line.who.length))) : WHO_CELLS
+const longest = Math.max(...lines.map(line => line.who.length))
+const whoCells = Svg === undefined ? Math.min(WHO_CELLS_MAX, longest) : WHO_CELLS
 const rows = lines.map(line => (
   <Box flexDirection="row" columnGap={1}>
     <Box flexDirection="row" width={TIME_CELLS} flexShrink={0}>
@@ -580,12 +632,12 @@ return section(d, 'log', 'Log', '', rows)
 ```
 
 - **Time and `who`** are fixed columns.
-  - Every text starts at the same x: 8 + 1 + 12 + 1 = 22 cells = 176 px on the desktop.
+  - Every text starts at the same x: 8 + 1 + 13 + 1 = 23 cells = 184 px on the desktop.
   - Proportional digits can no longer move the columns.
   - The `who` column no longer shrinks with the text beside it. It did in v1, which moved the text column row to row.
 - **Weight.** Time and `who` are dim, so the text carries the row. An error `who` is red.
 - **`who` width per surface.**
-  - Desktop: a constant 12 cells, so the text column does not jump when the longest `who` changes.
+  - Desktop: a constant 13 cells, so the text column does not jump when the longest `who` changes.
   - Terminal: v1's longest-visible `who`, capped at 14.
 
 ### 6.11 Empty and partial states
@@ -696,10 +748,10 @@ Butt caps keep the arc honest: round caps would add a stroke-width to its visibl
 | Label/value | label (narrow panes only) | nothing | value |
 | Context label row | `tokens / window` | nothing | ring, `Context` |
 | Context meter row | the bar's Box clips, only if `CELL_PX` overestimates | nothing | percent |
-| Limit row | countdown (ellipsis) | the bar's Box clips | label (cut inside its own 7 cells), percent |
+| Limit row | countdown (ellipsis) and the bar's Box, in proportion | nothing | label (cut inside its own 7 cells), percent |
 | Split line | its end (ellipsis) | nothing | nothing else on the row |
 | Project row | the longer of project and branch | the other | icons |
-| Subagent row | description (ellipsis) | `@type` clipped (panes < ~220 px) | mark, cost |
+| Subagent row | description (ellipsis) | the `@type` column, clipped by the group at the same x on every row (panes too narrow for it) | mark, cost |
 | MCP chip | the name, only when it alone is wider than the pane | nothing | the dot |
 | Log row | text (ellipsis) | nothing | time; `who` cuts inside its own column |
 
@@ -715,7 +767,8 @@ The ellipsis is the surface's own, from `wrap="truncate"`. No string is shortene
 | Meter | `meterSvg` at the computed px width | ten cells of `▰▱` in the meter colours, as v1 |
 | Status mark | 14 px status icon, `alt` = status | v1 glyphs in a 1-cell Box: `◐` blue, `✓` success, `✗` error, `✗` dim |
 | `+N more` indent | 3 cells | 2 cells |
-| `who` column | 12 cells | longest visible `who`, ≤ 14 |
+| `who` column | 13 cells | longest visible `who`, ≤ 14 |
+| `@type` column | 15 cells | longest drawn `@type`, ≤ 15 |
 | Header | `[icon] Title ▾ … summary` | `Title ▾ … summary`. The plain Button draws the glyph alone, and the focus inverts it (l.896–897, l.929–934). |
 
 The chevron Button and the bold title are the same elements on both surfaces, so the tests drive one tree.
@@ -734,7 +787,7 @@ Accessibility:
 - **Alt text.**
   - Meters keep their alt (`Context 88.2%`, `5-hour 3%`).
   - Status icons say their status.
-  - Decorative icons and rules have `alt=""`.
+  - Decorative icons carry the label of their row, and rules say `rule`: the desktop does not draw an Svg whose `alt` is empty.
 
 Checks on the first live render, before the tests are frozen:
 
@@ -746,6 +799,14 @@ Checks on the first live render, before the tests are frozen:
 3. **Narrow pane.** Narrow the pane to about 300 px. No row crosses the edge, and descriptions, log text and summaries end in `…`. Costs, percents and `@type` stay whole.
 4. **Empty alt.** If the transcript says a `ui.render` tree was refused and names `alt`, give each decorative icon the label of its row and the rule `alt="rule"`.
 5. **Chevron.** It is dim at rest and full strength under the pointer. A click folds the section and the header keeps its summary.
+
+Results of the live renders (2026-10-07 and 2026-10-08):
+
+1. Pass. At ~300 px the bar ends ~18 px left of the percent; `CELL_PX` 8 stays.
+2. Pass. 12–14 px between the ink and the rule on each side, ≈ 17 px box to box.
+3. Pass. At ~300 px no row crosses the edge; descriptions and log text end in `…`.
+4. The tree was not refused, but the desktop drew no Svg with an empty `alt`: the icons, the ring and the rules were missing while their slots stayed. Fixed by giving every Svg a label (commit c5f73d1).
+5. Pass. A click on the chevron folds the section, and the folded state survives a reload.
 
 ## 12. Compromises forced by the API
 
@@ -768,7 +829,7 @@ Checks on the first live render, before the tests are frozen:
    - Meter widths depend on `CELL_PX` (check 1 in §11).
    - The dividers avoid the question by clipping.
    - The meters are wrapped in clipping Boxes, so an error cannot push a value out of the row.
-7. **No `maxWidth`** (Box has `width`, `minWidth`, `height`, `minHeight` only; l.806–809). So `@type` cannot be capped; it is kept whole and is clipped only in very narrow panes.
+7. **No `maxWidth`** (Box has `width`, `minWidth`, `height`, `minHeight` only; l.806–809). So `@type` sits in a column of fixed width (15 cells on the desktop, the longest drawn on the terminal, §6.7), and its text is cut inside that column.
 
 ## 13. Test impact (view.test.tsx)
 
@@ -780,11 +841,11 @@ These tests encode v1's tree and need updating with the implementation:
 | `summaries()` | The header row's children are [icon slot (desktop only)], title Box, Button, summary Box. The summary is the `Text` in the last child. |
 | Header assertions | Buttons are still `toggle:<id>`, six of them, all `plain`. Add `dimColor === true`. |
 | Top block (desktop) | `📁 online_shop` and `🌿 master` become Svg + `Text 'online_shop'` / `'master'`. The terminal is unchanged. |
-| Svg lists (alts, widths) | Filter to meters (`alt` matching `/%$/`). Icons have `alt=''` and statuses have `alt` = status. Meter alts are unchanged. |
+| Svg lists (alts, widths) | Filter to meters (`alt` matching `/%$/`). Icons and rules carry their row's label, and statuses have `alt` = status. Meter alts are unchanged. |
 | Empty pane | The desktop now draws the ring track. Assert "no meter" (no Svg with a `%` alt) instead of "no Svg". |
 | Meter widths | `meterWidth` becomes `contextMeterWidth` and `limitMeterWidth` (§6.2, §6.5). |
 | `markCells()` | Desktop marks are Svg in a 2-cell slot. The terminal is unchanged (1-cell Box with `◐ ✓ ✗`). |
-| `logColumns()` | The time `Text` sits in an 8-cell Box. The row is [time Box, who Box, text Box]; `who` is 12 cells on the desktop. |
+| `logColumns()` | The time `Text` sits in an 8-cell Box. The row is [time Box, who Box, text Box]; `who` is 13 cells on the desktop. |
 | MCP | `● name` in `success` becomes `Text '● '` in `success` + `Text 'name'` with no colour. |
 
 ## 14. d.ts references

@@ -163,7 +163,7 @@ export function fmtClock(ms: number): string
   - `steps` = `acc.steps.length`;
   - `ttftMs` — среднее (`tFirst − tStart`); `null`, если у какого-то шага нет `tFirst` или шагов нет;
   - `wholeTurnRate` = Σ `output_tokens` по шагам / (`modelMs` / 1000);
-  - `responseRate` берётся у последнего шага, если `!hasTool && hasText && tFirst != null`: `output_tokens / ((tEnd − tFirst) / 1000)`;
+  - `responseRate` берётся у последнего шага, если `!hasTool && hasText`: `output_tokens / ((tEnd − tStart) / 1000)` (задача 6: ответ иногда приходит одним всплеском, и окно от первого чанка давало ~3000 tok/s);
   - обе скорости становятся `null` при окне ≤ 0, при значении больше 5000 или когда шагов нет;
   - токены и кеш считаются по `usage ?? sumUsage(steps.map(s => s.usage))`;
   - `costUsd = costNow − acc.costAtStart`, если оба не `null`, иначе `null`.
@@ -172,7 +172,7 @@ export function fmtClock(ms: number): string
 - **`splitCost`:** `total = totalUsd`, `session = max(0, total − subagents)`; если `totalUsd` не задан, то `total` и `session` равны `null`.
 - **`orderAgents`:** сначала `running`, затем по `startedAt` от новых к старым; исходный массив не меняется.
 - **`pushLog`:** `[entry, ...log].slice(0, max ?? 60)`.
-- **`shortType`:** часть после последнего `:`, не длиннее 10 символов.
+- **`shortType`:** часть после последнего `:`, не длиннее 14 символов (`TYPE_MAX`); более длинный тип обрезается до 13 символов и кончается на `…`.
 - **`shorten`:** пробельные последовательности сжимаются в один пробел, затем `trim`; если длина больше `max`, то `slice(0, max - 1) + '…'`.
 - **`redact`:** список регулярных выражений из `claude-flightdeck/hooks/core.ts`, коммит f31daca (MIT, scasella). Скопировать дословно и указать авторство в комментарии:
   ```text
@@ -203,7 +203,7 @@ export function fmtClock(ms: number): string
   | `mergedLength([[0,10],[5,15]])` | `15` |
   | `mergedLength([[0,10],[2,3]])` | `10` |
   | `mergedLength([[5,7],[0,1]])` | `3` |
-  | `computeTurnStats(A, 33500, U, 5.005)` (ниже) | `modelMs 12700`, `toolMs 900`, `steps 2`, `ttftMs 700`, `wholeTurnRate ≈ 61.18`, `responseRate ≈ 67.18`, `tokensIn 12`, `tokensOut 777`, `cachePct ≈ 99.09`, `costUsd ≈ 0.005` |
+  | `computeTurnStats(A, 33500, U, 5.005)` (ниже) | `modelMs 12700`, `toolMs 900`, `steps 2`, `ttftMs 700`, `wholeTurnRate ≈ 61.18`, `responseRate ≈ 61.95`, `tokensIn 12`, `tokensOut 777`, `cachePct ≈ 99.09`, `costUsd ≈ 0.005` |
   | то же, но у шага 1 `tFirst: null` | `ttftMs null` |
   | то же, но у последнего шага `hasTool: true` | `responseRate null` |
   | один шаг `tStart 0, tFirst 0, tEnd 1000`, `output 100000` | `wholeTurnRate null`, `responseRate null` |
@@ -216,7 +216,8 @@ export function fmtClock(ms: number): string
   | `splitCost(1, 2).session` | `0` |
   | `orderAgents` из `[done@100, running@50, done@300]` | `[running@50, done@300, done@100]` |
   | `pushLog` с 60 записями плюс новая | длина 60, новая на индексе 0 |
-  | `shortType('plugin:code-reviewer')` | `'code-revie'` |
+  | `shortType('plugin:code-reviewer')` | `'code-reviewer'` |
+  | `shortType('frontend-developer')` | `'frontend-deve…'` |
   | `shorten('  a \n  b  ', 10)` / `shorten('abcdefghijk', 5)` | `'a b'` / `'abcd…'` |
   | `redact('curl -H "Authorization: Bearer abcdefgh12345"')` | без `abcdefgh12345` |
   | `redact('API_KEY=xyz123 run')` | `'API_KEY=••• run'` |
@@ -329,7 +330,7 @@ export function fmtClock(ms: number): string
 
 **Поведение (§3 спецификации):**
 - **Элементы:** `const { Box, Text, Button, Svg } = $.ui.resolve(e)`. Если `Svg` нет (terminal), шкала выводится текстом из 10 делений `▰▱`.
-- **Ширина шкалы:** `clamp(round(bodyColumns · 12.5 − 210), 40, 180)`.
+- **Ширина шкалы:** по 8 px на ячейку: `contextMeterWidth = clamp((bodyColumns − 7) · 8, 48, 560)`, `limitMeterWidth = clamp((bodyColumns − 25) · 8, 40, 240)` (задача 6; визуальная спецификация, §6.2 и §6.5).
 - **Порядок блоков** — §3:
   - верх без сворачивания: Session, Total, Context со шкалой, split при `subagents > 0`, строка `📁 name   🌿 branch`;
   - затем Usage (скрыт при пустом `rateLimits`), Turn stats (при `lastTurn = null` — приглушённое `No completed turn yet`), Subagents (скрыт, если записей нет), MCP, Context sources, Log.
@@ -376,3 +377,8 @@ export function fmtClock(ms: number): string
   - удалить копию в dev-mods, чтобы мод не загрузился дважды;
   - в новой сессии убедиться, что панель открылась.
 - [ ] **Шаг 5. Коммиты** — главный агент, только с разрешения пользователя.
+
+## Задачи, добавленные по ходу работы
+
+- **Задача 6. Визуальная переработка** по отзыву пользователя на живую панель: секции с иконками и разделителями, ячейки без выхода за край, шкалы по ширине панели, кольцо контекста. Визуальная спецификация — `docs/superpowers/specs/2026-10-07-session-panel-visual.md`, утверждённое превью — `docs/design/session-panel-preview.html`. В ту же задачу вошла новая формула Response.
+- **Задача 7. Субагенты.** `@type` стоит в столбце постоянной ширины. Продолженный сообщением субагент снова показан как работающий. Запуск и продолжение дают в журнале по одной строке.

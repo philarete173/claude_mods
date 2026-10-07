@@ -13,13 +13,14 @@ The pane redraws as the session runs. Every section below the top block can be f
   reports no plan limits, for example with an API key or a third-party provider.
 - **Turn stats**: the last finished turn of the main agent: response and whole-turn speed (tok/s), elapsed, model and
   tool time, average time to first token, steps, tokens in and out, cache hit rate and cost.
-- **Subagents**: up to 8 rows, running ones first, each with a status mark, description, `@type` and cost; the rest
-  are counted as `+N more`.
+- **Subagents**: up to 8 rows, running ones first, in columns: a status mark, the description, `@type` and cost; the
+  rest are counted as `+N more`. A subagent resumed with SendMessage shows as running again.
 - **MCP**: the servers that have tools in the context, by name, with their count. The app's internal `ccd_*` servers
   are hidden and not counted.
 - **Context sources**: how many skills and MCP servers feed the context.
 - **Log**: the latest 15 of the last 60 events, newest first: prompts, tool calls with their outcome, subagent
-  spawns and results, compactions. Secrets are masked.
+  spawns, resumes and results (an Agent or SendMessage call behind them shows only when it fails), compactions.
+  Secrets are masked.
 
 ## How costs are measured
 
