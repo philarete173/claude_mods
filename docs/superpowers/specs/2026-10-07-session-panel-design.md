@@ -52,7 +52,7 @@ Cost                                  $0.005
 ✓ Revert stockUnits    @engineer      $0.03
   +86 more
 
-▾ MCP                                    3/3
+▾ MCP                                      3
 ● codebase-memory   ● issue-hub   ● figma
 
 ▾ Context sources          52 skills · 3 MCP
@@ -146,7 +146,7 @@ MCP servers                                3
 | Elapsed | `turn.complete.durationMs` |
 | Model time | Σ (`tEnd − tStart`) по шагам |
 | Tool time | длина объединения интервалов инструментов (пересечения склеиваются) |
-| Steps | число шагов, дошедших до `stop` |
+| Steps | число шагов, дошедших до `stop`; строка показывается, только если шагов больше одного (как в OpenChamber) |
 | Average TTFT | среднее (`tFirst − tStart`); если хоть у одного шага нет `tFirst`, то `null` и строка скрыта |
 | Whole turn | Σ `output_tokens` / Model time |
 | Response | у последнего шага, если в нём нет `tool` и есть `text`: `output_tokens` / (`tEnd − tFirst`); иначе `null` и строка скрыта |
@@ -180,8 +180,7 @@ MCP servers                                3
 
 ### 4.5. MCP
 
-- **Основной источник** (подтверждается спайком): встроенный инструмент `WaitForMcpServers`, вызванный через `$.tool.call` без аргументов в фоне, не блокируя хук. Он возвращает `connected`, `failed`, `needsAuth`, `stillPending` и `disabled`. Total — сумма всех групп. Цвета: connected `success`, failed `error`, needsAuth `warning`, pending и disabled `dimColor`.
-- **Запасной источник:** уникальные `serverName` из `usage({ breakdown: 'summary' }).context.breakdown.mcpTools`. Все такие серверы считаются подключёнными; в заголовке выводится просто число.
+- **Источник:** уникальные `serverName` из `usage({ breakdown: 'summary' }).context.breakdown.mcpTools`. Встроенный `WaitForMcpServers` модулям недоступен (§11, проба 4), поэтому статусов подключения нет: все такие серверы считаются подключёнными (зелёный `● name`), в заголовке выводится их число.
 - **Когда обновлять:** на `session.start` и затем таймером раз в 60 секунд.
 - **Служебные серверы приложения** (имена с префиксом `ccd_`, встроенные серверы десктопа) не показываются и не считаются ни в MCP, ни в Context sources (решение пользователя от 2026-10-07).
 
@@ -202,7 +201,7 @@ MCP servers                                3
 | `turn.start` | `you` (`engine`, если текст начинается с `<`) | `shorten(redact(text), 70)`; для `engine` — имя тега |
 | `tool.call` (после `next(e)`) | `main` или тип субагента (до 14 символов) | `shorten(redact(label), 64 − длина суффикса)` + суффикс ` ✓ 0.3s` / ` ✗` / ` denied`, где `label` = `${tool} ${target}` |
 | `agent.spawn` | `main` | `spawned · ${type}: ${description}` |
-| `turn.complete` с `agentId` | тип субагента | `done 1m 12s · $0.02 — ${answer до 80}` или `failed` / `stopped` (`kind: 'error'`) |
+| `turn.complete` с `agentId` | тип субагента | `done 1m 12s · $0.02 — ${answer до 80}` или `failed` (`kind: 'error'`) / `stopped` (`kind: 'info'`, остановка не ошибка; в списке — приглушённый ✗) |
 | `session.compact` | `main` | `compacted 180k → 40k` |
 
 `target` по инструменту:
