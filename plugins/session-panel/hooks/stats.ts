@@ -160,7 +160,7 @@ export function pushLog(log: LogEntry[], entry: LogEntry, max?: number): LogEntr
   return [entry, ...log].slice(0, max ?? 60)
 }
 
-export const TYPE_MAX = 14 // the most the `who` column of the log takes
+export const TYPE_MAX = 14 // the most an agent type takes: the log's `who`; the `@type` column adds the `@`
 
 // The agent type without its plugin prefix, at most 14 characters: a longer one is cut to 13 and ends in an ellipsis.
 export function shortType(type: string): string {

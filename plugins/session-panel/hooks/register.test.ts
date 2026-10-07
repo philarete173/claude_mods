@@ -847,7 +847,8 @@ test('a subagent that a message resumes runs again, with one line in the log, un
     await $.session.start(START)
     await clock.advance(1)
     await $.turn.start({ text: 'go', turnId: 't1' })
-    await $.agent.spawn(SPAWN)
+    // A type with a plugin prefix: the `resumed ·` line writes it whole, as the spawn line does.
+    await $.agent.spawn({ ...SPAWN, subagentType: 'feature-dev:code-reviewer' })
     expect(await chargedAfter($, clock, w, 'a1', 0.5)).toBe(0.5)
     await $.turn.complete({
       answer: 'found it', durationMs: 4000, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer',
@@ -866,7 +867,9 @@ test('a subagent that a message resumes runs again, with one line in the log, un
     const resumed = await readState($)
     expect(resumed.agents.a1).toEqual({ ...ended.agents.a1, status: 'running', endedAt: null })
     expect(resumed.log).toHaveLength(ended.log.length + 1)
-    expect(resumed.log[0]).toMatchObject({ who: 'main', text: 'resumed · engineer: Fix cart total qty', kind: 'info' })
+    expect(resumed.log[0]).toMatchObject({
+      who: 'main', text: 'resumed · feature-dev:code-reviewer: Fix cart total qty', kind: 'info',
+    })
     expect(resumed.log[0]?.at).toBeGreaterThanOrEqual(resumedAt)
 
     // The next request of the same run says nothing more: one line per resume.
@@ -884,8 +887,41 @@ test('a subagent that a message resumes runs again, with one line in the log, un
     expect(endedAgainAt).toBeGreaterThan(endedAt)
     expect(again.agents.a1).toEqual({ ...ended.agents.a1, endedAt: endedAgainAt })
     expect(again.log[0]).toEqual({
-      at: endedAgainAt, who: 'engineer', text: 'done 3.0s · $0.500 — and again', kind: 'ok',
+      at: endedAgainAt, who: 'code-reviewer', text: 'done 3.0s · $0.500 — and again', kind: 'ok',
     })
+  })
+
+test('a resumed subagent shows as running while its request is in flight, not once the request is over', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await $.agent.spawn(SPAWN)
+    await $.turn.complete({
+      answer: 'ok', durationMs: 5, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer',
+    })
+    expect((await readState($)).agents.a1?.status).toBe('done')
+
+    // The resumed request is sent and read as far as its first chunk (200 ms in); its stop (700 ms in) has not come.
+    const stream = $.turn.step({ turnId: 't1', index: 1, model: 'claude-sonnet-5', messageCount: 1, agentId: 'a1' })
+    const seen: unknown[] = []
+    const consuming = (async () => {
+      let item = await stream.next()
+      while (item.done !== true) {
+        seen.push(item.value)
+        item = await stream.next()
+      }
+    })()
+    await clock.advance(250)
+    expect(seen).toHaveLength(1)
+    expect((await readState($)).agents.a1?.status).toBe('running')
+
+    // The request ends: the row runs still, for the end of a request is not the end of the agent.
+    await drive(clock, consuming)
+    expect(seen).toHaveLength(2)
+    expect((await readState($)).agents.a1?.status).toBe('running')
   })
 
 test('a step revives only the closed row of its own agent: a running agent, an unknown one and main change nothing',

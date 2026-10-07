@@ -19,8 +19,8 @@ The pane redraws as the session runs. Every section below the top block can be f
   are hidden and not counted.
 - **Context sources**: how many skills and MCP servers feed the context.
 - **Log**: the latest 15 of the last 60 events, newest first: prompts, tool calls with their outcome, subagent
-  spawns, resumes and results (an Agent or SendMessage call behind them shows only when it fails), compactions.
-  Secrets are masked.
+  spawns, resumes and results (a successful Agent call, or a SendMessage to a known subagent, is not logged: their
+  lines say it), compactions. Secrets are masked.
 
 ## How costs are measured
 

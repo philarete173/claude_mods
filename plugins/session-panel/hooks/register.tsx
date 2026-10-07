@@ -163,7 +163,7 @@ async function syncAgents($: EngineInterface): Promise<void> {
 
 // A subagent that SendMessage has resumed keeps its id, and runs again: its row says so, and the log says it once.
 async function reviveAgent($: EngineInterface, agentId: string): Promise<void> {
-  let revived = null as AgentRow | null
+  let revived = null as AgentRow | null // the cast stops TypeScript narrowing it to `null`: the update callback sets it
   await update($, agentsAtom, rows => {
     const row = rows[agentId]
     // The update runs again when its write misses, so it sets `revived` on every run.

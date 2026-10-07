@@ -1107,10 +1107,12 @@ test('a subagent row gives `@type` a column of its own, one width on every row; 
       expect(group?.props, surface).toMatchObject({
         flexDirection: 'row', flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden', columnGap: 1,
       })
-      // The description takes all the room the type leaves, and gives way down to nothing before the type does.
+      // The description takes all the room the type leaves, and gives way down to nothing before the type does. Its
+      // text starts at the left of the cell (no `justifyContent`): a right-aligned one would sit against the type.
       expect(description?.props, surface).toMatchObject({
         flexDirection: 'row', flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden',
       })
+      expect(description?.props?.justifyContent, surface).toBeUndefined()
       expect(childrenOf(description).map(text => text.props?.wrap), surface).toEqual(['truncate'])
       // The type holds its width, from the left of its cell, and its text is cut inside the cell.
       expect(type?.props, surface).toMatchObject({ flexDirection: 'row', flexShrink: 0, overflow: 'hidden' })
