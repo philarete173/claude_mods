@@ -30,6 +30,9 @@ const TICK_MS = 30_000
 // The words $.agent.list() uses for how a subagent ended; any other word (`running` too) leaves the row as it is.
 const LISTED_STATUS: Record<string, AgentStatus> = { completed: 'done', failed: 'failed', killed: 'stopped' }
 
+// The tools that start a subagent (`Task` is the name of `Agent` in older builds).
+const SPAWN_TOOLS: string[] = ['Agent', 'Task']
+
 // The cost.usd reading that the next request is charged against. It is null until a reading sets it: the first one
 // after the module loads (the start of the session), and the first one after a /clear.
 let lastUsd: number | null = null
@@ -158,6 +161,21 @@ async function syncAgents($: EngineInterface): Promise<void> {
   })
 }
 
+// A subagent that SendMessage has resumed keeps its id, and runs again: its row says so, and the log says it once.
+async function reviveAgent($: EngineInterface, agentId: string): Promise<void> {
+  let revived = null as AgentRow | null
+  await update($, agentsAtom, rows => {
+    const row = rows[agentId]
+    // The update runs again when its write misses, so it sets `revived` on every run.
+    revived = row !== undefined && row.status !== 'running' ? { ...row, status: 'running', endedAt: null } : null
+
+    return revived === null ? rows : { ...rows, [agentId]: revived }
+  })
+  if (revived !== null) {
+    await addLog($, await $.clock.now(), 'main', `resumed · ${revived.type}: ${revived.description}`, 'info')
+  }
+}
+
 // Takes a cost reading, shows it as Total, and charges what is new since the last reading to the agent whose request
 // has just stopped. The main loop's share is not kept anywhere: Session is Total less the subagents. The engine books
 // a request as it stops, so a timer takes the reading, off the stream.
@@ -275,6 +293,10 @@ export const register: Register = on => {
     let usage: Usage = {}
     let hasTool = false
     let hasText = false
+    // A step of a subagent whose row has closed means that a message resumed it: the row runs again. The stream does
+    // not wait for that.
+    const { agentId } = e
+    if (agentId !== undefined) inBackground($, () => reviveAgent($, agentId))
     const stream = next(e)
     for await (const chunk of stream) {
       // The first chunk of any kind is the start of the response, the engine's own chunks included.
@@ -307,9 +329,16 @@ export const register: Register = on => {
       await update($, turnAtom, acc => acc && { ...acc, toolIntervals: [...acc.toolIntervals, interval] })
     }
     const isFailed = ran.deny !== undefined || ran.isError === true
-    const outcome = ran.deny !== undefined ? ' denied' : isFailed ? ' ✗' : ` ✓ ${fmtDuration(t1 - t0)}`
-    const label = shorten(redact(toolLabel(e.tool, e, await $.session.root())), 64 - outcome.length)
-    await addLog($, t1, await whoIs($, e.agentId), `${label}${outcome}`, isFailed ? 'error' : 'ok')
+    // A call that started a subagent or woke one has its lines in the log already (`spawned · …`, `resumed · …`, the
+    // agent's own): only a call that failed or was denied is logged here.
+    const isAgentCall =
+      SPAWN_TOOLS.includes(e.tool) ||
+      (e.tool === 'SendMessage' && typeof e.to === 'string' && Object.hasOwn(await read($, agentsAtom), e.to))
+    if (isFailed || !isAgentCall) {
+      const outcome = ran.deny !== undefined ? ' denied' : isFailed ? ' ✗' : ` ✓ ${fmtDuration(t1 - t0)}`
+      const label = shorten(redact(toolLabel(e.tool, e, await $.session.root())), 64 - outcome.length)
+      await addLog($, t1, await whoIs($, e.agentId), `${label}${outcome}`, isFailed ? 'error' : 'ok')
+    }
 
     return ran
   })

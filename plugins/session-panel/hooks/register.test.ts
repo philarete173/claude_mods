@@ -172,10 +172,14 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null } as never
   })
   on('tool.call', async (_$, e) => {
-    if (e.tool === 'Bash' && e.command.startsWith('deny')) return { deny: 'no' }
-    if (e.tool === 'Bash' && e.command.startsWith('fail')) {
-      return { isError: true as const, result: 'boom', text: 'boom' }
-    }
+    // What a call says decides how it ends: the command of a Bash, the description of an Agent, the message of a
+    // SendMessage. One that starts with `deny` is denied, one that starts with `fail` fails.
+    let says = ''
+    if (e.tool === 'Bash') says = e.command
+    if (e.tool === 'Agent') says = e.description
+    if (e.tool === 'SendMessage') says = e.message
+    if (says.startsWith('deny')) return { deny: 'no' }
+    if (says.startsWith('fail')) return { isError: true as const, result: 'boom', text: 'boom' }
     await clock.sleep(300)
 
     return { result: { stdout: 'ok' } as never, text: 'ok' }
@@ -300,6 +304,12 @@ const SPAWN = {
   background: true,
   fork: false,
 } as const
+
+// The calls that start a subagent and wake one, as the model makes them. What `description` and `message` say decides
+// how the bottom ends them.
+const agentCall = (description: string) =>
+  ({ tool: 'Agent', description, prompt: 'p', subagent_type: 'engineer' }) as const
+const sendTo = (to: unknown, message = 'go on') => ({ tool: 'SendMessage', to, message }) as const
 
 test('session.start registers the command and opens the pane when a desktop is attached', async ($, on) => {
   const w = bottom(on, mock.clock(on, { now: 1_000_000 }))
@@ -828,6 +838,166 @@ test('cost readings are taken one at a time: a turn that ends while one is in fl
 
     expect(w.maxUsageInFlight).toBe(1)
     expect((await readState($)).log[0]?.text).toBe('done 1.0s · $0.250 — ok')
+  })
+
+test('a subagent that a message resumes runs again, with one line in the log, until it ends again', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await $.agent.spawn(SPAWN)
+    expect(await chargedAfter($, clock, w, 'a1', 0.5)).toBe(0.5)
+    await $.turn.complete({
+      answer: 'found it', durationMs: 4000, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer',
+    })
+    const endedAt = clock.now()
+    const ended = await readState($)
+    expect(ended.agents.a1).toMatchObject({ status: 'done', endedAt, costUsd: 0.5 })
+
+    // A message wakes it: its next request carries its id, and the row runs again. Nothing else of the row changes,
+    // the cost of the first run included (the request costs nothing here).
+    w.stepCost = 0
+    await clock.advance(5000)
+    const resumedAt = clock.now()
+    await runStep($, clock, { turnId: 't1', index: 1, agentId: 'a1' })
+    await clock.advance(10)
+    const resumed = await readState($)
+    expect(resumed.agents.a1).toEqual({ ...ended.agents.a1, status: 'running', endedAt: null })
+    expect(resumed.log).toHaveLength(ended.log.length + 1)
+    expect(resumed.log[0]).toMatchObject({ who: 'main', text: 'resumed · engineer: Fix cart total qty', kind: 'info' })
+    expect(resumed.log[0]?.at).toBeGreaterThanOrEqual(resumedAt)
+
+    // The next request of the same run says nothing more: one line per resume.
+    await runStep($, clock, { turnId: 't1', index: 1, agentId: 'a1' })
+    await clock.advance(10)
+    expect((await readState($)).log).toEqual(resumed.log)
+
+    // It ends again: the row is closed again, with the new time, and the end has its line.
+    await clock.advance(1000)
+    await $.turn.complete({
+      answer: 'and again', durationMs: 3000, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer',
+    })
+    const endedAgainAt = clock.now()
+    const again = await readState($)
+    expect(endedAgainAt).toBeGreaterThan(endedAt)
+    expect(again.agents.a1).toEqual({ ...ended.agents.a1, endedAt: endedAgainAt })
+    expect(again.log[0]).toEqual({
+      at: endedAgainAt, who: 'engineer', text: 'done 3.0s · $0.500 — and again', kind: 'ok',
+    })
+  })
+
+test('a step revives only the closed row of its own agent: a running agent, an unknown one and main change nothing',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await $.agent.spawn(SPAWN)
+    await $.agent.spawn(SPAWN)
+    await $.turn.complete({
+      answer: 'ok', durationMs: 5, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer',
+    })
+    const before = await readState($)
+    expect([before.agents.a1?.status, before.agents.a2?.status]).toEqual(['done', 'running'])
+
+    // The step of a2, which runs; of a9, which the panel has never heard of; of the main loop, which has no agent id.
+    // The closed row of a1 stays closed through all three, and no line is added to the log.
+    const steps = [
+      ['a running agent', { agentId: 'a2' }], ['an unknown agent', { agentId: 'a9' }], ['the main loop', {}],
+    ] as const
+    for (const [who, from] of steps) {
+      await runStep($, clock, { turnId: 't1', index: 1, ...from })
+      await clock.advance(10)
+      const after = await readState($)
+      expect(after.agents, who).toEqual(before.agents)
+      expect(after.log, who).toEqual(before.log)
+    }
+  })
+
+test('a subagent that the main loop spawns has one line in the log: its spawn, not the Agent call as well', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+
+    // The engine spawns the subagent while the tool call is in flight, and the call returns once the agent has run.
+    const call = $.tool.call(agentCall('Fix cart total qty'))
+    await $.agent.spawn(SPAWN)
+    expect(await drive(clock, call)).toEqual({ result: { stdout: 'ok' }, text: 'ok' })
+    // Task is the other name of the same tool.
+    await drive(clock, $.tool.call({ ...agentCall('Fix cart total qty'), tool: 'Task' } as never))
+
+    const log = (await readState($)).log
+    expect(log.map(entry => [entry.who, entry.text, entry.kind])).toEqual([
+      ['main', 'spawned · engineer: Fix cart total qty', 'info'],
+    ])
+  })
+
+test('a denied or failed Agent call is logged as denied or ✗: no subagent started, so no other line says it',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+
+    expect(await $.tool.call(agentCall('deny it'))).toEqual({ deny: 'no' })
+    expect(await $.tool.call(agentCall('fail it'))).toEqual({ isError: true, result: 'boom', text: 'boom' })
+
+    expect((await readState($)).log.map(entry => [entry.who, entry.text, entry.kind])).toEqual([
+      ['main', 'Agent → engineer: fail it ✗', 'error'],
+      ['main', 'Agent → engineer: deny it denied', 'error'],
+    ])
+  })
+
+test('a SendMessage to a subagent adds no line, any other one does, and a failed one is logged either way',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.agent.spawn(SPAWN)
+    const lines = async (): Promise<string[][]> =>
+      (await readState($)).log.map(entry => [entry.who, entry.text, entry.kind])
+    const spawned = [['main', 'spawned · engineer: Fix cart total qty', 'info']]
+
+    // To a subagent the panel has a row for, by its id: its own lines say it.
+    await drive(clock, $.tool.call(sendTo('a1')))
+    expect(await lines()).toEqual(spawned)
+
+    // To anyone else: everybody, an id with no row, a name, a key that every object has, and not a name at all.
+    for (const to of ['*', 'a9', 'researcher', 'constructor', 42]) await drive(clock, $.tool.call(sendTo(to)))
+    expect(await lines()).toEqual([...Array(5).fill(['main', 'SendMessage ✓ 0.3s', 'ok']), ...spawned])
+
+    // A call to the subagent that failed or was denied says so.
+    await $.tool.call(sendTo('a1', 'fail it'))
+    await $.tool.call(sendTo('a1', 'deny it'))
+    expect((await lines()).slice(0, 2)).toEqual([
+      ['main', 'SendMessage denied', 'error'],
+      ['main', 'SendMessage ✗', 'error'],
+    ])
+  })
+
+test('Tool time counts an Agent call and a SendMessage call of the main loop, though neither is logged', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await $.agent.spawn(SPAWN)
+
+    const agentStart = clock.now()
+    await drive(clock, $.tool.call(agentCall('Fix cart total qty')))
+    const messageStart = clock.now()
+    await drive(clock, $.tool.call(sendTo('a1')))
+
+    const midTurn = await readState($)
+    expect(midTurn.turn?.toolIntervals).toEqual([[agentStart, agentStart + 300], [messageStart, messageStart + 300]])
+    expect(midTurn.log.map(entry => entry.text)).toEqual(['spawned · engineer: Fix cart total qty', 'go'])
+    await $.turn.complete({ answer: 'done', durationMs: 2000, isAborted: false, turnId: 't1', reason: 'answer' })
+    expect((await readState($)).lastTurn?.toolMs).toBe(600)
   })
 
 test('every 30 s the pane is redrawn and statuses follow $.agent.list; usage refreshes every second tick', WITH_READER,
