@@ -1,0 +1,756 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Session panel v2: visual preview</title>
+<style>
+  :root {
+    --ui-font: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+    --mono-font: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html { background: #141413; }
+  body { margin: 0; color: #d6d4cc; font: 14px/1.55 var(--ui-font); }
+  main { max-width: 1100px; margin: 0 auto; padding: 36px 28px 96px; }
+  h1 { margin: 0 0 8px; font-size: 21px; font-weight: 650; color: #f2f0e9; letter-spacing: -0.01em; }
+  .lede { margin: 0; max-width: 82ch; color: #9b988f; }
+  code { font: 12.5px var(--mono-font); color: #c9c6bd; }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px 32px; align-items: center; margin: 22px 0 0; color: #bdbab1; }
+  .controls label { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; }
+  .controls input[type=range] { width: 220px; accent-color: #2f7de1; }
+  .controls input:focus-visible { outline: 2px solid #5b9cf0; outline-offset: 3px; }
+  .controls output { min-width: 6ch; font-variant-numeric: tabular-nums; color: #f2f0e9; }
+  h2 { margin: 48px 0 6px; font-size: 15px; font-weight: 650; color: #f2f0e9; }
+  .note { margin: 0 0 14px; max-width: 82ch; color: #9b988f; }
+  .stage { display: flex; flex-wrap: wrap; gap: 32px; align-items: flex-start; padding: 28px; border-radius: 14px; overflow-x: auto; }
+  .stage.dark { background: #1c1b1a; }
+  .stage.light { background: #e9e7df; }
+  figure { margin: 0; }
+  figcaption { margin-top: 10px; font: 12px/1.4 var(--ui-font); color: #8d8a82; font-variant-numeric: tabular-nums; }
+  .stage.light figcaption { color: #67655e; }
+
+  /* The app's themes, as the pane inherits them. Approximations of the Claude desktop app, not part of the spec. */
+  .theme-dark  { --bg: #262624; --edge: #3a3936; --fg: #ecebe6; --dim: #9c9a93; --success: #5bb56c; --warning: #e0a030; --error: #ef5f63; --focus: #5b9cf0; --chrome: #8f8d86; }
+  .theme-light { --bg: #fbfaf7; --edge: #dad8cf; --fg: #1d1c1a; --dim: #6f6d66; --success: #2e8540; --warning: #a86500; --error: #c8363c; --focus: #2f7de1; --chrome: #77756e; }
+  .theme-term  { --bg: #17171a; --edge: #34343a; --fg: #d8d8d8; --dim: #7f7f87; --success: #6cc36c; --warning: #e5c07b; --error: #e06c75; --focus: #5b9cf0; --chrome: #7f7f87; font: 13px var(--mono-font); }
+
+  /* The pane frame (title bar, padding, clipping) belongs to the app. */
+  .pane { background: var(--bg); color: var(--fg); border: 1px solid var(--edge); border-radius: 10px; overflow: hidden; }
+  .pane-head { display: flex; align-items: center; justify-content: space-between; height: 38px; padding: 0 14px 0 16px; color: var(--chrome); font: 13px var(--ui-font); user-select: none; }
+  .pane-body { padding: 2px 16px 18px; font: 13px/19px var(--ui-font); overflow: hidden; }
+  .theme-term .pane-head { font-family: var(--mono-font); }
+  .theme-term .pane-body { font: 13px/17px var(--mono-font); padding: 2px 1ch 12px; }
+
+  /* The element kit of the script: Box, Text, Button and Svg, drawn as the desktop draws them. */
+  .e-box { display: flex; }
+  .e-text { white-space: pre-wrap; }
+  .e-text.cut { white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+  .e-text.bold { font-weight: 650; }
+  .e-svg { display: block; flex: none; }
+  .e-btn { all: unset; cursor: pointer; color: var(--fg); border-radius: 3px; padding: 0 1px; line-height: inherit; }
+  .e-btn.dim { color: var(--dim); }
+  .e-btn:hover { color: var(--fg); }
+  .e-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+  .outlines .e-box { outline: 1px dashed rgba(91, 156, 240, 0.55); outline-offset: -1px; }
+
+  .sheets { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); border-radius: 14px; overflow: hidden; }
+  .sheet { padding: 22px 24px 8px; }
+  .sheet.dark { background: #262624; color: #c9c7c0; }
+  .sheet.light { background: #fbfaf7; color: #4a4943; }
+  .sheet h3 { margin: 0 0 16px; font-size: 13px; font-weight: 650; }
+  .sheet h4 { margin: 0 0 10px; font-size: 12px; font-weight: 500; opacity: 0.75; }
+  .sheet ul { list-style: none; margin: 0 0 20px; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(136px, 1fr)); gap: 12px 10px; }
+  .sheet li { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Session panel v2: visual preview</h1>
+  <p class="lede">
+    The redesigned session pane, drawn from the element trees in
+    <code>docs/superpowers/specs/2026-10-07-session-panel-visual.md</code> by a small stand-in for the desktop
+    renderer. One cell is 8 px, as measured on the live desktop, and text uses your system font. Click a ▾ to fold
+    a section. Drag the width to check that no row crosses the right edge.
+  </p>
+  <div class="controls">
+    <label>Pane width
+      <input type="range" id="width" min="280" max="560" step="4" value="400">
+      <output id="width-out" for="width">400 px</output>
+    </label>
+    <label><input type="checkbox" id="outlines"> Outline every Box</label>
+  </div>
+
+  <h2>Desktop, dark theme</h2>
+  <p class="note">
+    The sample of <code>current-pane-v1.png</code>: $148.59 in total, Context at 88.2 %, six subagents with one
+    running, five MCP servers, twelve log lines. The title bar belongs to the app.
+  </p>
+  <div class="stage dark" id="stage-dark"></div>
+
+  <h2>Desktop, light theme</h2>
+  <p class="note">
+    The same markup with the light theme's colours. Icons, rules and meters are SVG images, so they keep their
+    colours in both themes.
+  </p>
+  <div class="stage light" id="stage-light"></div>
+
+  <h2>Other states</h2>
+  <p class="note">
+    A new session before the first response; and a session with plan limits, a nearly full context, three folded
+    sections and every subagent status.
+  </p>
+  <div class="stage dark" id="stage-states"></div>
+
+  <h2>Terminal surface</h2>
+  <p class="note">
+    The terminal has no <code>Svg</code>: rules become ─ lines, meters become ▰▱ cells, icons drop out, status marks
+    are glyphs and the project line keeps its emoji. The tree is otherwise the same.
+  </p>
+  <div class="stage dark" id="stage-term"></div>
+
+  <h2>Icons</h2>
+  <p class="note">Every SVG of the spec at 14 px and at 2× for inspection, on both themes.</p>
+  <div class="sheets" id="sheets"></div>
+</main>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---- Tokens (spec §3) -------------------------------------------------------------------------------------
+  const CELL_PX = 8;
+  const ICON_PX = 14;
+  const ICON_CELLS = 2;
+  const PCT_CELLS = 6;
+  const LIMIT_LABEL_CELLS = 7;
+  const LIMIT_PCT_CELLS = 5;
+  const COST_CELLS = 7;
+  const TIME_CELLS = 8;
+  const WHO_CELLS = 12;
+  const WHO_CELLS_MAX = 14;
+  const TEXT_METER_CELLS = 10;
+  const RULE_PX = 1600;
+  const MAX_AGENT_ROWS = 8;
+  const MAX_LOG_ROWS = 15;
+  const BLUE = '#2f7de1';
+  const AMBER = '#e0a030';
+  const RED = '#e5484d';
+  const NEUTRAL = '#8a8a8a';
+  const GREEN = '#2ea043';
+  const OK = 'success';
+  const WARN = 'warning';
+  const BAD = 'error';
+  const TERM_ROW_PX = 17;
+  const LIMIT_LABELS = { five_hour: '5-hour', seven_day: 'Weekly', spend_limit: 'Spend' };
+  const AGENT_MARKS = {
+    running: { glyph: '◐', color: BLUE },
+    done: { glyph: '✓', color: OK },
+    failed: { glyph: '✗', color: BAD },
+    stopped: { glyph: '✗', isDim: true },
+  };
+
+  // ---- Formats (hooks/stats.ts, unchanged) ------------------------------------------------------------------
+  const pad2 = n => String(n).padStart(2, '0');
+  const fmtUsd = x => (x === 0 ? '$0' : x < 0.001 ? '<$0.001' : x >= 1 ? `$${x.toFixed(2)}` : `$${x.toFixed(3)}`);
+  const fmtPct = (x, digits) => `${x.toFixed(digits)}%`;
+  const fmtTokens = n => {
+    if (n < 1000) return String(n);
+    if (n < 10000) return `${Number((n / 1000).toFixed(1))}k`;
+    if (Math.round(n / 1000) < 1000) return `${Math.round(n / 1000)}k`;
+    return `${Number((n / 1e6).toFixed(1))}M`;
+  };
+  const fmtDuration = ms => {
+    const tenths = Math.round(ms / 100);
+    if (tenths < 600) return `${(tenths / 10).toFixed(1)}s`;
+    const seconds = Math.round(ms / 1000);
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return h > 0 ? `${h}h ${pad2(m)}m` : `${m}m ${pad2(seconds % 60)}s`;
+  };
+  const fmtTtft = ms => (ms < 100 ? '<0.1s' : fmtDuration(ms));
+  const fmtRate = r => `~${Math.round(r)} tok/s`;
+  const fmtCountdown = ms => {
+    if (ms <= 0) return '↻ now';
+    const minutes = Math.ceil(ms / 60000);
+    if (minutes < 60) return `↻ ${minutes}m`;
+    if (minutes < 1440) return `↻ ${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+    return `↻ ${Math.floor(minutes / 1440)}d ${Math.floor((minutes % 1440) / 60)}h`;
+  };
+  const shortType = t => t.slice(t.lastIndexOf(':') + 1).slice(0, 14);
+  const shorten = (s, max) => {
+    const flat = s.replace(/\s+/g, ' ').trim();
+    return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+  };
+  const orNull = (x, format) => (x === null ? null : format(x));
+  const clampPct = p => (Number.isFinite(p) ? Math.min(Math.max(p, 0), 100) : 0);
+  const meterColor = p => (p >= 95 ? RED : p >= 80 ? AMBER : BLUE);
+  const pctColor = p => (p >= 95 ? BAD : p >= 80 ? WARN : undefined);
+
+  // ---- SVG sources (spec §5.1, §7, §8; meterSvg unchanged) --------------------------------------------------
+  function meterSvg(pct, widthPx) {
+    const fillPx = Math.round((clampPct(pct) * widthPx) / 100);
+    return [
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${widthPx}" height="8" viewBox="0 0 ${widthPx} 8">`,
+      `<rect width="${widthPx}" height="8" rx="4" fill="#808080" fill-opacity="0.3"/>`,
+      `<rect width="${fillPx}" height="8" rx="4" fill="${meterColor(pct)}"/>`,
+      '</svg>',
+    ].join('');
+  }
+  const RULE_SVG =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${RULE_PX}" height="1" viewBox="0 0 ${RULE_PX} 1"` +
+    ` preserveAspectRatio="none"><rect width="${RULE_PX}" height="1" fill="#808080" fill-opacity="0.35"/></svg>`;
+  const ICON_ROOT = `xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="${NEUTRAL}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"`;
+  const icon = body => `<svg ${ICON_ROOT}>${body}</svg>`;
+  const dot = cy => `<circle cx="2.25" cy="${cy}" r=".9" fill="${NEUTRAL}" stroke="none"/>`;
+  const ICON = {
+    usage: icon('<circle cx="7" cy="8" r="4.75"/><path d="M5.5 1.5h3M7 1.5v1.75M7 8V5.75"/>'),
+    turn: icon('<path d="M3.5 11.5v-4M7 11.5v-9M10.5 11.5v-6"/>'),
+    agents: icon('<rect x="2.5" y="4.75" width="9" height="7" rx="2"/><path d="M7 4.75V2.5H5M5.25 7.75v1.25M8.75 7.75v1.25"/>'),
+    mcp: icon('<path d="M5.25 1.5v3M8.75 1.5v3M7 10.25v2.25"/><path d="M3.5 4.5h7v2.75a3 3 0 0 1-3 3h-1a3 3 0 0 1-3-3z"/>'),
+    sources: icon('<path d="M7 1.5 12.5 4.25 7 7 1.5 4.25z"/><path d="M1.5 7 7 9.75 12.5 7M1.5 9.75 7 12.5 12.5 9.75"/>'),
+    log: icon(`<path d="M5 3.5h7M5 7h7M5 10.5h7"/>${dot(3.5)}${dot(7)}${dot(10.5)}`),
+    folder: icon('<path d="M1.5 3.75c0-.55.45-1 1-1h2.6l1.4 1.5h5c.55 0 1 .45 1 1v5.5c0 .55-.45 1-1 1h-9c-.55 0-1-.45-1-1z"/>'),
+    branch: icon('<path d="M4 1.75v7.5"/><circle cx="4" cy="11" r="1.75"/><circle cx="10" cy="3.5" r="1.75"/><path d="M10 5.25c0 2.75-2.25 3.75-4.6 4.4"/>'),
+  };
+  const statusIcon = (color, inner) =>
+    `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14">` +
+    `<circle cx="7" cy="7" r="5.5" fill="none" stroke="${color}" stroke-width="1.4"/>${inner}</svg>`;
+  const STATUS_SVG = {
+    running: statusIcon(BLUE, `<path d="M7 3.5a3.5 3.5 0 0 1 0 7z" fill="${BLUE}"/>`),
+    done: statusIcon(GREEN, `<path d="M4.6 7.2l1.7 1.7 3.2-3.5" fill="none" stroke="${GREEN}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>`),
+    failed: statusIcon(RED, `<path d="M5.1 5.1l3.8 3.8M8.9 5.1l-3.8 3.8" fill="none" stroke="${RED}" stroke-width="1.4" stroke-linecap="round"/>`),
+    stopped: statusIcon(NEUTRAL, `<rect x="5" y="5" width="4" height="4" rx=".75" fill="${NEUTRAL}"/>`),
+  };
+  const RING_R = 5.5;
+  const RING_C = 2 * Math.PI * RING_R;
+  function ringSvg(pct) {
+    const p = pct === undefined || !Number.isFinite(pct) ? 0 : clampPct(pct);
+    const track = `<circle cx="7" cy="7" r="${RING_R}" fill="none" stroke="#808080" stroke-opacity="0.3" stroke-width="2"/>`;
+    const dash = p >= 100 ? '' : ` stroke-dasharray="${((p / 100) * RING_C).toFixed(2)} ${RING_C.toFixed(2)}"`;
+    const arc = p > 0
+      ? `<circle cx="7" cy="7" r="${RING_R}" fill="none" stroke="${meterColor(p)}" stroke-width="2"${dash} transform="rotate(-90 7 7)"/>`
+      : '';
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14">${track}${arc}</svg>`;
+  }
+  const contextMeterWidth = cols => Math.min(560, Math.max(48, (cols - 7) * CELL_PX));
+  const limitMeterWidth = cols => Math.min(240, Math.max(40, (cols - 25) * CELL_PX));
+  const dataUri = source => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(source)}`;
+
+  // ---- Element kit: a stand-in for the surface's renderer. Box numbers are cells: 8 px on the desktop, 1ch and
+  // one row on the terminal. Svg is an image, as on the desktop; the terminal has none. --------------------------
+  function kit(surface) {
+    const isTerminal = surface === 'terminal';
+    const x = n => (isTerminal ? `${n}ch` : `${n * CELL_PX}px`);
+    const y = n => (isTerminal ? `${n * TERM_ROW_PX}px` : `${n * CELL_PX}px`);
+    const size = v => (typeof v === 'number' ? x(v) : v);
+    const THEME = { success: 'var(--success)', warning: 'var(--warning)', error: 'var(--error)' };
+    const append = (node, kids) => {
+      for (const kid of kids.flat(Infinity)) {
+        if (kid !== null && kid !== undefined && kid !== false) node.append(kid);
+      }
+      return node;
+    };
+
+    function Box(p, ...kids) {
+      const node = document.createElement('div');
+      node.className = 'e-box';
+      const s = node.style;
+      s.flexDirection = p.flexDirection ?? 'row';
+      if (p.flexGrow !== undefined) s.flexGrow = String(p.flexGrow);
+      if (p.flexShrink !== undefined) s.flexShrink = String(p.flexShrink);
+      if (p.flexWrap !== undefined) s.flexWrap = p.flexWrap;
+      if (p.alignItems !== undefined) s.alignItems = p.alignItems;
+      if (p.justifyContent !== undefined) s.justifyContent = p.justifyContent;
+      if (p.columnGap !== undefined) s.columnGap = x(p.columnGap);
+      if (p.width !== undefined) s.width = size(p.width);
+      if (p.minWidth !== undefined) s.minWidth = size(p.minWidth);
+      if (p.marginTop !== undefined) s.marginTop = y(p.marginTop);
+      if (p.marginBottom !== undefined) s.marginBottom = y(p.marginBottom);
+      if (p.paddingLeft !== undefined) s.paddingLeft = x(p.paddingLeft);
+      if (p.overflow !== undefined) s.overflow = p.overflow;
+      return append(node, kids);
+    }
+
+    function Text(p, text) {
+      const node = document.createElement('span');
+      const isCut = typeof p.wrap === 'string' && p.wrap.startsWith('truncate');
+      node.className = `e-text${isCut ? ' cut' : ''}${p.bold ? ' bold' : ''}`;
+      if (p.dimColor) node.style.color = 'var(--dim)';
+      else if (p.color) node.style.color = THEME[p.color] ?? p.color;
+      node.textContent = text;
+      return node;
+    }
+
+    // A desktop draws its native button whether `plain` or not; here, a text-like button.
+    function Button(p) {
+      const node = document.createElement('button');
+      node.type = 'button';
+      node.className = `e-btn${p.dimColor ? ' dim' : ''}`;
+      node.textContent = p.label;
+      node.dataset.key = p.key;
+      node.addEventListener('click', () => p.onPress());
+      return node;
+    }
+
+    function Svg(p) {
+      const node = document.createElement('img');
+      node.className = 'e-svg';
+      node.src = dataUri(p.source);
+      node.alt = p.alt;
+      if (p.width !== undefined) node.style.width = `${p.width}px`;
+      if (p.height !== undefined) node.style.height = `${p.height}px`;
+      return node;
+    }
+
+    return { Box, Text, Button, Svg: isTerminal ? undefined : Svg };
+  }
+
+  // ---- The view (spec §4–§6) --------------------------------------------------------------------------------
+  function renderPane(els, data, props, handlers) {
+    const cols = props.bodyColumns;
+    const d = {
+      ui: { Box: els.Box, Text: els.Text, Button: els.Button, Svg: els.Svg },
+      data, handlers, cols,
+      contextMeterPx: contextMeterWidth(cols),
+      limitMeterPx: limitMeterWidth(cols),
+    };
+    return els.Box({ flexDirection: 'column' },
+      topBlock(d), usageSection(d), turnSection(d), agentsSection(d), mcpSection(d), sourcesSection(d), logSection(d));
+  }
+
+  // §5.1
+  function divider(d) {
+    const { Box, Text, Svg } = d.ui;
+    if (Svg === undefined) return Text({ dimColor: true, wrap: 'truncate' }, '─'.repeat(d.cols));
+    return Box({ flexDirection: 'row', marginTop: 1, marginBottom: 1, overflow: 'hidden' },
+      Svg({ source: RULE_SVG, alt: '', width: RULE_PX, height: 1 }));
+  }
+
+  // §5.2
+  function iconSlot(d, source, alt = '') {
+    const { Box, Svg } = d.ui;
+    if (Svg === undefined) return null;
+    return Box({ flexDirection: 'row', width: ICON_CELLS, flexShrink: 0, alignItems: 'center' },
+      Svg({ source, alt, width: ICON_PX, height: ICON_PX }));
+  }
+
+  // §5.3
+  function shrinkText(d, text, style = {}) {
+    const { Box, Text } = d.ui;
+    return Box({ flexDirection: 'row', flexShrink: 1, minWidth: 0, overflow: 'hidden' },
+      Text({ ...style, wrap: 'truncate' }, text));
+  }
+  function endText(d, text, style = {}) {
+    const { Box, Text } = d.ui;
+    return Box({ flexDirection: 'row', flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden', justifyContent: 'flex-end' },
+      text !== '' && Text({ ...style, wrap: 'truncate' }, text));
+  }
+
+  function meter(d, pct, alt, widthPx) {
+    const { Box, Text, Svg } = d.ui;
+    if (Svg !== undefined) return Svg({ source: meterSvg(pct, widthPx), alt, width: widthPx, height: 8 });
+    const filled = Math.round((clampPct(pct) * TEXT_METER_CELLS) / 100);
+    return Box({ flexDirection: 'row' },
+      filled > 0 && Text({ color: meterColor(pct) }, '▰'.repeat(filled)),
+      filled < TEXT_METER_CELLS && Text({ dimColor: true }, '▱'.repeat(TEXT_METER_CELLS - filled)));
+  }
+
+  // §5.4
+  function section(d, id, title, summary, body) {
+    const { Box, Text, Button } = d.ui;
+    const isFolded = d.data.collapsed[id] === true;
+    return Box({ flexDirection: 'column' },
+      divider(d),
+      Box({ flexDirection: 'row', alignItems: 'center', columnGap: 1 },
+        iconSlot(d, ICON[id]),
+        Box({ flexDirection: 'row', flexShrink: 0 }, Text({ bold: true }, title)),
+        Button({
+          plain: true, dimColor: true, key: `toggle:${id}`, label: isFolded ? '▸' : '▾',
+          onPress: () => d.handlers.onToggle(id),
+        }),
+        endText(d, summary, { dimColor: true })),
+      !isFolded && Box({ flexDirection: 'column' }, body));
+  }
+
+  // §6.1
+  function topBlock(d) {
+    const { Box, Text } = d.ui;
+    const { usage, project, agents } = d.data;
+    const subagentsUsd = agents.reduce((sum, agent) => sum + (agent.costUsd ?? 0), 0);
+    const total = usage.costUsd ?? null;
+    const session = total === null ? null : Math.max(0, total - subagentsUsd);
+    return Box({ flexDirection: 'column' },
+      Box({ flexDirection: 'row', justifyContent: 'space-between', columnGap: 2 },
+        Box({ flexDirection: 'row', flexShrink: 0 }, Text({ bold: true }, 'Session')),
+        total !== null && Box({ flexDirection: 'row', flexShrink: 0 }, Text({}, fmtUsd(total)))),
+      contextRows(d),
+      session !== null && subagentsUsd > 0 &&
+        Text({ dimColor: true, wrap: 'truncate' }, `Session ${fmtUsd(session)} · Subagents ${fmtUsd(subagentsUsd)}`),
+      project.name !== '' && projectRow(d));
+  }
+
+  // §6.2
+  function contextRows(d) {
+    const { Box, Text } = d.ui;
+    const { contextPct, contextTokens, contextWindow } = d.data.usage;
+    const label = Box({ flexDirection: 'row', flexShrink: 0 }, Text({}, 'Context'));
+    if (contextPct === undefined || !Number.isFinite(contextPct)) {
+      return [Box({ flexDirection: 'row', alignItems: 'center', columnGap: 1 },
+        iconSlot(d, ringSvg(undefined)), label, endText(d, '—', { dimColor: true }))];
+    }
+    const hasTokens = contextTokens !== undefined && contextWindow !== undefined;
+    const note = hasTokens ? `${fmtTokens(contextTokens)} / ${fmtTokens(contextWindow)}` : '';
+    const pctText = fmtPct(contextPct, 1);
+    return [
+      Box({ flexDirection: 'row', alignItems: 'center', columnGap: 1 },
+        iconSlot(d, ringSvg(contextPct)), label, endText(d, note, { dimColor: true })),
+      Box({ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', columnGap: 1 },
+        Box({ flexDirection: 'row', flexShrink: 1, minWidth: 0, overflow: 'hidden' },
+          meter(d, contextPct, `Context ${pctText}`, d.contextMeterPx)),
+        Box({ flexDirection: 'row', width: PCT_CELLS, flexShrink: 0, justifyContent: 'flex-end' },
+          Text({ color: pctColor(contextPct) }, pctText))),
+    ];
+  }
+
+  // §6.3
+  function projectRow(d) {
+    const { Box, Svg } = d.ui;
+    const { name, branch } = d.data.project;
+    const group = (iconSource, emoji, text) =>
+      Box({ flexDirection: 'row', alignItems: 'center', columnGap: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden' },
+        Svg === undefined ? shrinkText(d, `${emoji} ${text}`) : [iconSlot(d, iconSource), shrinkText(d, text)]);
+    return Box({ flexDirection: 'row', justifyContent: 'space-between', columnGap: 2, marginTop: Svg === undefined ? 0 : 1 },
+      group(ICON.folder, '📁', name),
+      branch !== null && group(ICON.branch, '🌿', branch));
+  }
+
+  // §6.4
+  function row(d, label, value, color) {
+    const { Box, Text } = d.ui;
+    return Box({ flexDirection: 'row', justifyContent: 'space-between', columnGap: 2 },
+      shrinkText(d, label),
+      Box({ flexDirection: 'row', flexShrink: 0 }, Text({ color }, value)));
+  }
+
+  // §6.5
+  function usageSection(d) {
+    const { Box, Text } = d.ui;
+    const { rateLimits } = d.data.usage;
+    const lead = rateLimits.find(limit => limit.kind === 'five_hour') ?? rateLimits[0];
+    if (lead === undefined) return null;
+    const label = kind => LIMIT_LABELS[kind] ?? kind;
+    const rows = rateLimits.map(limit => {
+      const pctText = fmtPct(limit.percentUsed, 0);
+      const reset = limit.resetsAt === undefined ? '' : fmtCountdown(limit.resetsAt - d.data.now);
+      return Box({ flexDirection: 'row', alignItems: 'center', columnGap: 1 },
+        Box({ flexDirection: 'row', width: LIMIT_LABEL_CELLS, flexShrink: 0, overflow: 'hidden' },
+          Text({ wrap: 'truncate' }, label(limit.kind))),
+        Box({ flexDirection: 'row', flexShrink: 1, minWidth: 0, overflow: 'hidden' },
+          meter(d, limit.percentUsed, `${label(limit.kind)} ${pctText}`, d.limitMeterPx)),
+        Box({ flexDirection: 'row', width: LIMIT_PCT_CELLS, flexShrink: 0, justifyContent: 'flex-end' },
+          Text({ color: pctColor(limit.percentUsed) }, pctText)),
+        endText(d, reset, { dimColor: true }));
+    });
+    return section(d, 'usage', 'Usage', `${label(lead.kind)} ${fmtPct(lead.percentUsed, 0)}`, rows);
+  }
+
+  // §6.6
+  function turnSection(d) {
+    const { Text } = d.ui;
+    const turn = d.data.lastTurn;
+    if (turn === null) return section(d, 'turn', 'Turn stats', '', [Text({ dimColor: true }, 'No completed turn yet')]);
+    const lines = [
+      ['Response', orNull(turn.responseRate, fmtRate)],
+      ['Whole turn', orNull(turn.wholeTurnRate, fmtRate)],
+      ['Elapsed', fmtDuration(turn.elapsedMs)],
+      ['Model time', fmtDuration(turn.modelMs)],
+      ['Tool time', fmtDuration(turn.toolMs)],
+      ['Average TTFT', orNull(turn.ttftMs, fmtTtft)],
+      ['Steps', turn.steps > 1 ? String(turn.steps) : null],
+      ['Tokens', `${fmtTokens(turn.tokensIn)} ↑ · ${fmtTokens(turn.tokensOut)} ↓`],
+      ['Cache', orNull(turn.cachePct, pct => fmtPct(pct, 0)), (turn.cachePct ?? 0) >= 50 ? OK : undefined],
+      ['Cost', orNull(turn.costUsd, fmtUsd)],
+    ];
+    const rows = lines.filter(([, value]) => value !== null).map(([label, value, color]) => row(d, label, value, color));
+    const summary = orNull(turn.responseRate ?? turn.wholeTurnRate, fmtRate) ?? '';
+    return section(d, 'turn', 'Turn stats', summary, rows);
+  }
+
+  // §6.7
+  function agentRow(d, agent) {
+    const { Box, Text, Svg } = d.ui;
+    const mark = AGENT_MARKS[agent.status];
+    return Box({ flexDirection: 'row', alignItems: 'center', columnGap: 1 },
+      Svg === undefined
+        ? Box({ flexDirection: 'row', width: 1, flexShrink: 0 }, Text({ color: mark.color, dimColor: mark.isDim }, mark.glyph))
+        : iconSlot(d, STATUS_SVG[agent.status], agent.status),
+      Box({ flexDirection: 'row', flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden', columnGap: 1 },
+        shrinkText(d, agent.description),
+        Box({ flexDirection: 'row', flexShrink: 0 }, Text({ dimColor: true }, `@${shortType(agent.type)}`))),
+      Box({ flexDirection: 'row', width: COST_CELLS, flexShrink: 0, justifyContent: 'flex-end' },
+        agent.costUsd === null ? Text({ dimColor: true }, '—') : Text({}, fmtUsd(agent.costUsd))));
+  }
+  function agentsSection(d) {
+    const { Box, Text, Svg } = d.ui;
+    const { agents } = d.data; // already in orderAgents order
+    if (agents.length === 0) return null;
+    const running = agents.filter(agent => agent.status === 'running').length;
+    const summary = running > 0 ? `${running}/${agents.length}` : String(agents.length);
+    const rows = agents.slice(0, MAX_AGENT_ROWS).map(agent => agentRow(d, agent));
+    const more = agents.length - MAX_AGENT_ROWS;
+    if (more > 0) {
+      rows.push(Box({ flexDirection: 'row', paddingLeft: Svg === undefined ? 2 : 3 }, Text({ dimColor: true }, `+${more} more`)));
+    }
+    return section(d, 'agents', 'Subagents', summary, rows);
+  }
+
+  // §6.8
+  function mcpSection(d) {
+    const { Box, Text } = d.ui;
+    const { mcp } = d.data;
+    if (mcp === null || mcp.servers.length === 0) return null;
+    const chips = mcp.servers.map(server =>
+      Box({ flexDirection: 'row', flexShrink: 1, minWidth: 0, overflow: 'hidden' },
+        Box({ flexDirection: 'row', flexShrink: 0 }, Text({ color: OK }, '● ')),
+        shrinkText(d, server.name)));
+    return section(d, 'mcp', 'MCP', String(mcp.servers.length), [
+      Box({ flexDirection: 'row', flexWrap: 'wrap', columnGap: 2 }, chips),
+    ]);
+  }
+
+  // §6.9
+  function sourcesSection(d) {
+    const { skills } = d.data.usage;
+    const servers = d.data.mcp?.servers.length;
+    if (skills === undefined && servers === undefined) return null;
+    const rows = [];
+    const parts = [];
+    if (skills !== undefined) {
+      rows.push(row(d, 'Skills', String(skills)));
+      parts.push(`${skills} skills`);
+    }
+    if (servers !== undefined) {
+      rows.push(row(d, 'MCP servers', String(servers)));
+      parts.push(`${servers} MCP`);
+    }
+    return section(d, 'sources', 'Context sources', parts.join(' · '), rows);
+  }
+
+  // §6.10
+  function logSection(d) {
+    const { Box, Text, Svg } = d.ui;
+    const lines = d.data.log.slice(0, MAX_LOG_ROWS);
+    if (lines.length === 0) return null;
+    const whoCells = Svg === undefined ? Math.min(WHO_CELLS_MAX, Math.max(...lines.map(line => line.who.length))) : WHO_CELLS;
+    const rows = lines.map(line =>
+      Box({ flexDirection: 'row', columnGap: 1 },
+        Box({ flexDirection: 'row', width: TIME_CELLS, flexShrink: 0 }, Text({ dimColor: true }, line.clock)),
+        Box({ flexDirection: 'row', width: whoCells, flexShrink: 0, overflow: 'hidden' },
+          line.kind === 'error'
+            ? Text({ color: BAD, wrap: 'truncate' }, line.who)
+            : Text({ dimColor: true, wrap: 'truncate' }, line.who)),
+        Box({ flexDirection: 'row', flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden' },
+          Text({ wrap: 'truncate' }, line.text))));
+    return section(d, 'log', 'Log', '', rows);
+  }
+
+  // ---- Sample data ------------------------------------------------------------------------------------------
+  const NOW = Date.UTC(2026, 9, 7, 19, 9, 30);
+  // A tool line as the log records it: the label cut to 64 characters with its suffix (spec §4.7, unchanged).
+  const toolLine = (clock, who, label, suffix) =>
+    ({ clock, who, text: `${shorten(label, 64 - suffix.length)}${suffix}`, kind: 'ok' });
+  const SERVERS = ['Claude_Browser', 'codebase-memory-mcp', 'issue-hub', 'scheduled-tasks', 'terminal'];
+
+  // The sample of current-pane-v1.png.
+  const MAIN = {
+    now: NOW,
+    usage: { costUsd: 148.59, contextTokens: 529000, contextWindow: 600000, contextPct: 88.2, rateLimits: [], skills: 77 },
+    project: { name: 'claude_mods', branch: 'main' },
+    mcp: { servers: SERVERS.map(name => ({ name, status: 'connected' })) },
+    lastTurn: {
+      elapsedMs: 78000, modelMs: 66000, toolMs: 11400, steps: 5, ttftMs: 4900, wholeTurnRate: 72,
+      responseRate: null, tokensIn: 845, tokensOut: 4700, cachePct: 80, costUsd: 3.21,
+    },
+    agents: [
+      { status: 'running', description: 'Implement Task 5: README and cleanup', type: 'claude-mods:minimal-change-engineer', costUsd: 0.77 },
+      { status: 'done', description: 'Re-review Task 4 fix round 1', type: 'code-reviewer', costUsd: 1.93 },
+      { status: 'done', description: 'Review Task 4 pane rendering', type: 'code-reviewer', costUsd: 2.43 },
+      { status: 'done', description: 'Implement Task 4: pane rendering', type: 'frontend-developer', costUsd: 14.18 },
+      { status: 'done', description: 'Re-review Task 3 fix rounds 1-2', type: 'code-reviewer', costUsd: 2.67 },
+      { status: 'done', description: 'Review Task 3 event wiring', type: 'code-reviewer', costUsd: 3.38 },
+    ],
+    log: [
+      toolLine('22:09:07', 'minimal-change', 'Edit .claude-plugin/marketplace.json', ' ✓ 0.1s'),
+      toolLine('22:08:53', 'minimal-change', "Bash echo '=== validate plugin ===' && claude plugin validate plugins/session-panel", ' ✓ 2.4s'),
+      toolLine('22:08:46', 'minimal-change', 'Edit .claude-plugin/marketplace.json', ' ✓ 0.1s'),
+      toolLine('22:08:45', 'minimal-change', 'Edit plugins/session-panel/.claude-plugin/plugin.json', ' ✓ 0.1s'),
+      toolLine('22:08:38', 'minimal-change', 'Edit plugins/session-panel/hooks/register.tsx', ' ✓ 0.1s'),
+      toolLine('22:08:37', 'minimal-change', 'Edit plugins/session-panel/hooks/view.tsx', ' ✓ 0.1s'),
+      toolLine('22:08:36', 'minimal-change', 'Edit plugins/session-panel/hooks/stats.ts', ' ✓ 0.1s'),
+      toolLine('22:08:36', 'minimal-change', 'Edit plugins/session-panel/hooks/view.test.tsx', ' ✓ 0.2s'),
+      toolLine('22:08:34', 'minimal-change', 'Edit plugins/session-panel/hooks/register.test.ts', ' ✓ 0.1s'),
+      toolLine('22:08:19', 'minimal-change', 'Bash (time claude plugin test /home/philarete/projects/claude_mods/plugins/session-panel)', ' ✓ 14.2s'),
+      toolLine('22:08:00', 'minimal-change', "Bash echo '--- references to .spike' && grep -rn spike --exclude-dir=.git .", ' ✓ 0.2s'),
+      toolLine('22:07:55', 'minimal-change', "Bash echo '--- tracked files under .spike' && git ls-files .spike", ' ✓ 0.1s'),
+    ],
+  };
+
+  // A new session before the first response.
+  const FRESH = {
+    now: NOW,
+    usage: { rateLimits: [], skills: 77 },
+    project: { name: 'claude_mods', branch: 'main' },
+    mcp: { servers: SERVERS.map(name => ({ name, status: 'connected' })) },
+    lastTurn: null,
+    agents: [],
+    log: [],
+  };
+
+  // Plan limits, a nearly full context, folded sections and every subagent status.
+  const BUSY = {
+    now: NOW,
+    usage: {
+      costUsd: 5.49, contextTokens: 965000, contextWindow: 1000000, contextPct: 96.5, skills: 52,
+      rateLimits: [
+        { kind: 'five_hour', percentUsed: 3, resetsAt: NOW + 133 * 60000 },
+        { kind: 'seven_day', percentUsed: 84, resetsAt: NOW + (5 * 24 + 15) * 3600000 },
+      ],
+    },
+    project: { name: 'online_shop', branch: 'feature/stock-order-qty-rounding' },
+    mcp: { servers: ['codebase-memory', 'issue-hub', 'figma'].map(name => ({ name, status: 'connected' })) },
+    lastTurn: {
+      elapsedMs: 33500, modelMs: 12700, toolMs: 900, steps: 2, ttftMs: 800, wholeTurnRate: 61,
+      responseRate: 104, tokensIn: 12, tokensOut: 777, cachePct: 99, costUsd: 0.005,
+    },
+    agents: [
+      { status: 'running', description: 'Fix cart total qty', type: 'engineer', costUsd: 0.022 },
+      { status: 'running', description: 'Revert stockUnits', type: 'engineer', costUsd: null },
+      { status: 'failed', description: 'Kill baseline fix', type: 'engineer', costUsd: 0.0434 },
+      { status: 'stopped', description: 'magic-context-compartment', type: 'explorer', costUsd: 0.011 },
+      { status: 'done', description: 'Map the order flow in checkout/stock.py and every test that covers it', type: 'code-reviewer', costUsd: 0.152 },
+      { status: 'done', description: 'Set the bulk cost', type: 'engineer', costUsd: 0.0403 },
+      { status: 'done', description: 'Check fee rounding', type: 'engineer', costUsd: 0.008 },
+      { status: 'done', description: 'Draft the PR description', type: 'writer', costUsd: 0.0004 },
+      { status: 'done', description: 'Read README', type: 'explorer', costUsd: 0.004 },
+    ],
+    log: [
+      { clock: '14:05:02', who: 'main', text: 'compacted 180k → 40k', kind: 'info' },
+      { clock: '14:03:40', who: 'engineer', text: 'failed', kind: 'error' },
+      toolLine('14:03:31', 'engineer', 'Edit src/checkout/stock.py', ' ✓ 0.3s'),
+      toolLine('14:02:15', 'main', 'Agent → engineer: Fix cart total qty', ' ✓ 0.1s'),
+      { clock: '14:02:08', who: 'you', text: 'fix the stock order qty rounding for bulk-price buys', kind: 'info' },
+    ],
+  };
+
+  // ---- Mounting ---------------------------------------------------------------------------------------------
+  const folds = { dark: {}, light: {}, fresh: {}, busy: { turn: true, mcp: true, sources: true }, term: {} };
+  const MOUNTS = [
+    { key: 'dark', stage: 'stage-dark', theme: 'theme-dark', surface: 'desktop', data: MAIN },
+    { key: 'light', stage: 'stage-light', theme: 'theme-light', surface: 'desktop', data: MAIN },
+    { key: 'fresh', stage: 'stage-states', theme: 'theme-dark', surface: 'desktop', data: FRESH, caption: 'New session' },
+    { key: 'busy', stage: 'stage-states', theme: 'theme-dark', surface: 'desktop', data: BUSY, caption: 'Limits, folds, statuses' },
+    { key: 'term', stage: 'stage-term', theme: 'theme-term', surface: 'terminal', data: MAIN, columns: 50 },
+  ];
+  const widthInput = document.getElementById('width');
+  const widthOut = document.getElementById('width-out');
+  const outlines = document.getElementById('outlines');
+
+  function draw(focus) {
+    const width = Number(widthInput.value);
+    widthOut.value = `${width} px`;
+    for (const id of new Set(MOUNTS.map(mount => mount.stage))) document.getElementById(id).replaceChildren();
+    for (const mount of MOUNTS) {
+      const isTerminal = mount.surface === 'terminal';
+      // The body is the pane less its 1 px borders and 16 px paddings; bodyColumns counts whole cells of it.
+      const cols = isTerminal ? mount.columns : Math.floor((width - 2 - 32) / CELL_PX);
+      const pane = document.createElement('div');
+      pane.className = `pane ${mount.theme}`;
+      pane.style.width = isTerminal ? `calc(${cols + 2}ch + 2px)` : `${width}px`;
+      const head = document.createElement('div');
+      head.className = 'pane-head';
+      head.innerHTML = '<span>Session</span><span aria-hidden="true">⤢&nbsp;&nbsp;&nbsp;✕</span>';
+      const body = document.createElement('div');
+      body.className = 'pane-body';
+      const handlers = {
+        onToggle: id => {
+          folds[mount.key][id] = !folds[mount.key][id];
+          draw({ mount: mount.key, key: `toggle:${id}` });
+        },
+      };
+      body.append(renderPane(kit(mount.surface), { ...mount.data, collapsed: folds[mount.key] }, { bodyColumns: cols }, handlers));
+      pane.append(head, body);
+      const caption = document.createElement('figcaption');
+      const facts = isTerminal
+        ? `${cols} columns`
+        : `${cols} columns · context meter ${contextMeterWidth(cols)} px · limit meter ${limitMeterWidth(cols)} px`;
+      caption.textContent = mount.caption ? `${mount.caption} · ${facts}` : facts;
+      const figure = document.createElement('figure');
+      figure.append(pane, caption);
+      document.getElementById(mount.stage).append(figure);
+      if (focus !== undefined && focus.mount === mount.key) body.querySelector(`[data-key="${focus.key}"]`)?.focus();
+    }
+  }
+
+  function iconSheet(theme, title) {
+    const sheet = document.createElement('section');
+    sheet.className = `sheet ${theme}`;
+    const heading = document.createElement('h3');
+    heading.textContent = title;
+    sheet.append(heading);
+    const image = (source, w, h) => {
+      const node = document.createElement('img');
+      node.src = dataUri(source);
+      node.alt = '';
+      node.width = w;
+      node.height = h;
+      return node;
+    };
+    const groups = [
+      ['Sections and rows', [
+        ['Usage', ICON.usage], ['Turn stats', ICON.turn], ['Subagents', ICON.agents], ['MCP', ICON.mcp],
+        ['Context sources', ICON.sources], ['Log', ICON.log], ['Project', ICON.folder], ['Branch', ICON.branch],
+      ]],
+      ['Context ring', [
+        ['12.8 %', ringSvg(12.8)], ['45 %', ringSvg(45)], ['88.2 %', ringSvg(88.2)], ['97 %', ringSvg(97)],
+        ['100 %', ringSvg(100)], ['No reading', ringSvg(undefined)],
+      ]],
+      ['Subagent status', [
+        ['running', STATUS_SVG.running], ['done', STATUS_SVG.done], ['failed', STATUS_SVG.failed], ['stopped', STATUS_SVG.stopped],
+      ]],
+    ];
+    for (const [groupTitle, items] of groups) {
+      const sub = document.createElement('h4');
+      sub.textContent = groupTitle;
+      const list = document.createElement('ul');
+      for (const [label, source] of items) {
+        const item = document.createElement('li');
+        const text = document.createElement('span');
+        text.textContent = label;
+        item.append(image(source, 14, 14), image(source, 28, 28), text);
+        list.append(item);
+      }
+      sheet.append(sub, list);
+    }
+    const sub = document.createElement('h4');
+    sub.textContent = 'Meter (unchanged)';
+    const list = document.createElement('ul');
+    for (const pct of [40, 88, 97]) {
+      const item = document.createElement('li');
+      const text = document.createElement('span');
+      text.textContent = `${pct} %`;
+      item.append(image(meterSvg(pct, 96), 96, 8), text);
+      list.append(item);
+    }
+    sheet.append(sub, list);
+    return sheet;
+  }
+
+  widthInput.addEventListener('input', () => draw());
+  outlines.addEventListener('change', () => document.body.classList.toggle('outlines', outlines.checked));
+  document.getElementById('sheets').append(iconSheet('dark', 'Dark theme'), iconSheet('light', 'Light theme'));
+  draw();
+})();
+</script>
+</body>
+</html>
