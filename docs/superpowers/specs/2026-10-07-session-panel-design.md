@@ -127,7 +127,7 @@ MCP servers                                3
 
 **Замер шага.** Хук `turn.step` — асинхронный генератор. Внутри него:
 - `tStart = await $.clock.now()` при входе;
-- `tFirst` — момент первого чанка с содержимым (`text` | `thinking` | `tool`);
+- `tFirst` — момент первого чанка любого вида, включая служебные `engine`: это начало ответа API. Блок `thinking` приходит одним чанком уже после того, как размышление закончилось (через 6–51 с), поэтому по нему TTFT не считается;
 - `tEnd` — момент чанка `stop`, из него же берётся `usage`;
 - флаги `hasTool` и `hasText`.
 
@@ -297,3 +297,18 @@ claude_mods/                         маркетплейс
 | Desktop Statusline (George Liu, centminmod) | SVG-шкала, цвета и пороги, форматы отсчёта |
 
 Авторство указывается в README и в комментарии над заимствованным кодом.
+
+## 11. Итоги спайка (2026-10-07)
+
+Данные: `.superpowers/sdd/2026-10-07-session-panel/spike-results-{1,2}.json`, движок 2.1.288, десктоп.
+
+| Проба | Результат | Решение |
+|---|---|---|
+| 1. Автооткрытие | `session.start`, surfaces `['desktop']` → `isPlaced: true` | открывать на старте, как в §5 |
+| 2. Поток `turn.step` | поля `turnId`, `agentId`, `model` есть; первый чанк (`engine`) приходит через 2.1–3.2 с; `thinking` одним чанком через 6–51 с; потом `text`/`tool`/`input` идут потоком | `tFirst` = первый чанк любого вида (§4.3); скорость получается 90–150 tok/s |
+| 3. Субагенты в `cost.usd` | да; прирост на каждом `stop` субагента точно равен цене запроса (11 из 11 шагов) | стоимость по приросту, без таблицы цен (§4.4) |
+| 4. `WaitForMcpServers` | «no tool named WaitForMcpServers in this session» | запасной источник MCP: `breakdown.mcpTools` |
+| 5. Время | локальное (Europe/Moscow) | `fmtClock` через `Date` |
+| 6. Разбивка cache 5m/1h | в usage её нет | не нужна: стоимость берётся из движка |
+| Доп. | `classic.PostToolUse*` до мода не доходят | Tool time из `tool.call` (§4.3); время включает хуки PreToolUse и ожидание разрешения |
+| Доп. | `$.agent.list()` даёт статус `completed`; `agent.spawn`: ключи `description`, `subagentType`, `name`, `background`; результат `{ model, agentId }`; `turn.complete` субагента: `reason: 'answer'`, `answer`, `usage` | соответствие статусов: `completed` → done; `isAborted` → stopped; остальные `reason`, кроме `answer`, → failed |
