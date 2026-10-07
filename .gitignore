@@ -1,0 +1,3 @@
+.spike/
+plugins/*/.claude-plugin/types/
+node_modules/

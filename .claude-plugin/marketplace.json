@@ -1,0 +1,14 @@
+{
+  "name": "claude-mods",
+  "owner": {
+    "name": "Philipp Ulanovskiy"
+  },
+  "plugins": [
+    {
+      "name": "session-panel",
+      "source": "./plugins/session-panel",
+      "version": "0.1.0",
+      "description": "Live session stats side pane for the Claude desktop Code tab"
+    }
+  ]
+}
