@@ -759,7 +759,7 @@ test('a turn of one tool step hides Response and Steps; the cache is green from 
     // The log has the person's prompt only: the desktop's column of `who` is its own width, the terminal's is as wide
     // as `you`.
     expect(logColumns(await ui.drawn()), surface).toEqual([
-      { who: 'you', timeCells: 8, whoCells: surface === 'desktop' ? 12 : 3 },
+      { who: 'you', timeCells: 8, whoCells: surface === 'desktop' ? 13 : 3 },
     ])
     await ui.unmount()
   }
@@ -879,7 +879,7 @@ test('the log shows 15 lines, newest first, an error in red, and a long text cut
     const columns = logColumns(await ui.drawn())
     expect(columns, surface).toHaveLength(15)
     expect(columns.map(column => column.timeCells), surface).toEqual(Array(15).fill(8))
-    expect(columns.map(column => column.whoCells), surface).toEqual(Array(15).fill(surface === 'desktop' ? 12 : 8))
+    expect(columns.map(column => column.whoCells), surface).toEqual(Array(15).fill(surface === 'desktop' ? 13 : 8))
     // The text is cut to one line, in a cell that gives way.
     expect((await ui.find({ type: 'Text', text: 'prompt 19' }))?.props.wrap).toBe('truncate')
     await ui.unmount()
@@ -951,11 +951,12 @@ const isType = (text: string): boolean => text.startsWith('@')
 // The Text that shows exactly this string, with the element that holds it.
 const textNode = (tree: unknown, text: string): Placed | undefined =>
   flat(tree).find(({ node }) => node.type === 'Text' && textsOf(node)[0] === text)
-// The subagent rows: a mark, the name group with its `@type`, the cost.
+// The subagent rows: a mark, the group of the description and the `@type`, the cost. The column that holds the rows is
+// no row, though it has three children when there are three subagents.
 const agentRows = (tree: unknown): Node[] =>
   flat(tree)
     .map(({ node }) => node)
-    .filter(node => node.type === 'Box' && childrenOf(node).length === 3 && textsOf(childrenOf(node)[1]).some(isType))
+    .filter(node => isRow(node) && childrenOf(node).length === 3 && textsOf(childrenOf(node)[1]).some(isType))
 // The rules: on the desktop an image 1600 px wide, on the terminal a row of ─.
 const isRuleNode = (node: Node): boolean =>
   (node.type === 'Svg' && node.props?.width === 1600) || (node.type === 'Text' && /^─+$/.test(textsOf(node)[0] ?? ''))
@@ -1016,25 +1017,27 @@ test('the texts that can overrun a row carry the truncation props; the values ne
       .filter(({ node }) => node.type === 'Text' && node.props?.wrap === 'truncate')
       .map(({ node }) => textsOf(node)[0])
     const project = surface === 'desktop' ? PROJECT : `📁 ${PROJECT}`
-    // A summary, the cost split, the project, a description, a server, a log line and its `who`, a countdown, a label.
+    // A summary, the cost split, the project, a description, the type of an agent, a server, a log line and its `who`,
+    // a countdown, a label.
     for (const text of [
-      '5-hour 3%', 'Session $126.09 · Subagents $22.50', project, 'task 9', 'Claude_Browser', LONG_TEXT,
-      'minimal-change', '↻ 2h 13m', 'Response', 'Spend',
+      '5-hour 3%', 'Session $126.09 · Subagents $22.50', project, 'task 9', '@code-reviewer', 'Claude_Browser',
+      LONG_TEXT, 'minimal-change', '↻ 2h 13m', 'Response', 'Spend',
     ]) {
       expect(cut, `${surface}: ${text}`).toContain(text)
     }
-    // A figure, a percent, a cost, the title and the type of an agent are not cut.
-    for (const text of ['$148.59', '88.2%', '120%', '1m 18s', '$2.50', '@code-reviewer', 'Usage', 'Session']) {
+    // A figure, a percent, a cost and a title are not cut.
+    for (const text of ['$148.59', '88.2%', '120%', '1m 18s', '$2.50', 'Usage', 'Session']) {
       const placed = textNode(tree, text)
       expect(placed, `${surface}: ${text}`).toBeDefined()
       expect(placed?.node.props?.wrap, `${surface}: ${text}`).toBeUndefined()
     }
-    // A long type is already cut to 14 characters by shortType, with an ellipsis, so the row never cuts it again.
+    // A long type is cut to 14 characters by shortType, with an ellipsis; the column is as wide as the longest type, so
+    // its own cut is for a cell that a pane makes narrower than that.
     const types = flat(tree).filter(({ node }) => node.type === 'Text' && isType(textsOf(node)[0] ?? ''))
     const typeTexts = types.map(({ node }) => textsOf(node)[0] ?? '')
     expect(typeTexts, surface).toContain('@minimal-chang…')
     expect(typeTexts.every(text => text.length <= 1 + 14), surface).toBe(true)
-    expect(types.every(({ node }) => node.props?.wrap === undefined), surface).toBe(true)
+    expect(types.every(({ node }) => node.props?.wrap === 'truncate'), surface).toBe(true)
   }
 })
 
@@ -1074,18 +1077,115 @@ test('value columns hold their width and align right, so the figures line up on 
   }
 })
 
+// Three subagents for the type column. The descriptions differ in length: a short one, one in between, and one wider
+// than any pane. The types are three lengths: `@code-reviewer` is 14 cells, `@ui-designer` 12, and `@frontend-deve…`
+// (cut by shortType) 15. The running one is drawn first, then the newest start.
+const WIDE = 'Map every call of the order flow and its tests '.repeat(8)
+const TYPED: AgentRow[] = [
+  agent(1, 'running', { description: 'Fix', type: 'code-reviewer' }),
+  agent(2, 'done', { description: WIDE, type: 'ui-designer' }),
+  agent(3, 'failed', { description: 'Review the change', type: 'frontend-developer' }),
+]
+const withAgents = (rows: AgentRow[], surface: Surface): PaneData =>
+  onSurface({ ...EMPTY, agents: Object.fromEntries(rows.map(row => [row.id, row])) }, surface)
+// The two cells of a subagent row's group: the description and the type.
+const groupOf = (row: Node | undefined): Node[] => childrenOf(childrenOf(row)[1])
+
+test('a subagent row gives `@type` a column of its own, one width on every row; the description takes the rest', () => {
+  for (const surface of SURFACES) {
+    const rows = agentRows(draw(withAgents(TYPED, surface)))
+    expect(rows, surface).toHaveLength(3)
+    const textsAt = (at: number): Array<string | undefined> => rows.map(row => textsOf(groupOf(row)[at])[0])
+    expect(textsAt(0), surface).toEqual(['Fix', 'Review the change', WIDE])
+    expect(textsAt(1), surface).toEqual(['@code-reviewer', '@frontend-deve…', '@ui-designer'])
+
+    for (const row of rows) {
+      const [, group, cost] = childrenOf(row)
+      const [description, type] = groupOf(row)
+      // The group takes the room the mark and the cost leave, and clips what does not fit it.
+      expect(childrenOf(group), surface).toHaveLength(2)
+      expect(group?.props, surface).toMatchObject({
+        flexDirection: 'row', flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden', columnGap: 1,
+      })
+      // The description takes all the room the type leaves, and gives way down to nothing before the type does.
+      expect(description?.props, surface).toMatchObject({
+        flexDirection: 'row', flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden',
+      })
+      expect(childrenOf(description).map(text => text.props?.wrap), surface).toEqual(['truncate'])
+      // The type holds its width, from the left of its cell, and its text is cut inside the cell.
+      expect(type?.props, surface).toMatchObject({ flexDirection: 'row', flexShrink: 0, overflow: 'hidden' })
+      expect(type?.props?.justifyContent, surface).toBeUndefined()
+      expect(childrenOf(type).map(text => [text.props?.dimColor, text.props?.wrap]), surface).toEqual([
+        [true, 'truncate'],
+      ])
+      // The cost keeps its column at the right edge.
+      expect(cost?.props, surface).toMatchObject({ width: 7, flexShrink: 0, justifyContent: 'flex-end' })
+    }
+    // One width for the three rows: a width of its own on the desktop, on the terminal the longest `@type` drawn.
+    const longest = Math.max(...textsAt(1).map(type => type?.length ?? 0))
+    expect(longest, surface).toBe(15)
+    expect(rows.map(row => groupOf(row)[1]?.props?.width), surface).toEqual(
+      Array(3).fill(surface === 'desktop' ? 15 : longest),
+    )
+  }
+})
+
+test('the terminal\'s type column is as wide as the longest `@type` drawn, up to 15; the desktop\'s is its own', () => {
+  const set = (...types: string[]): AgentRow[] => types.map((type, i) => agent(i + 1, 'done', { type }))
+  const widths = (rows: AgentRow[], surface: Surface): unknown[] =>
+    agentRows(draw(withAgents(rows, surface))).map(row => groupOf(row)[1]?.props?.width)
+
+  // `@ui-designer` is 12 cells and the longest of its set. `@frontend-deve…` is 15: the `@` and the 14 shortType keeps.
+  expect(widths(set('tdd', 'ui-designer'), 'terminal')).toEqual([12, 12])
+  expect(widths(set('tdd', 'ui-designer', 'frontend-developer'), 'terminal')).toEqual([15, 15, 15])
+  expect(widths(set('tdd'), 'terminal')).toEqual([4])
+  // The plugin prefix is not drawn, so it does not count: `@minimal-change`, 14 characters and the `@`, is 15.
+  expect(widths(set('claude-mods:minimal-change'), 'terminal')).toEqual([15])
+  // Only the rows that are drawn count: the ninth, which is left to `+1 more`, does not widen the column.
+  const nine = [
+    agent(1, 'done', { type: 'frontend-developer' }),
+    ...[2, 3, 4, 5, 6, 7, 8, 9].map(n => agent(n, 'running', { type: 'ui-designer' })),
+  ]
+  expect(widths(nine, 'terminal')).toEqual(Array(8).fill(12))
+  // The desktop's column is one width whatever the types are.
+  for (const types of [['tdd'], ['ui-designer'], ['frontend-developer']]) {
+    expect(widths(set(...types), 'desktop'), types.join()).toEqual([15])
+  }
+})
+
+test('the subagent rows outgrow no pane, at the narrowest and the widest body the tests use', () => {
+  for (const surface of SURFACES) {
+    for (const bodyColumns of [8, 120]) {
+      const where = `${surface} ${bodyColumns}`
+      const tree = draw(withAgents(TYPED, surface), bodyColumns)
+      const rows = agentRows(tree)
+      expect(rows, where).toHaveLength(3)
+      expect(rowProblems(tree), where).toEqual([])
+      for (const row of rows) expect(rowProblems(row), where).toEqual([])
+    }
+    // The check sees the type cell: with its width taken off, the cut text has no sized cell to sit in.
+    const [row] = agentRows(draw(withAgents(TYPED, surface)))
+    const type = groupOf(row)[1]
+    if (type !== undefined) type.props = { ...type.props, width: undefined }
+    const problems = rowProblems(row)
+    expect(problems, surface).toHaveLength(1)
+    expect(problems[0], surface).toContain('cut text')
+  }
+})
+
 test('the log keeps time and who in fixed columns, so every text starts at the same place', () => {
   const log = (who: string, kind: LogEntry['kind'] = 'info'): LogEntry[] =>
     ['a', 'b', 'c'].map((text, i) => ({ at: NOW - i * 1000, who, text, kind }))
 
-  // The desktop's column of `who` is one width whatever the names; the terminal's is the longest name, up to 14.
+  // The desktop's column of `who` is one width whatever the names, 13 cells (`minimal-change` is about 96 px of the
+  // 104); the terminal's is the longest name, up to 14.
   const names: Array<[who: string, terminalCells: number]> = [
     ['you', 3], ['minimal-change', 14], ['a-name-longer-than-the-log-ever-keeps', 14],
   ]
   for (const [who, terminalCells] of names) {
     for (const surface of SURFACES) {
       const rows = logColumns(draw(onSurface({ ...EMPTY, log: log(who) }, surface)))
-      const cells = surface === 'desktop' ? 12 : terminalCells
+      const cells = surface === 'desktop' ? 13 : terminalCells
       expect(rows.map(row => [row.timeCells, row.whoCells]), `${surface} ${who}`).toEqual(Array(3).fill([8, cells]))
     }
   }

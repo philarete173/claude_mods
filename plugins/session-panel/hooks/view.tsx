@@ -9,6 +9,7 @@ import type {
 
 import {
   fmtClock, fmtCountdown, fmtDuration, fmtPct, fmtRate, fmtTokens, fmtTtft, fmtUsd, orderAgents, shortType, splitCost,
+  TYPE_MAX,
 } from './stats'
 import type { AgentRow, AgentStatus } from './stats'
 
@@ -54,8 +55,13 @@ const LIMIT_LABEL_CELLS = 7 // `5-hour`, `Weekly`, `Spend`
 const LIMIT_PCT_CELLS = 5 // `100%`
 const COST_CELLS = 7 // `$148.59`, `<$0.001`
 const TIME_CELLS = 8 // `22:09:07`
-const WHO_CELLS = 12 // desktop: `minimal-change` in the system font
-const WHO_CELLS_MAX = 14 // terminal: the longest `who` that shortType keeps
+// The desktop widths of an agent type are measured on the live pane, in the app's own font. In the log,
+// `minimal-change` takes about 96 px: 13 cells (104 px) keep it whole. In a subagent row the widest `@type` is a cut
+// one, `@frontend-deve…` or `@minimal-chang…`, about 111 px: 15 cells (120 px) keep it whole, with a margin.
+const WHO_CELLS = 13 // desktop: the `who` of the log
+const WHO_CELLS_MAX = TYPE_MAX // terminal: the longest `who` that shortType keeps
+const TYPE_CELLS = 15 // desktop: the `@type` of a subagent
+const TYPE_CELLS_MAX = TYPE_MAX + 1 // terminal: the `@` and the longest type that shortType keeps
 const TEXT_METER_CELLS = 10
 const RULE_PX = 1600 // the divider image; the Box around it cuts it to the pane
 const MAX_AGENT_ROWS = 8
@@ -248,6 +254,17 @@ function shrinkText(d: Draw, text: string, style: Partial<TextProps> = {}): Rend
   return (
     <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
       <Text {...style} wrap="truncate">{text}</Text>
+    </Box>
+  )
+}
+
+// FLEX, left, and it grows: takes the room that is left, so the cells after it start at the same x on every row.
+function growText(d: Draw, text: string): RenderElement {
+  const { Box, Text } = d.ui
+
+  return (
+    <Box flexDirection="row" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+      <Text wrap="truncate">{text}</Text>
     </Box>
   )
 }
@@ -458,9 +475,12 @@ function turnSection(d: Draw): RenderElement {
   return section(d, 'turn', 'Turn stats', summary, rows)
 }
 
-// One subagent: its mark (a cell of its own, so the descriptions line up), its description (cut to the room there is),
-// its type (kept whole; the group clips it in a very narrow pane) and what it cost, right-aligned in a column.
-function agentRow(d: Draw, agent: AgentRow): RenderElement {
+// One subagent, in columns: the mark (a cell of its own), a group that takes the rest of the row, and the cost
+// (right-aligned in a column of its own). The group holds the description, which grows and is cut to the room there
+// is, and the `@type`, a column of `typeCells` on every row, so the types start at one x whatever the descriptions
+// are. A pane too narrow for the type column leaves every description 0 wide and the group clips that column, on
+// every row alike.
+function agentRow(d: Draw, agent: AgentRow, typeCells: number): RenderElement {
   const { Box, Text, Svg } = d.ui
   const mark = AGENT_MARKS[agent.status]
 
@@ -476,9 +496,9 @@ function agentRow(d: Draw, agent: AgentRow): RenderElement {
         iconSlot(d, STATUS_SVG[agent.status], agent.status)
       )}
       <Box flexDirection="row" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden" columnGap={1}>
-        {shrinkText(d, agent.description)}
-        <Box flexDirection="row" flexShrink={0}>
-          <Text dimColor>{`@${shortType(agent.type)}`}</Text>
+        {growText(d, agent.description)}
+        <Box flexDirection="row" width={typeCells} flexShrink={0} overflow="hidden">
+          <Text dimColor wrap="truncate">{`@${shortType(agent.type)}`}</Text>
         </Box>
       </Box>
       <Box flexDirection="row" width={COST_CELLS} flexShrink={0} justifyContent="flex-end">
@@ -495,7 +515,12 @@ function agentsSection(d: Draw): RenderElement | null {
   if (agents.length === 0) return null
   const running = agents.filter(agent => agent.status === 'running').length
   const summary = running > 0 ? `${running}/${agents.length}` : String(agents.length)
-  const rows = agents.slice(0, MAX_AGENT_ROWS).map(agent => agentRow(d, agent))
+  const shown = agents.slice(0, MAX_AGENT_ROWS)
+  // One width for the type column of every row, as for the `who` of the log: the terminal takes the longest `@type`
+  // that is drawn, the desktop a width of its own.
+  const longest = Math.max(...shown.map(agent => `@${shortType(agent.type)}`.length))
+  const typeCells = Svg === undefined ? Math.min(TYPE_CELLS_MAX, longest) : TYPE_CELLS
+  const rows = shown.map(agent => agentRow(d, agent, typeCells))
   const more = agents.length - MAX_AGENT_ROWS
   if (more > 0) {
     // The icon slot and its gap on the desktop, the one-cell mark and its gap on the terminal.
