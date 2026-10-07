@@ -149,7 +149,7 @@ MCP servers                                3
 | Steps | число шагов, дошедших до `stop`; строка показывается, только если шагов больше одного (как в OpenChamber) |
 | Average TTFT | среднее (`tFirst − tStart`); если хоть у одного шага нет `tFirst`, то `null` и строка скрыта |
 | Whole turn | Σ `output_tokens` / Model time |
-| Response | у последнего шага, если в нём нет `tool` и есть `text`: `output_tokens` / (`tEnd − tFirst`); иначе `null` и строка скрыта |
+| Response | у последнего шага, если в нём нет `tool` и есть `text`: `output_tokens` / (`tEnd − tStart`); иначе `null` и строка скрыта. Окно считается от отправки запроса: финальный текст иногда приходит одним пакетом за десятки мс, и окно от первого чанка давало абсурдные значения (~3000 tok/s, живая проверка 2026-10-07) |
 | Tokens | `↑` = Σ `input_tokens` (без кеша), `↓` = Σ `output_tokens`; источник `turn.complete.usage`, при его отсутствии сумма по шагам |
 | Cache | Σ `cache_read` / Σ (`input` + `cache_read` + `cache_creation`) |
 | Cost | `usage().cost.usd` сразу после `next(e)` в `turn.complete` минус значение на `turn.start`. Включает субагентов, работавших в этом ходе |
