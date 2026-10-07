@@ -60,6 +60,7 @@ const sum = (xs: number[]): number => xs.reduce((a, b) => a + b, 0)
 const pad2 = (n: number): string => String(n).padStart(2, '0')
 
 // Length of the union of the intervals: overlapping and nested ones count once.
+// Tool time formula after OpenChamber (MIT, © 2025 Bohdan Triapitsyn).
 export function mergedLength(intervals: Interval[]): number {
   const sorted = [...intervals].sort((a, b) => a[0] - b[0])
   let total = 0
@@ -83,6 +84,7 @@ export function sumUsage(usages: Usage[]): Usage {
 }
 
 // Share of the input served from the cache, in percent; null when there was no input at all.
+// Cache formula after OpenChamber (MIT, © 2025 Bohdan Triapitsyn).
 export function cacheHitPct(u: Usage): number | null {
   const read = u.cache_read_input_tokens ?? 0
   const input = (u.input_tokens ?? 0) + read + (u.cache_creation_input_tokens ?? 0)
@@ -95,6 +97,7 @@ function rate(tokens: number, windowMs: number): number | null {
   return windowMs > 0 && perSecond <= MAX_RATE ? perSecond : null
 }
 
+// Turn stats formulas after OpenChamber (MIT, © 2025 Bohdan Triapitsyn).
 export function computeTurnStats(
   acc: TurnAcc,
   durationMs: number,
@@ -136,6 +139,7 @@ export function addAgentCost(row: AgentRow, deltaUsd: number): AgentRow {
   return { ...row, costUsd: (row.costUsd ?? 0) + deltaUsd }
 }
 
+// Session and Subagents cost formula after OpenChamber (MIT, © 2025 Bohdan Triapitsyn).
 export function splitCost(totalUsd: number | undefined, subagentsUsd: number): CostSplit {
   return {
     total: totalUsd ?? null,
@@ -263,6 +267,7 @@ export function fmtRate(tokPerSec: number): string {
   return `~${Math.round(tokPerSec)} tok/s`
 }
 
+// Countdown format after Desktop Statusline (MIT, George Liu).
 export function fmtCountdown(msUntil: number): string {
   if (msUntil <= 0) return '↻ now'
   const minutes = Math.ceil(msUntil / 60000)
