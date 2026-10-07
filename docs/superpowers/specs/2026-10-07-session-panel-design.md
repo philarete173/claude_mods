@@ -1,0 +1,308 @@
+# Session Panel: мод с живой панелью статистики сессии
+
+Дата: 2026-10-07. Статус: дизайн утверждён, ждёт ревью спецификации.
+
+## 1. Цель
+
+Боковая панель (`Pane`) во вкладке Code приложения Claude Desktop, которая в реальном времени показывает данные текущей сессии. Содержание повторяет панель «Work status» из OpenChamber и дополняется журналом сессии как во flightdeck. Внешний вид плоский, как у Desktop Statusline.
+
+Вне рамок:
+- скрытие и перестановка секций (секции только сворачиваются);
+- кнопка ручного обновления (данные приходят от движка сами);
+- уведомления о лимитах;
+- анимации;
+- поддержка VS Code и mobile.
+
+## 2. Окружение и ограничения
+
+- Движок десктопа 2.1.288. Мод пишется по `claude-code.d.ts`, который скилл `plugin-authoring` генерирует для запущенного движка.
+- Модуль работает в изолированной среде без DOM и без Node; наружу ведёт только интерфейс `$`.
+- Все хуки мода только наблюдают. Каждый возвращает результат `next(e)` без изменений и никогда не отклоняет и не переписывает промпты и вызовы инструментов.
+- Мод не ходит в сеть, не читает токены, ключи и переменные окружения и ничего не пишет на диск, кроме `$.store`. Исключение: временная запись результатов спайка (раздел 8).
+- `git` запускается только командами, которые не трогают индекс и не вызывают `core.fsmonitor`: `git branch --show-current`, `git rev-parse --short HEAD`.
+
+## 3. Интерфейс
+
+Подписи на английском. Шрифт системный, размеры не задаются.
+
+```text
+Session                                    $5.49
+Context  ███░░░░░░░░░░░░░░░░░   12.8%   128k / 1M
+Session ≈$2.54 · Subagents ≈$2.95
+📁 online_shop   🌿 master
+
+▾ Usage                               5-hour 3%
+5-hour   █░░░░░░░░░░░░░    3%   ↻ 2h 13m
+Weekly   ███░░░░░░░░░░░   24%   ↻ 5d 15h
+
+▾ Turn stats                         ~104 tok/s
+Response                          ~104 tok/s
+Whole turn                         ~61 tok/s
+Elapsed                                33.5s
+Model time                             12.7s
+Tool time                               0.9s
+Average TTFT                            0.8s
+Steps                                      2
+Tokens                          12 ↑ · 777 ↓
+Cache                                    99%
+Cost                                  $0.005
+
+▾ Subagents                             2/96
+◐ Fix cart total qty   @engineer     ≈$0.02
+✓ Revert stockUnits    @engineer     ≈$0.03
+  +86 more
+
+▾ MCP                                    3/3
+● codebase-memory   ● issue-hub   ● figma
+
+▾ Context sources          52 skills · 3 MCP
+Skills                                    52
+MCP servers                                3
+
+▾ Log
+14:05:02  main   compacted 180k → 40k
+14:03:40  eng    Edit src/checkout/stock.py ✓ 0.3s
+14:02:15  main   Agent → engineer: Fix cart total
+14:02:08  you    fix the stock order qty…
+```
+
+### 3.1. Визуальные правила (по образцу Desktop Statusline)
+
+- **Шкала** — SVG высотой 8px, обе полосы со скруглением `rx=4`:
+  - дорожка `#808080` с `fill-opacity 0.3`;
+  - заливка `#2f7de1` ниже 80%, `#e0a030` от 80%, `#e5484d` от 95%.
+
+  Ширина шкалы считается от `bodyColumns`, примерно 12.5px на колонку: доступная ширина минус подпись и процент, но не меньше 40px и не больше 180px. На поверхности без `Svg` вместо шкалы выводится текст `▰▱` (10 делений).
+- **Цвет текста** — ключи темы:
+  - процент шкалы: `warning` от 80%, `error` от 95%;
+  - Cache: `success` от 50%;
+  - статусы: running — `#2f7de1`, ✓ — `success`, ✗ — `error`;
+  - второстепенное — `dimColor`.
+- **Заголовок секции** — `Button` (`plain`) с меткой `▾ Usage` (`▸` когда свёрнута) и справа приглушённая сводка.
+- **Без сворачивания** только верхний блок Session + Project.
+- **Строки «метка — значение»** раскладываются через `justifyContent: space-between`.
+
+### 3.2. Форматы
+
+| Что | Формат |
+|---|---|
+| Деньги | ≥ $1: 2 знака (`$5.49`); < $1: 3 знака (`$0.152`); < $0.001: `<$0.001` |
+| Context % | 1 знак (`12.8%`) |
+| Лимиты и Cache | целое (`24%`) |
+| Токены | < 1000 как есть; < 10k: 1 знак (`2.3k`); < 1M: целое (`128k`); иначе `1.2M` (`.0` отбрасывается) |
+| Длительность | < 60 с: 1 знак (`33.5s`); < 1 ч: `1m 05s`; иначе `1h 02m` |
+| TTFT | < 0.1 с: `<0.1s`, иначе как длительность |
+| Скорость | `~104 tok/s` (целое) |
+| Сброс лимита | `↻ 45m`, `↻ 2h 13m`, `↻ 5d 15h` |
+| Время в журнале | локальное `HH:MM:SS` |
+
+## 4. Данные и формулы
+
+Все пути API сверены с d.ts 2.1.288. Номера строк исполнитель уточняет по типам сам.
+
+### 4.1. Session и Project
+
+- **Context:** `$.session.usage().context.{tokens, window, percent}`. До первого ответа модели выводится `—`. Обновляется по событию `session.measure` (оно несёт `context`, `rateLimits`, `cost` и `changed`) и после `session.compact`.
+- **Total:** `usage().cost.usd`. Если поля нет (у хоста нет учёта стоимости), строка Total скрывается.
+- **Subagents ≈:** Σ оценок стоимости субагентов (4.4). **Session ≈** = `max(0, Total − Subagents)`. Строка показывается, только если Subagents > 0. Если спайк покажет, что `cost.usd` не включает субагентов, то Total = `cost.usd + Subagents`, а Session = `cost.usd`.
+- **Project:** basename от `$.session.root()`. Поле `repo().name` не использовать: оно null для обычных репозиториев.
+- **Branch:**
+  - источник: `$.process.run(['git', 'branch', '--show-current'], { cwd: root, timeoutMs: 5000 })`;
+  - если ветка пустая (detached HEAD), берётся `git rev-parse --short HEAD`;
+  - если это не git-репозиторий, ветка скрывается;
+  - когда обновлять: на `session.start`, после `turn.complete` основного агента и на `classic.CwdChanged`.
+
+### 4.2. Usage
+
+`usage().rateLimits[]`. Как называть строки:
+- `five_hour` → «5-hour»;
+- `seven_day` → «Weekly»;
+- `spend_limit` → «Spend».
+
+Справа показывается обратный отсчёт до `resetsAt`, если поле задано. В сводке заголовка — строка `five_hour`, а если её нет, то первая строка. Если массив пуст (вход по API-ключу), секция скрывается целиком. Отсчёт обновляется таймером: `$.ui.invalidate('ui.render')` раз в 30 секунд.
+
+### 4.3. Turn stats
+
+Показывается последний **завершённый** ход основного агента: события без `agentId`, между `turn.start` и `turn.complete` с одним `turnId`. Пока идёт новый ход, на экране остаются данные предыдущего.
+
+**Замер шага.** Хук `turn.step` — асинхронный генератор. Внутри него:
+- `tStart = await $.clock.now()` при входе;
+- `tFirst` — момент первого чанка с содержимым (`text` | `thinking` | `tool`);
+- `tEnd` — момент чанка `stop`, из него же берётся `usage`;
+- флаги `hasTool` и `hasText`.
+
+Чанки передаются дальше без изменений. `await` делается не больше трёх раз за шаг.
+
+**Инструменты.** На `classic.PostToolUse` и `classic.PostToolUseFailure` основного агента записывается интервал `[now − duration_ms, now]`.
+
+Формулы:
+
+| Метрика | Формула |
+|---|---|
+| Elapsed | `turn.complete.durationMs` |
+| Model time | Σ (`tEnd − tStart`) по шагам |
+| Tool time | длина объединения интервалов инструментов (пересечения склеиваются) |
+| Steps | число шагов, дошедших до `stop` |
+| Average TTFT | среднее (`tFirst − tStart`); если хоть у одного шага нет `tFirst`, то `null` и строка скрыта |
+| Whole turn | Σ `output_tokens` / Model time |
+| Response | у последнего шага, если в нём нет `tool` и есть `text`: `output_tokens` / (`tEnd − tFirst`); иначе `null` и строка скрыта |
+| Tokens | `↑` = Σ `input_tokens` (без кеша), `↓` = Σ `output_tokens`; источник `turn.complete.usage`, при его отсутствии сумма по шагам |
+| Cache | Σ `cache_read` / Σ (`input` + `cache_read` + `cache_creation`) |
+| Cost | `usage().cost.usd` сразу после `next(e)` в `turn.complete` минус значение на `turn.start`. Включает субагентов, работавших в этом ходе |
+
+Скорость, которая выходит за 5000 tok/s или считается по окну ≤ 0, становится `null`. Сводка в заголовке — Response, при его отсутствии Whole turn.
+
+### 4.4. Subagents
+
+**Записи субагентов:**
+- `agent.spawn`: после `next(e)` берётся `{ model, agentId }` из результата и описание с типом из входа, плюс время старта;
+- `turn.step` с `agentId`: на чанке `stop` к записи прибавляются токены и оценка стоимости;
+- `turn.complete` с `agentId`: статус и время окончания (`reason`, `isAborted`), а также `answer` для журнала;
+- таймер 30 секунд: `$.agent.list()` уточняет статусы (если субагента остановили не нашими событиями).
+
+**Строка списка:** значок статуса, `description`, приглушённый `@type` (часть после последнего `:`), справа `≈$`.
+
+**Порядок:** сначала работающие, затем по времени старта, новые выше. Не больше 8 строк, остальные сводятся в `+N more`. Сводка в заголовке: `running/total`, если кто-то работает, иначе `total`.
+
+**Оценка стоимости** (USD за 1M токенов; совпадение по префиксу id модели, суффикс вида `[1m]` отбрасывается):
+
+| Модель (префикс) | input | output | cache write 5m | cache write 1h | cache read |
+|---|---|---|---|---|---|
+| `claude-fable-5-1`, `claude-mythos-5-1` | 10 | 50 | 12.5 | 20 | 0.25 |
+| `claude-fable-5`, `claude-mythos-5` | 10 | 50 | 12.5 | 20 | 1.00 |
+| `claude-opus-5-5` | 4 | 20 | 5 | 8 | 0.20 |
+| `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6` | 5 | 25 | 6.25 | 10 | 0.50 |
+| `claude-sonnet-5-5`, `claude-sonnet-5` | 2 | 10 | 2.5 | 4 | 0.20 |
+| `claude-sonnet-4-6` | 3 | 15 | 3.75 | 6 | 0.30 |
+| `claude-haiku-4-5` | 1 | 5 | 1.25 | 2 | 0.10 |
+
+Префиксы проверяются от длинного к короткому: `claude-fable-5-1` раньше `claude-fable-5`.
+
+Запись в кеш раскладывается по `cache_creation.ephemeral_5m/1h_input_tokens`, если в usage есть разбивка. Иначе весь `cache_creation_input_tokens` считается по ставке 5m.
+
+Неизвестная модель даёт `null`: в строке ставится `—`, в сумму она не входит. Цены взяты из справочника `claude-api` от 2026-09-25; таблица лежит в начале `stats.ts` с датой.
+
+### 4.5. MCP
+
+- **Основной источник** (подтверждается спайком): встроенный инструмент `WaitForMcpServers`, вызванный через `$.tool.call` без аргументов в фоне, не блокируя хук. Он возвращает `connected`, `failed`, `needsAuth`, `stillPending` и `disabled`. Total — сумма всех групп. Цвета: connected `success`, failed `error`, needsAuth `warning`, pending и disabled `dimColor`.
+- **Запасной источник:** уникальные `serverName` из `usage({ breakdown: 'summary' }).context.breakdown.mcpTools`. Все такие серверы считаются подключёнными; в заголовке выводится просто число.
+- **Когда обновлять:** на `session.start` и затем таймером раз в 60 секунд.
+
+### 4.6. Context sources
+
+`usage({ breakdown: 'summary' })`:
+- Skills — `breakdown.skills.totalSkills`;
+- MCP servers — число серверов из 4.5.
+
+Сводка в заголовке: `52 skills · 3 MCP`. Обновляется на `session.start` и вместе с MCP.
+
+### 4.7. Log
+
+Хранятся последние 60 записей `{ at, who, text, kind: 'info' | 'ok' | 'error' }`. На экране 15, новые сверху. Записи порождают:
+
+| Событие | who | text |
+|---|---|---|
+| `turn.start` | `you` (`engine`, если текст начинается с `<`) | `shorten(redact(text), 70)`; для `engine` — имя тега |
+| `tool.call` (после `next(e)`) | `main` или тип субагента (до 10 символов) | `${tool} ${target}` + ` ✓ 0.3s` / ` ✗` / ` denied`, всё через `shorten(redact(…), 64)` |
+| `agent.spawn` | `main` | `spawned · ${type}: ${description}` |
+| `turn.complete` с `agentId` | тип субагента | `done 1m 12s · ≈$0.02 — ${answer до 80}` или `failed` / `stopped` (`kind: 'error'`) |
+| `session.compact` | `main` | `compacted 180k → 40k` |
+
+`target` по инструменту:
+- Bash — `command`;
+- Read/Edit/Write/NotebookEdit — `file_path` относительно root;
+- Grep/Glob — `pattern`;
+- WebFetch — хост из `url`;
+- Agent — `→ ${subagent_type}: ${description}`;
+- `mcp__server__tool` — `server:tool`;
+- остальные — пусто.
+
+`redact` — набор регулярных выражений из `claude-flightdeck/hooks/core.ts` (MIT, с указанием авторства). Он маскирует bearer- и basic-токены, ключи `sk-`/`ghp_`/`xox*`, пары `token=`, `password=`, `*_KEY=`, флаги `--token` и пароли в URL.
+
+## 5. Поведение панели
+
+- **Окно:** id `session-panel`, заголовок `Session`.
+- **Автооткрытие:** на `session.start` и на `session.attach`, но только если среди `$.session.surfaces()` есть `desktop`. В терминале панель открывается только командой.
+- **Команда:** `/session-panel` открывает или закрывает панель. Если панель не размещена, команда отвечает текстом с причиной из `UiOpenResult.reason`.
+- **Сворачивание:** состояние хранится в атоме `collapsed: Record<SectionId, boolean>`, где `SectionId` — один из `usage`, `turn`, `agents`, `mcp`, `sources`, `log`. Нажатие переключает атом и сохраняет карту в `$.store` под ключом `collapsed`. На `session.start` карта читается из `$.store`. По умолчанию всё развёрнуто.
+- **Таймер:** `$.clock.every(30_000)`. Он делает `$.ui.invalidate('ui.render')` и обновляет статусы субагентов; MCP обновляется каждый второй тик.
+
+## 6. Устройство
+
+```text
+claude_mods/                         маркетплейс
+  .claude-plugin/marketplace.json    { name: "claude-mods", plugins: [session-panel] }
+  README.md, LICENSE (MIT), .gitignore
+  plugins/session-panel/
+    .claude-plugin/plugin.json       name, version, description, "types": "./types/index.d.ts"
+    hooks/hooks.json                 { "modules": ["./register.tsx"] }
+    hooks/register.tsx               события → атомы, команда, открытие, таймер
+    hooks/state.ts                   атомы $.state, общие для register и view
+    hooks/view.tsx                   отрисовка Pane: секции, шкалы, сворачивание
+    hooks/stats.ts                   чистые функции: формулы 4.3, склейка интервалов,
+                                     цены и оценка 4.4, redact/shorten, форматы 3.2
+    hooks/*.test.ts(x)               тесты (раздел 7)
+    types/index.d.ts                 контракт PluginState['session-panel']
+```
+
+- **Состояние** (`$.state`, атомы, переживают горячую перезагрузку): `usage`, `project`, `mcp`, `turn` (накопитель текущего хода), `lastTurn` (готовая статистика), `agents`, `log`, `collapsed`.
+- **Отрисовка** только читает атомы и не делает вызовов `$`, кроме `$.ui.resolve`. Изменение атома перерисовывает панель.
+- **`stats.ts`** не импортирует ничего от движка, поэтому тестируется изолированно.
+- **Комментарии в коде** на английском, как и интерфейс.
+
+## 7. Тесты и проверка
+
+1. **`stats.ts`** через `claude plugin test`:
+   - склейка интервалов (пересекающиеся, вложенные, раздельные);
+   - формулы хода, включая `null`-случаи и потолок 5000 tok/s;
+   - Cache %;
+   - оценка стоимости: префиксы, `[1m]`, неизвестная модель, разбивка 5m/1h;
+   - все форматы;
+   - `redact` и `shorten`.
+2. **Отрисовка** через `$.ui.mount` на `surface: 'desktop'` и `'terminal'`:
+   - секции на месте;
+   - нажатие на заголовок сворачивает секцию и пишет в `$.store`;
+   - пустой `rateLimits` скрывает Usage.
+3. `claude plugin validate plugins/session-panel` проходит без ошибок, `tsc` без ошибок.
+4. **Ручная сверка в десктопе:**
+   - Context % совпадает с индикатором контекста приложения;
+   - лимиты совпадают со страницей usage;
+   - после хода с субагентом Turn stats и Subagents заполнены правдоподобно.
+
+## 8. Риски и спайк
+
+До основной реализации пишется каркас мода с пробами. Он копирует свои наблюдения в `~/projects/claude_mods/.spike/results.json` через `$.fs.write`. Эта запись временная и удаляется вместе с каркасом. Пробы:
+
+1. Размещается ли панель, открытая из `session.start` или `session.attach` на десктопе. Записать `isPlaced` и `reason`.
+2. Набор полей `turn.step` (`turnId`, `agentId`, `model`) и последовательность видов чанков. Получаются ли правдоподобные TTFT и tok/s.
+3. Входят ли субагенты в `cost.usd`: значение до и после шагов субагента внутри одного хода основного агента.
+4. Отвечает ли `$.tool.call('WaitForMcpServers', …)` без запроса разрешения, сколько длится и какую форму имеет ответ.
+5. Даёт ли `new Date().toTimeString()` локальное время.
+6. Есть ли в usage чанка `stop` разбивка `cache_creation` по 5m/1h.
+
+Если проба не подтвердится:
+
+| Проба | Что делаем |
+|---|---|
+| 1 | панель открывается только командой |
+| 2 | TTFT и Response убираются, Model time = Σ шагов без потока |
+| 3 | формула Total из 4.1 |
+| 4 | запасной источник MCP |
+| 5 | время по UTC со смещением из `Intl` или без секунд |
+| 6 | всё по ставке 5m |
+
+## 9. Разработка и установка
+
+- **Исходники:** `~/projects/claude_mods`, git. Коммиты только с разрешения пользователя.
+- **Горячая перезагрузка:** `rsync -a --delete --exclude .claude-plugin/types/ plugins/session-panel/ ~/.claude/dev-mods/<session-id>/session-panel/` после каждой правки. Движок перезагружает мод в конце хода. Папку `.claude-plugin/types/` движок пишет сам, она в `.gitignore`.
+- **Установка:** `claude plugin marketplace add ~/projects/claude_mods` и `claude plugin install session-panel@claude-mods`. После установки копия в dev-mods удаляется, чтобы мод не загрузился дважды.
+
+## 10. Заимствования (MIT)
+
+| Источник | Что взято |
+|---|---|
+| OpenChamber, © 2025 Bohdan Triapitsyn | состав панели и формулы Turn stats, Context и стоимости субагентов (`packages/ui/src/components/chat/work-status/`) |
+| claude-flightdeck (scasella) | регулярные выражения `redact` и устройство журнала |
+| Desktop Statusline (George Liu, centminmod) | SVG-шкала, цвета и пороги, форматы отсчёта |
+
+Авторство указывается в README и в комментарии над заимствованным кодом.
