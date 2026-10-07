@@ -28,7 +28,7 @@
 ```text
 Session                                    $5.49
 Context  ███░░░░░░░░░░░░░░░░░   12.8%   128k / 1M
-Session ≈$2.54 · Subagents ≈$2.95
+Session $2.54 · Subagents $2.95
 📁 online_shop   🌿 master
 
 ▾ Usage                               5-hour 3%
@@ -48,8 +48,8 @@ Cache                                    99%
 Cost                                  $0.005
 
 ▾ Subagents                             2/96
-◐ Fix cart total qty   @engineer     ≈$0.02
-✓ Revert stockUnits    @engineer     ≈$0.03
+◐ Fix cart total qty   @engineer      $0.02
+✓ Revert stockUnits    @engineer      $0.03
   +86 more
 
 ▾ MCP                                    3/3
@@ -104,7 +104,7 @@ MCP servers                                3
 
 - **Context:** `$.session.usage().context.{tokens, window, percent}`. До первого ответа модели выводится `—`. Обновляется по событию `session.measure` (оно несёт `context`, `rateLimits`, `cost` и `changed`) и после `session.compact`.
 - **Total:** `usage().cost.usd`. Если поля нет (у хоста нет учёта стоимости), строка Total скрывается.
-- **Subagents ≈:** Σ оценок стоимости субагентов (4.4). **Session ≈** = `max(0, Total − Subagents)`. Строка показывается, только если Subagents > 0. Если спайк покажет, что `cost.usd` не включает субагентов, то Total = `cost.usd + Subagents`, а Session = `cost.usd`.
+- **Subagents:** Σ стоимостей субагентов, измеренных по приросту `cost.usd` (4.4). **Session** = `max(0, Total − Subagents)`. Строка показывается, только если Subagents > 0. Спайк подтвердил, что `cost.usd` включает субагентов.
 - **Project:** basename от `$.session.root()`. Поле `repo().name` не использовать: оно null для обычных репозиториев.
 - **Branch:**
   - источник: `$.process.run(['git', 'branch', '--show-current'], { cwd: root, timeoutMs: 5000 })`;
@@ -133,7 +133,7 @@ MCP servers                                3
 
 Чанки передаются дальше без изменений. `await` делается не больше трёх раз за шаг.
 
-**Инструменты.** На `classic.PostToolUse` и `classic.PostToolUseFailure` основного агента записывается интервал `[now − duration_ms, now]`.
+**Инструменты.** Хук `tool.call` основного агента (без `agentId`) замеряет `t0 = await $.clock.now()` до `await next(e)` и `t1` после, и записывает интервал `[t0, t1]`. Интервал включает ожидание разрешения, если оно было. Спайк показал, что `classic.PostToolUse*` до мода не доходят.
 
 Формулы:
 
@@ -156,31 +156,22 @@ MCP servers                                3
 
 **Записи субагентов:**
 - `agent.spawn`: после `next(e)` берётся `{ model, agentId }` из результата и описание с типом из входа, плюс время старта;
-- `turn.step` с `agentId`: на чанке `stop` к записи прибавляются токены и оценка стоимости;
+- `turn.step` с `agentId`: после чанка `stop` к записи прибавляется стоимость шага (см. «Стоимость» ниже);
 - `turn.complete` с `agentId`: статус и время окончания (`reason`, `isAborted`), а также `answer` для журнала;
 - таймер 30 секунд: `$.agent.list()` уточняет статусы (если субагента остановили не нашими событиями).
 
-**Строка списка:** значок статуса, `description`, приглушённый `@type` (часть после последнего `:`), справа `≈$`.
+**Строка списка:** значок статуса, `description`, приглушённый `@type` (часть после последнего `:`), справа `$`.
 
 **Порядок:** сначала работающие, затем по времени старта, новые выше. Не больше 8 строк, остальные сводятся в `+N more`. Сводка в заголовке: `running/total`, если кто-то работает, иначе `total`.
 
-**Оценка стоимости** (USD за 1M токенов; совпадение по префиксу id модели, суффикс вида `[1m]` отбрасывается):
+**Стоимость** измеряется по движку, без таблицы цен и без сети. Спайк показал: `cost.usd` растёт сразу после завершения каждого запроса модели, и прирост точно равен цене запроса.
+- После каждого чанка `stop` (любого агента) мод через `$.clock.after(1, …)` читает `usage().cost.usd`.
+- Прирост `delta = max(0, usd − lastUsd)` записывается на агента этого шага: основной агент (`main`) или субагент (`agentId`). Затем `lastUsd = max(lastUsd, usd)`.
+- `lastUsd` инициализируется текущим `cost.usd` на `session.start` (в том числе после перезагрузки мода), поэтому стоимость до загрузки остаётся на Session.
 
-| Модель (префикс) | input | output | cache write 5m | cache write 1h | cache read |
-|---|---|---|---|---|---|
-| `claude-fable-5-1`, `claude-mythos-5-1` | 10 | 50 | 12.5 | 20 | 0.25 |
-| `claude-fable-5`, `claude-mythos-5` | 10 | 50 | 12.5 | 20 | 1.00 |
-| `claude-opus-5-5` | 4 | 20 | 5 | 8 | 0.20 |
-| `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6` | 5 | 25 | 6.25 | 10 | 0.50 |
-| `claude-sonnet-5-5`, `claude-sonnet-5` | 2 | 10 | 2.5 | 4 | 0.20 |
-| `claude-sonnet-4-6` | 3 | 15 | 3.75 | 6 | 0.30 |
-| `claude-haiku-4-5` | 1 | 5 | 1.25 | 2 | 0.10 |
-
-Префиксы проверяются от длинного к короткому: `claude-fable-5-1` раньше `claude-fable-5`.
-
-Запись в кеш раскладывается по `cache_creation.ephemeral_5m/1h_input_tokens`, если в usage есть разбивка. Иначе весь `cache_creation_input_tokens` считается по ставке 5m.
-
-Неизвестная модель даёт `null`: в строке ставится `—`, в сумму она не входит. Цены взяты из справочника `claude-api` от 2026-09-25; таблица лежит в начале `stats.ts` с датой.
+Погрешности, которые не влияют на сумму:
+- запросы двух агентов, завершившиеся в пределах 1–2 мс, могут перепутаться;
+- фоновые служебные вызовы движка (классификатор разрешений, компакция) приписываются агенту, чей шаг завершится следующим.
 
 ### 4.5. MCP
 
@@ -205,7 +196,7 @@ MCP servers                                3
 | `turn.start` | `you` (`engine`, если текст начинается с `<`) | `shorten(redact(text), 70)`; для `engine` — имя тега |
 | `tool.call` (после `next(e)`) | `main` или тип субагента (до 10 символов) | `${tool} ${target}` + ` ✓ 0.3s` / ` ✗` / ` denied`, всё через `shorten(redact(…), 64)` |
 | `agent.spawn` | `main` | `spawned · ${type}: ${description}` |
-| `turn.complete` с `agentId` | тип субагента | `done 1m 12s · ≈$0.02 — ${answer до 80}` или `failed` / `stopped` (`kind: 'error'`) |
+| `turn.complete` с `agentId` | тип субагента | `done 1m 12s · $0.02 — ${answer до 80}` или `failed` / `stopped` (`kind: 'error'`) |
 | `session.compact` | `main` | `compacted 180k → 40k` |
 
 `target` по инструменту:
@@ -240,7 +231,7 @@ claude_mods/                         маркетплейс
     hooks/state.ts                   атомы $.state, общие для register и view
     hooks/view.tsx                   отрисовка Pane: секции, шкалы, сворачивание
     hooks/stats.ts                   чистые функции: формулы 4.3, склейка интервалов,
-                                     цены и оценка 4.4, redact/shorten, форматы 3.2
+                                     распределение стоимости 4.4, redact/shorten, форматы 3.2
     hooks/*.test.ts(x)               тесты (раздел 7)
     types/index.d.ts                 контракт PluginState['session-panel']
 ```
@@ -256,7 +247,7 @@ claude_mods/                         маркетплейс
    - склейка интервалов (пересекающиеся, вложенные, раздельные);
    - формулы хода, включая `null`-случаи и потолок 5000 tok/s;
    - Cache %;
-   - оценка стоимости: префиксы, `[1m]`, неизвестная модель, разбивка 5m/1h;
+   - распределение прироста стоимости: монотонность (`max`), основной агент и субагенты;
    - все форматы;
    - `redact` и `shorten`.
 2. **Отрисовка** через `$.ui.mount` на `surface: 'desktop'` и `'terminal'`:

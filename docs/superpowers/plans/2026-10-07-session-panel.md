@@ -39,7 +39,7 @@
   - скорость выше 5000 tok/s превращается в `null`.
 - **Цвета шкалы:** `#2f7de1`, с 80% `#e0a030`, с 95% `#e5484d`; дорожка `#808080` с `fill-opacity 0.3`; высота 8px, `rx=4`.
 - **Форматы:** §3.2 спецификации, байт в байт.
-- **Цены моделей:** таблица §4.4. Константа `PRICES_AS_OF = '2026-09-25'`.
+- **Стоимость:** только из движка, по приросту `cost.usd` (§4.4). Таблиц цен и сети нет.
 - **Горячая перезагрузка.** После каждой правки исполнитель синхронизирует копию:
   ```bash
   rsync -a --delete --exclude '.claude-plugin/types/' /home/philarete/projects/claude_mods/plugins/session-panel/ /home/philarete/.claude/dev-mods/bcaecb67-a219-4453-b027-9e930232ca47/session-panel/
@@ -57,7 +57,7 @@
 | `plugins/session-panel/.claude-plugin/plugin.json` | манифест мода (в задаче 3 добавляется `types`) | 1, 3 |
 | `plugins/session-panel/hooks/hooks.json` | `{ "modules": ["./register.tsx"] }` | 1 |
 | `plugins/session-panel/hooks/register.tsx` | в задаче 1 спайк; в задаче 3 события → атомы, команда, открытие панели, таймер | 1, 3, 4 |
-| `plugins/session-panel/hooks/stats.ts` | чистые функции: типы, формулы, цены, журнал, форматы, `redact` | 2 |
+| `plugins/session-panel/hooks/stats.ts` | чистые функции: типы, формулы, распределение стоимости, журнал, форматы, `redact` | 2 |
 | `plugins/session-panel/hooks/stats.test.ts` | unit-тесты `stats.ts` | 2 |
 | `plugins/session-panel/types/index.d.ts` | контракт `PluginState['session-panel']` | 3 |
 | `plugins/session-panel/hooks/state.ts` | атомы `$.state` (`atom(...)`), общие для `register.tsx` и `view.tsx` | 3 |
@@ -128,22 +128,19 @@ export type StepTiming = { tStart: number; tFirst: number | null; tEnd: number; 
 export type TurnAcc = { turnId: string; startedAt: number; costAtStart: number | null; steps: StepTiming[]; toolIntervals: Interval[] }
 export type TurnStats = { elapsedMs: number; modelMs: number; toolMs: number; steps: number; ttftMs: number | null;
   wholeTurnRate: number | null; responseRate: number | null; tokensIn: number; tokensOut: number; cachePct: number | null; costUsd: number | null }
-export type Price = { input: number; output: number; write5m: number; write1h: number; read: number }
 export type AgentStatus = 'running' | 'done' | 'failed' | 'stopped'
 export type AgentRow = { id: string; description: string; type: string; model: string | null; status: AgentStatus;
   startedAt: number; endedAt: number | null; costUsd: number | null }
 export type LogKind = 'info' | 'ok' | 'error'
 export type LogEntry = { at: number; who: string; text: string; kind: LogKind }
 export type CostSplit = { total: number | null; session: number | null; subagents: number }
-export const PRICES_AS_OF: string
 export function mergedLength(intervals: Interval[]): number
 export function sumUsage(usages: Usage[]): Usage
 export function cacheHitPct(u: Usage): number | null
 export function computeTurnStats(acc: TurnAcc, durationMs: number, usage: Usage | undefined, costNow: number | null): TurnStats
-export function priceFor(model: string): Price | null
-export function estimateCostUsd(model: string | null, u: Usage): number | null
-export function addAgentCost(row: AgentRow, model: string | null, u: Usage): AgentRow
-export function splitCost(totalUsd: number | undefined, subagentsUsd: number, includesSubagents: boolean): CostSplit
+export function attributeCost(lastUsd: number, usd: number): { delta: number; lastUsd: number }
+export function addAgentCost(row: AgentRow, deltaUsd: number): AgentRow
+export function splitCost(totalUsd: number | undefined, subagentsUsd: number): CostSplit
 export function orderAgents(rows: AgentRow[]): AgentRow[]
 export function pushLog(log: LogEntry[], entry: LogEntry, max?: number): LogEntry[]
 export function shortType(type: string): string
@@ -171,18 +168,9 @@ export function fmtClock(ms: number): string
   - обе скорости становятся `null` при окне ≤ 0, при значении больше 5000 или когда шагов нет;
   - токены и кеш считаются по `usage ?? sumUsage(steps.map(s => s.usage))`;
   - `costUsd = costNow − acc.costAtStart`, если оба не `null`, иначе `null`.
-- **`priceFor`:**
-  - id нормализуется: срезать всё до первого `claude-`, отбросить суффикс `[...]` в конце;
-  - выбирается самый длинный префикс из таблицы §4.4, иначе `null`.
-- **`estimateCostUsd`:**
-  - `(input·in + output·out + cache_read·read + w5·write5m + w1·write1h) / 1e6`;
-  - если в usage есть объект `cache_creation`, то `w5`/`w1` берутся из него; иначе `w5 = cache_creation_input_tokens`, `w1 = 0`;
-  - если модель `null` или неизвестна, результат `null`.
-- **`addAgentCost`:** прибавляет оценку к `costUsd`; `null + x` = `x`; если оценка `null`, строка не меняется.
-- **`splitCost`:**
-  - `includesSubagents`: `total = totalUsd`, `session = max(0, total − subagents)`;
-  - иначе `total = totalUsd + subagents`, `session = totalUsd`;
-  - если `totalUsd` не задан, то `total` и `session` равны `null`.
+- **`attributeCost`:** `delta = max(0, usd − lastUsd)`, новый `lastUsd = max(lastUsd, usd)`.
+- **`addAgentCost`:** прибавляет `deltaUsd` к `costUsd`; `null + x` = `x`.
+- **`splitCost`:** `total = totalUsd`, `session = max(0, total − subagents)`; если `totalUsd` не задан, то `total` и `session` равны `null`.
 - **`orderAgents`:** сначала `running`, затем по `startedAt` от новых к старым; исходный массив не меняется.
 - **`pushLog`:** `[entry, ...log].slice(0, max ?? 60)`.
 - **`shortType`:** часть после последнего `:`, не длиннее 10 символов.
@@ -221,18 +209,12 @@ export function fmtClock(ms: number): string
   | то же, но у последнего шага `hasTool: true` | `responseRate null` |
   | один шаг `tStart 0, tFirst 0, tEnd 1000`, `output 100000` | `wholeTurnRate null`, `responseRate null` |
   | `cacheHitPct({ input_tokens: 0 })` | `null` |
-  | `priceFor('claude-opus-5-5')` | `{ input: 4, output: 20, write5m: 5, write1h: 8, read: 0.2 }` |
-  | `priceFor('claude-fable-5-1')`.read / `priceFor('claude-fable-5')`.read | `0.25` / `1` |
-  | `priceFor('us.anthropic.claude-sonnet-4-6[1m]')`.input | `3` |
-  | `priceFor('claude-haiku-4-5-20251001')`.input | `1` |
-  | `priceFor('gpt-5')` | `null` |
-  | `estimateCostUsd('claude-opus-5-5', { input_tokens: 1000, output_tokens: 2000, cache_read_input_tokens: 100000, cache_creation_input_tokens: 10000 })` | `≈ 0.114` |
-  | то же + `cache_creation: { ephemeral_5m_input_tokens: 4000, ephemeral_1h_input_tokens: 6000 }` | `≈ 0.132` |
-  | `estimateCostUsd(null, {...})` | `null` |
-  | `splitCost(5.49, 2.95, true)` | `{ total: 5.49, session ≈ 2.54, subagents: 2.95 }` |
-  | `splitCost(5.49, 2.95, false)` | `{ total ≈ 8.44, session: 5.49, subagents: 2.95 }` |
-  | `splitCost(undefined, 1, true)` | `{ total: null, session: null, subagents: 1 }` |
-  | `splitCost(1, 2, true).session` | `0` |
+  | `attributeCost(10, 10.25)` | `{ delta: 0.25, lastUsd: 10.25 }` |
+  | `attributeCost(10.25, 10.2)` | `{ delta: 0, lastUsd: 10.25 }` |
+  | `addAgentCost({ …, costUsd: null }, 0.02).costUsd` / то же с `costUsd: 0.01` | `0.02` / `≈ 0.03` |
+  | `splitCost(5.49, 2.95)` | `{ total: 5.49, session ≈ 2.54, subagents: 2.95 }` |
+  | `splitCost(undefined, 1)` | `{ total: null, session: null, subagents: 1 }` |
+  | `splitCost(1, 2).session` | `0` |
   | `orderAgents` из `[done@100, running@50, done@300]` | `[running@50, done@300, done@100]` |
   | `pushLog` с 60 записями плюс новая | длина 60, новая на индексе 0 |
   | `shortType('plugin:code-reviewer')` | `'code-revie'` |
@@ -260,7 +242,7 @@ export function fmtClock(ms: number): string
 
   Дробные значения сравнивать с допуском (`toBeCloseTo` или аналог из `claude-code/testing`).
 - [ ] **Шаг 2. Убедиться, что тесты падают.** Запустить `claude plugin test /home/philarete/projects/claude_mods/plugins/session-panel`. Ожидается: FAIL (функций ещё нет).
-- [ ] **Шаг 3. Реализовать `stats.ts`** — минимально, чтобы тесты прошли. Без импортов от движка, кроме типов. Таблица цен §4.4 лежит в начале файла, рядом комментарий с `PRICES_AS_OF` и источником.
+- [ ] **Шаг 3. Реализовать `stats.ts`** — минимально, чтобы тесты прошли. Без импортов от движка, кроме типов.
 - [ ] **Шаг 4. Тесты проходят.** Тот же запуск. Ожидается: все тесты `stats.test.ts` PASS. Затем синхронизация `rsync`.
 
 ---
@@ -301,9 +283,8 @@ export function fmtClock(ms: number): string
 - **`turn.start`** без `agentId`: `turn = { turnId, startedAt: now, costAtStart: usage().cost?.usd ?? null, steps: [], toolIntervals: [] }`; запись в журнал §4.7.
 - **`turn.step`:** асинхронный генератор с замерами по §4.3, чанки пробрасываются без изменений.
   - Без `agentId` — добавить `StepTiming` в `turn`.
-  - С `agentId` — на `stop` вызвать `addAgentCost(agents[agentId], e.model, usage)`.
-- **`classic.PostToolUse` / `classic.PostToolUseFailure`** основного агента (поле агента пустое): добавить интервал `[now − duration_ms, now]` в `turn.toolIntervals`.
-- **`tool.call`:** `const t0 = now; const ran = await next(e)`; затем запись в журнал (`toolLabel` + `✓ fmtDuration` / `✗` / `denied`, через `redact` и `shorten(…, 64)`); вернуть `ran`.
+  - После каждого `stop` (любого агента): `$.clock.after(1, …)` читает `usage().cost.usd` и вызывает `attributeCost(lastUsd, usd)`. Прирост идёт в `addAgentCost(agents[agentId], delta)` для субагента; для основного агента он нигде отдельно не хранится (Session = Total − Subagents). `lastUsd` — переменная модуля, её задаёт текущий `cost.usd` на `session.start`.
+- **`tool.call`:** `const t0 = await $.clock.now(); const ran = await next(e); const t1 = await $.clock.now()`. Для основного агента (без `agentId`) интервал `[t0, t1]` добавляется в `turn.toolIntervals` (`classic.PostToolUse*` до мода не доходят). Затем запись в журнал (`toolLabel` + `✓ fmtDuration` / `✗` / `denied`, через `redact` и `shorten(…, 64)`); вернуть `ran`.
 - **`turn.complete`:**
   - без `agentId`: `const done = await next(e)`; `lastTurn = computeTurnStats(turn, e.durationMs, e.usage, usage().cost?.usd ?? null)`; `turn = null`; обновить branch; вернуть `done`;
   - с `agentId`: статус (`isAborted` → `stopped`; иначе `reason` → `done` или `failed` по правилу из итогов спайка), `endedAt`; запись в журнал §4.7.
@@ -336,9 +317,14 @@ export function fmtClock(ms: number): string
 **Интерфейсы:**
 - Берёт: атомы задачи 3, форматы задачи 2.
 - Даёт:
-  - `export function renderPane($, e): <дерево>` — типы аргументов взять из d.ts для `ui.render` с компонентом `Pane`;
+  - `export function renderPane(els, data: PaneData, props, handlers): <дерево>`. Функция чистая и **не получает `$`**: валидатор движка не прослеживает `$` через импорты. Хук `ui.render` в `register.tsx` вызывает `$.ui.resolve(e)` и `read($, atom)` для каждого атома, затем передаёт:
+    - `els` — таблицу элементов;
+    - `data` — снимок атомов `{ usage, project, mcp, lastTurn, agents, log, collapsed, now }`;
+    - `props` — `e.props` панели;
+    - `handlers` — `{ onToggle(id: SectionId) }`, то есть обработчики нажатия, собранные в `register.tsx` из функции верхнего уровня `toggleSection($, id)` (сигнатуру `onPress` взять из d.ts).
+  - `export type PaneData` — тип того же снимка;
   - `export function meterSvg(pct: number, widthPx: number): string`. Над функцией комментарий об авторстве: Desktop Statusline, George Liu, MIT;
-  - `const INCLUDES_SUBAGENTS: boolean` в `view.tsx` — значение из итогов спайка. Строка split считается через `splitCost(usage.costUsd, Σ agents.costUsd, INCLUDES_SUBAGENTS)`.
+  - строка split считается через `splitCost(usage.costUsd, Σ agents.costUsd)`.
 
   Атомы импортируются из `hooks/state.ts`, а `register.tsx` импортирует `renderPane` из `view.tsx`.
 
@@ -349,14 +335,13 @@ export function fmtClock(ms: number): string
   - верх без сворачивания: Session, Total, Context со шкалой, split при `subagents > 0`, строка `📁 name   🌿 branch`;
   - затем Usage (скрыт при пустом `rateLimits`), Turn stats (при `lastTurn = null` — приглушённое `No completed turn yet`), Subagents (скрыт, если записей нет), MCP, Context sources, Log.
 - **Заголовок секции:** `Button` с `plain`, `key: 'toggle:<SectionId>'`, `label: '▾ Title'` или `'▸ Title'`; справа приглушённая сводка §4.
-  - `onPress`: `update($, collapsedAtom, m => ({ ...m, [id]: !m[id] }))`, затем `$.store.set('collapsed', <новая карта>)`.
-  - Сам `render` в состояние не пишет.
+  - `onPress` вызывает `handlers.onToggle(id)`. Сама запись живёт в `register.tsx`, в функции верхнего уровня `toggleSection($, id)`: `update($, collapsedAtom, m => ({ ...m, [id]: !m[id] }))`, затем `$.store.set('collapsed', <новая карта>)`.
+  - Сам `render` в состояние не пишет, `view.tsx` не импортирует `$`-зависимый код.
 - **Строка «метка — значение»:** `Box` с `justifyContent: 'space-between'`.
 - **Цвета текста:** процент шкалы — ключ `warning`/`error` по порогу; Cache от 50% — `success`; статусы ◐ `#2f7de1`, ✓ `success`, ✗ `error`.
-- **Значения с оценкой** выводятся с префиксом `≈`.
 
 - [ ] **Шаг 1. Написать падающие тесты** в `view.test.tsx`: заполнить атомы фикстурами (как именно — найти в `claude-code/testing`) и смонтировать `Pane` на `desktop` и на `terminal`.
-  - (a) есть тексты `Context`, `12.8%`, `Turn stats`, `~61 tok/s`, `≈$0.02`;
+  - (a) есть тексты `Context`, `12.8%`, `Turn stats`, `~61 tok/s`, `$0.02`;
   - (b) нажатие `toggle:log` убирает строки журнала, а `mock.store` содержит `collapsed.log === true`;
   - (c) при `rateLimits: []` заголовка `Usage` нет;
   - (d) на `terminal` шкала текстовая (`▰`);
@@ -377,7 +362,7 @@ export function fmtClock(ms: number): string
   - установка: `claude plugin marketplace add ~/projects/claude_mods`, `claude plugin install session-panel@claude-mods`;
   - команда `/session-panel`;
   - что мод делает и чего не делает (§2);
-  - оценки: значения с `≈` и дата цен;
+  - как считается стоимость: прирост `cost.usd` после каждого шага приписывается его агенту;
   - разработка: `rsync` и горячая перезагрузка;
   - авторство по §10.
 - [ ] **Шаг 2. Полная проверка** (делает `reality-checker`; результат — реальный вывод команд):
