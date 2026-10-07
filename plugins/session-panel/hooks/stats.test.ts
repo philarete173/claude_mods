@@ -79,7 +79,8 @@ test('computeTurnStats: the fixture of the brief', () => {
   expect(s.steps).toBe(2)
   expect(s.ttftMs).toBe(700)
   expectNear(s.wholeTurnRate, 61.18, 0.005)
-  expectNear(s.responseRate, 67.18, 0.005)
+  // The last step: 477 tokens over its whole request, 6000 to 13700 ms: 477 / 7.7.
+  expectNear(s.responseRate, 61.95, 0.005)
   expect(s.tokensIn).toBe(12)
   expect(s.tokensOut).toBe(777)
   expectNear(s.cachePct, 99.09, 0.005)
@@ -91,11 +92,19 @@ test('computeTurnStats: ttftMs is null when a step has no first chunk', () => {
   expect(computeTurnStats(acc, 33500, U, 5.005).ttftMs).toBe(null)
 })
 
-test('computeTurnStats: responseRate needs a last step with text, no tool and a first chunk', () => {
+test('computeTurnStats: responseRate needs a last step with text and no tool', () => {
   const lastWith = (patch: Partial<StepTiming>): TurnAcc => ({ ...A, steps: [S1, { ...S2, ...patch }] })
   expect(computeTurnStats(lastWith({ hasTool: true }), 33500, U, 5.005).responseRate).toBe(null)
   expect(computeTurnStats(lastWith({ hasText: false }), 33500, U, 5.005).responseRate).toBe(null)
-  expect(computeTurnStats(lastWith({ tFirst: null }), 33500, U, 5.005).responseRate).toBe(null)
+})
+
+test('computeTurnStats: responseRate runs from the request, so a closing burst of text reads true', () => {
+  // The final text came in one burst, 150 ms and 10 ms before the stop. From its first chunk, 477 tokens would read
+  // ~3180 tok/s and 47700 tok/s (null); the request lasted 7.7 s, so the answer ran at ~62 tok/s either way.
+  for (const tFirst of [6600, 13550, 13690, null]) {
+    const acc: TurnAcc = { ...A, steps: [S1, { ...S2, tFirst }] }
+    expectNear(computeTurnStats(acc, 33500, U, 5.005).responseRate, 477 / 7.7, 0.005)
+  }
 })
 
 test('computeTurnStats: a rate above 5000 tok/s is null', () => {

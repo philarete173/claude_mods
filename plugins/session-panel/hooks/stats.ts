@@ -118,10 +118,11 @@ export function computeTurnStats(
     // Unknown as soon as one step has no first chunk.
     ttftMs: steps.length > 0 && ttfts.length === steps.length ? sum(ttfts) / steps.length : null,
     wholeTurnRate: rate(stepsUsage.output_tokens ?? 0, modelMs),
-    // Only a closing text answer (no tool call) has a clean streaming window.
+    // Only a closing text answer (no tool call) counts. Its window is the whole request, from the send to the stop:
+    // the text sometimes arrives as one burst, and a window from the first chunk read ~3000 tok/s on the live desktop.
     responseRate:
-      last !== undefined && !last.hasTool && last.hasText && last.tFirst !== null
-        ? rate(last.usage.output_tokens ?? 0, last.tEnd - last.tFirst)
+      last !== undefined && !last.hasTool && last.hasText
+        ? rate(last.usage.output_tokens ?? 0, last.tEnd - last.tStart)
         : null,
     tokensIn: total.input_tokens ?? 0,
     tokensOut: total.output_tokens ?? 0,

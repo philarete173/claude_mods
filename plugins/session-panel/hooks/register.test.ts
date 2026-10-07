@@ -579,7 +579,8 @@ test('a main turn ends as lastTurn: step timing, tool time, cost and log; everyt
       costUsd: 0.375,
     })
     expectNear(state.lastTurn?.wholeTurnRate, 140 / 1.7)
-    expectNear(state.lastTurn?.responseRate, 200)
+    // The answer: 100 tokens over its whole request, 0.7 s (its text came 0.2 s in, which does not matter).
+    expectNear(state.lastTurn?.responseRate, 100 / 0.7)
     expect(state.log.map(entry => [entry.who, entry.text, entry.kind])).toEqual([
       ['main', 'Bash ls -la ✓ 0.3s', 'ok'],
       ['you', 'fix the stock order qty', 'info'],

@@ -2,11 +2,14 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock, Plugin } from 'claude-code/testing'
 import type { On, RenderPropsOf, SessionRateLimit } from 'claude-code'
 
-import { meterSvg, meterWidth, renderPane } from './view'
+import { contextMeterWidth, limitMeterWidth, meterSvg, renderPane, ringSvg } from './view'
 import type { PaneData } from './view'
+import type { AgentRow, AgentStatus, LogEntry } from './stats'
 
 // The state of the pane is seeded the way register.test.ts does it: the events of a session run through the real
 // hooks, over a bottom that answers as the engine would, and the pane is mounted on a surface to see what it draws.
+// The layout rules are drawn from the tree alone (the kit has no layout engine), so what is pinned is the structure the
+// spec asks for: which cell is fixed, which gives way, where a text is cut, what lines up.
 const ROOT = '/work/online_shop'
 const START = { cwd: ROOT, surface: 'desktop', isInteractive: true } as const
 const NOW = Date.parse('2026-10-07T12:00:00Z')
@@ -36,7 +39,8 @@ const usage = (output: number) => ({
 })
 
 // Two requests of a turn: the first calls a tool, the second answers in text. Together: 1.7 s of model time and 104
-// output tokens, so the whole turn runs at ~61 tok/s and the answer alone at 84 tokens in 0.5 s, ~168 tok/s.
+// output tokens, so the whole turn runs at ~61 tok/s. The answer is 84 tokens over its request of 0.7 s, ~120 tok/s:
+// its window starts when the request is sent, not at its first chunk (0.2 s in).
 const TOOL_STEP = [
   { at: 300, chunk: { kind: 'text', index: 0, text: 'a' } },
   { at: 500, chunk: { kind: 'tool', index: 1, id: 'u1', name: 'Bash' } },
@@ -218,71 +222,194 @@ const mountPane = ($: Engine, surface: Surface, props: RenderPropsOf['Pane'] = P
   $.ui.mount({ plugin: 'session-panel', surface, component: 'Pane', requestId: 'session-panel', props })
 type Pane = Awaited<ReturnType<typeof mountPane>>
 
-// The text is on the pane somewhere: in a Text, or in the label of a Button.
-const has = async (ui: Pane, text: string | RegExp): Promise<boolean> => (await ui.find({ text })) !== undefined
-const headers = async (ui: Pane): Promise<string[]> =>
-  (await ui.findAll({ type: 'Button' })).map(button => String(button.props.label))
+// ---- Reading a drawn tree ----
 
 type Node = { type: string; props?: Record<string, unknown>; children?: unknown[] }
-const textOf = (node: unknown): unknown => (node as Node | undefined)?.children?.[0]
+type Placed = { node: Node; parent: Node | undefined }
+const isNode = (value: unknown): value is Node => typeof value === 'object' && value !== null
+const childrenOf = (node: Node | undefined): Node[] => (node?.children ?? []).filter(isNode)
+// Every string under the node, in document order.
+const textsOf = (node: unknown): string[] =>
+  typeof node === 'string' ? [node] : isNode(node) ? (node.children ?? []).flatMap(textsOf) : []
+// Every element of the tree in document order, each with the element that holds it.
+const flat = (tree: unknown, parent?: Node): Placed[] =>
+  isNode(tree) ? [{ node: tree, parent }, ...(tree.children ?? []).flatMap(child => flat(child, tree))] : []
 
-// The dim summary beside each header, by section id: the header row holds the Button, then the summary Text.
-const summaries = async (ui: Pane): Promise<Record<string, unknown>> => {
-  const found: Record<string, unknown> = {}
-  const walk = (node: unknown): void => {
-    if (typeof node !== 'object' || node === null) return
-    const { children = [] } = node as Node
-    const [button, summary] = children as Array<Node | undefined>
-    const key = String(button?.type === 'Button' ? button.props?.key : '')
-    if (key.startsWith('toggle:')) found[key.slice('toggle:'.length)] = textOf(summary)
-    children.forEach(walk)
-  }
-  walk(await ui.drawn())
+// The text is on the pane somewhere: in a Text, or in the label of a Button.
+const has = async (ui: Pane, text: string | RegExp): Promise<boolean> => (await ui.find({ text })) !== undefined
+const texts = async (ui: Pane): Promise<string[]> => (await ui.findAll({ type: 'Text' })).map(el => el.text)
 
-  return found
-}
+// The header rows: the Box that holds a fold Button, read into its parts. A row is [icon slot (desktop only)], the
+// title Box, the Button, the summary Box.
+type Header = { id: string; section: Node | undefined; cells: Node[]; label: string; title: string; summary?: string }
+const headerRows = (tree: unknown): Header[] =>
+  flat(tree).flatMap(({ node, parent }) => {
+    const cells = childrenOf(node)
+    const at = cells.findIndex(cell => cell.type === 'Button' && String(cell.props?.key).startsWith('toggle:'))
+    const button = cells[at]
+    if (node.type !== 'Box' || button === undefined) return []
+
+    return [{
+      id: String(button.props?.key).slice('toggle:'.length),
+      section: parent,
+      cells,
+      label: String(button.props?.label),
+      title: textsOf(cells[at - 1])[0] ?? '',
+      summary: textsOf(cells[at + 1])[0],
+    }]
+  })
+
+// Each header as the person reads it: the chevron and the title, in the order the sections are drawn.
+const headers = async (ui: Pane): Promise<string[]> =>
+  headerRows(await ui.drawn()).map(header => `${header.label} ${header.title}`)
+
+// The dim summary beside each header, by section id.
+const summaries = async (ui: Pane): Promise<Record<string, unknown>> =>
+  Object.fromEntries(headerRows(await ui.drawn()).map(header => [header.id, header.summary]))
+
+// The meters of the pane: the Svg elements that say a percent. The icons and the rules say nothing (alt is empty).
+const meters = async (ui: Pane) => (await ui.findAll({ type: 'Svg' })).filter(el => /%$/.test(String(el.props.alt)))
+
+const STATUSES: string[] = ['running', 'done', 'failed', 'stopped']
+// The status mark of each subagent row with the width of the cell around it: on the desktop an Svg (its alt is the
+// status) in a slot, on the terminal a glyph in a one-cell Box.
+const markCells = async (ui: Pane): Promise<Array<[mark: string, cells: unknown]>> =>
+  flat(await ui.drawn()).flatMap(({ node, parent }): Array<[string, unknown]> => {
+    if (node.type === 'Svg' && STATUSES.includes(String(node.props?.alt))) {
+      return [[String(node.props?.alt), parent?.props?.width]]
+    }
+    const first = childrenOf(node)[0]
+    const isGlyph = node.type === 'Box' && first?.type === 'Text' && /^[◐✓✗]$/.test(textsOf(first)[0] ?? '')
+
+    return isGlyph ? [[textsOf(first)[0] ?? '', node.props?.width]] : []
+  })
+
+// The log rows as drawn: who, and how many cells wide the columns of the time and of `who` are.
+const isTimeCell = (cell: Node | undefined): boolean =>
+  cell?.type === 'Box' && childrenOf(cell)[0]?.type === 'Text' && /^\d\d:\d\d:\d\d$/.test(textsOf(cell)[0] ?? '')
+const logColumns = (tree: unknown): Array<{ who: string; timeCells: unknown; whoCells: unknown }> =>
+  flat(tree).flatMap(({ node }) => {
+    const [time, who, text] = childrenOf(node)
+    if (node.type !== 'Box' || !isTimeCell(time) || who === undefined || text === undefined) return []
+
+    return [{ who: textsOf(who)[0] ?? '', timeCells: time?.props?.width, whoCells: who.props?.width }]
+  })
+
+// ---- Drawing without the engine ----
 
 // The element table as plain data, to call renderPane without the engine: each constructor answers its tag, its props
-// and its children, which is what the engine's own do.
+// and its children, which is what the engine's own do. The table has an Svg, as the terminal's has (a stub there).
 const plain = (type: string) => (props: Record<string, unknown>): Node => {
   const { children, ...rest } = props
-  const isNode = (child: unknown): boolean => typeof child === 'string' || (typeof child === 'object' && child !== null)
-  const kept = [children].flat(Infinity).filter(isNode)
+  const isKept = (child: unknown): boolean => typeof child === 'string' || (typeof child === 'object' && child !== null)
+  const kept = [children].flat(Infinity).filter(isKept)
 
   return { type, props: rest, children: kept }
 }
 const PLAIN_ELEMENTS = { Box: plain('Box'), Text: plain('Text'), Button: plain('Button'), Svg: plain('Svg') } as never
-const textsOf = (node: unknown): string[] =>
-  typeof node === 'string' ? [node] : ((node as Node).children ?? []).flatMap(textsOf)
 
-// The width of the cell around each status mark of the subagent rows.
-const markCells = async (ui: Pane): Promise<unknown[]> => {
-  const cells: unknown[] = []
-  const walk = (node: unknown): void => {
-    if (typeof node !== 'object' || node === null) return
-    const { type, props, children = [] } = node as Node
-    if (type === 'Box' && /^[◐✓✗]$/.test(String(textOf((children as Node[])[0])))) cells.push(props?.width)
-    children.forEach(walk)
-  }
-  walk(await ui.drawn())
+const draw = (data: PaneData, bodyColumns = 45): Node =>
+  renderPane(PLAIN_ELEMENTS, data, { bodyColumns }, { onToggle: () => undefined }) as unknown as Node
+const onSurface = (data: PaneData, surface: Surface): PaneData => ({ ...data, surface })
 
-  return cells
+const EMPTY: PaneData = {
+  usage: { rateLimits: [] },
+  project: { name: '', branch: null },
+  mcp: null,
+  lastTurn: null,
+  agents: {},
+  log: [],
+  collapsed: {},
+  now: NOW,
+  surface: 'desktop',
 }
 
-// The log rows as drawn: who, and how many cells wide the column of `who` is.
-const logColumns = async (ui: Pane): Promise<Array<[who: unknown, cells: unknown]>> => {
-  const rows: Array<[unknown, unknown]> = []
-  const walk = (node: unknown): void => {
-    if (typeof node !== 'object' || node === null) return
-    const { children = [] } = node as Node
-    const [time, who] = children as Array<Node | undefined>
-    const isTime = time?.type === 'Text' && /^\d\d:\d\d:\d\d$/.test(String(textOf(time)))
-    if (isTime && who?.type === 'Box') rows.push([textOf((who.children as Node[])[0]), who.props?.width])
-    children.forEach(walk)
-  }
-  walk(await ui.drawn())
+const agent = (n: number, status: AgentStatus, patch: Partial<AgentRow> = {}): AgentRow => ({
+  id: `a${n}`, description: `task ${n}`, type: 'feature-dev:code-reviewer', model: null, status, startedAt: n,
+  endedAt: null, costUsd: 2.5, ...patch,
+})
+const AGENTS = [
+  agent(1, 'running', { description: 'Map the order flow in checkout/stock.py and every test that covers it' }),
+  agent(2, 'running', { costUsd: null, type: 'claude-mods:minimal-change-engineer' }),
+  agent(3, 'failed'),
+  agent(4, 'stopped'),
+  ...[5, 6, 7, 8, 9, 10].map(n => agent(n, 'done')),
+]
+const PROJECT = 'a_project_folder_with_a_long_name'
+const BRANCH = 'feature/a-branch-with-a-long-name'
+const LONG_TEXT = `Edit plugins/session-panel/hooks/view.tsx ${'and more '.repeat(10)}✓ 0.1s`
+const LOG: LogEntry[] = Array.from({ length: 16 }, (_, i): LogEntry => ({
+  at: NOW - i * 1000, who: i === 0 ? 'minimal-change' : 'you', text: LONG_TEXT, kind: i === 1 ? 'error' : 'ok',
+}))
+// A pane with something in every block, and things too long for any pane: names, texts, a ninth agent.
+const FULL: PaneData = {
+  usage: {
+    costUsd: 148.59,
+    contextTokens: 529_000,
+    contextWindow: 600_000,
+    contextPct: 88.2,
+    skills: 77,
+    rateLimits: [
+      { kind: 'five_hour', percentUsed: 3, resetsAt: NOW + 133 * 60_000 },
+      { kind: 'seven_day', percentUsed: 84, resetsAt: NOW + (5 * 24 + 15) * 3_600_000 },
+      { kind: 'spend_limit', percentUsed: 120 },
+      { kind: 'some_new_window', percentUsed: 5 },
+    ],
+  },
+  project: { name: PROJECT, branch: BRANCH },
+  mcp: {
+    servers: [
+      { name: 'Claude_Browser', status: 'connected' },
+      { name: 'a-server-whose-name-is-wider-than-any-pane-there-is-or-will-ever-be', status: 'connected' },
+      { name: 'issue-hub', status: 'connected' },
+    ],
+    exact: false,
+  },
+  lastTurn: {
+    elapsedMs: 78_000, modelMs: 66_000, toolMs: 11_400, steps: 5, ttftMs: 4900, wholeTurnRate: 72, responseRate: 62,
+    tokensIn: 845, tokensOut: 4700, cachePct: 80, costUsd: 3.21,
+  },
+  agents: Object.fromEntries(AGENTS.map(row => [row.id, row])),
+  log: LOG,
+  collapsed: {},
+  now: NOW,
+  surface: 'desktop',
+}
+// The sections in the order they are drawn, by id and by title.
+const SECTIONS = ['usage', 'turn', 'agents', 'mcp', 'sources', 'log'] as const
+const TITLES = ['Usage', 'Turn stats', 'Subagents', 'MCP', 'Context sources', 'Log']
 
-  return rows
+// The two kinds of cell of a row (spec §2.3): a FIXED one holds its size, a FLEX one gives way first and clips.
+const isFixed = (box: Node | undefined): boolean => box?.props?.flexShrink === 0
+const isFlex = (box: Node | undefined): boolean =>
+  box?.props?.flexShrink === 1 && box.props.minWidth === 0 && box.props.overflow === 'hidden'
+// A Box lays its children out in a row unless it says otherwise, as Ink's does.
+const isRow = (box: Node | undefined): boolean => box?.type === 'Box' && (box.props?.flexDirection ?? 'row') === 'row'
+const hasWidth = (box: Node | undefined): boolean => typeof box?.props?.width === 'number'
+
+// What would let a row run past the pane, found in the tree: a cell of a row that neither holds its size nor gives way
+// and clips, a Text that may be cut that is not alone in a Box that clips, an image that nothing clips or fixes in a
+// slot.
+const rowProblems = (tree: unknown): string[] => {
+  const problems: string[] = []
+  for (const { node, parent } of flat(tree)) {
+    const where = `${node.type} ${JSON.stringify(node.props)} in ${JSON.stringify(parent?.props)}`
+    if (node.type === 'Box' && isRow(parent) && !isFixed(node) && !isFlex(node)) {
+      problems.push(`a cell of a row is neither fixed nor flexible: ${where}`)
+    }
+    if (node.type === 'Text' && node.props?.wrap === 'truncate' && isRow(parent)) {
+      const isSized = isFlex(parent) || (isFixed(parent) && hasWidth(parent))
+      if (parent?.props?.overflow !== 'hidden' || !isSized || parent.children?.length !== 1) {
+        problems.push(`a cut text is not alone in a clipping cell: ${where}`)
+      }
+    }
+    if (node.type === 'Svg') {
+      const isClipped = parent?.props?.overflow === 'hidden' || (isFixed(parent) && hasWidth(parent))
+      if (!isClipped) problems.push(`an image is not clipped or in a slot: ${where}`)
+    }
+  }
+
+  return problems
 }
 
 test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW, async ($, on) => {
@@ -295,30 +422,44 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
     for (const text of ['Context', '12.8%', 'Turn stats', '~61 tok/s', '$0.02']) {
       expect(await has(ui, text), `${surface}: ${text}`).toBe(true)
     }
-    // Top block: Total, the split, the project and the context figures.
-    for (const text of [
-      '$5.49', 'Session $5.44 · Subagents $0.050', '📁 online_shop', '🌿 master', '128k / 1M',
-    ]) {
+    // Top block: Total, the split and the context figures; the project is an icon and a name on the desktop, the emoji
+    // line of v1 on the terminal.
+    for (const text of ['$5.49', 'Session $5.44 · Subagents $0.050', '128k / 1M']) {
       expect(await has(ui, text), `${surface}: ${text}`).toBe(true)
+    }
+    const shown = await texts(ui)
+    if (surface === 'desktop') {
+      expect(shown, surface).toContain('online_shop')
+      expect(shown, surface).toContain('master')
+      expect(shown.some(text => /[📁🌿]/u.test(text)), surface).toBe(false)
+    } else {
+      expect(shown, surface).toContain('📁 online_shop')
+      expect(shown, surface).toContain('🌿 master')
     }
     // The sections come in the mockup's order, all unfolded, each with its summary beside it.
     expect(await headers(ui)).toEqual([
       '▾ Usage', '▾ Turn stats', '▾ Subagents', '▾ MCP', '▾ Context sources', '▾ Log',
     ])
-    expect((await ui.findAll({ type: 'Button' })).map(button => button.key)).toEqual([
+    const buttons = await ui.findAll({ type: 'Button' })
+    expect(buttons.map(button => button.key)).toEqual([
       'toggle:usage', 'toggle:turn', 'toggle:agents', 'toggle:mcp', 'toggle:sources', 'toggle:log',
     ])
-    expect((await ui.findAll({ type: 'Button' })).every(button => button.props.plain === true), surface).toBe(true)
+    // The chevron is a plain Button, dim at rest. The title is a Text, and the only bold ones are the titles.
+    expect(buttons.every(button => button.props.plain === true && button.props.dimColor === true), surface).toBe(true)
+    expect((await ui.findAll({ type: 'Text' })).filter(el => el.props.bold === true).map(el => el.text)).toEqual([
+      'Session', ...TITLES,
+    ])
     expect(await summaries(ui), surface).toStrictEqual({
-      usage: '5-hour 3%', turn: '~168 tok/s', agents: '1/2', mcp: '2', sources: '52 skills · 2 MCP', log: undefined,
+      usage: '5-hour 3%', turn: '~120 tok/s', agents: '1/2', mcp: '2', sources: '52 skills · 2 MCP', log: undefined,
     })
     // Usage: both windows, with their countdowns.
     for (const text of ['5-hour', 'Weekly', '3%', '24%', '↻ 2h 13m', '↻ 5d 15h']) {
       expect(await has(ui, text), `${surface}: ${text}`).toBe(true)
     }
-    // Turn stats: every row of a turn that took two steps, in the order of the mockup.
+    // Turn stats: every row of a turn that took two steps, in the order of the mockup. The answer ran 84 tokens over
+    // its request of 0.7 s.
     for (const text of [
-      'Response', '~168 tok/s', 'Whole turn', 'Elapsed', '33.5s', 'Model time', '1.7s', 'Tool time', '0.3s',
+      'Response', '~120 tok/s', 'Whole turn', 'Elapsed', '33.5s', 'Model time', '1.7s', 'Tool time', '0.3s',
       'Average TTFT', 'Steps', 'Tokens', '12 ↑ · 777 ↓', 'Cache', '99%', 'Cost', '$0.005',
     ]) {
       expect(await ui.find({ type: 'Text', text }), `${surface}: ${text}`).toBeDefined()
@@ -334,16 +475,20 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
     for (const text of ['$0.030', '$0.020']) {
       expect(await has(ui, text), `${surface}: ${text}`).toBe(true)
     }
-    // MCP and Context sources: every server is a green `● name`; the app's own server is neither listed nor counted.
-    for (const name of ['● codebase-memory', '● issue-hub']) {
-      expect((await ui.find({ type: 'Text', text: name }))?.props.color, `${surface}: ${name}`).toBe('success')
+    // MCP and Context sources: every server is a green dot and a name in the plain colour; the app's own server is
+    // neither listed nor counted.
+    expect((await ui.findAll({ type: 'Text', text: '●' })).map(el => [el.text, el.props.color]), surface).toEqual([
+      ['●\u00a0', 'success'], ['●\u00a0', 'success'],
+    ])
+    for (const name of ['codebase-memory', 'issue-hub']) {
+      expect((await ui.find({ type: 'Text', text: name }))?.props.color, `${surface}: ${name}`).toBeUndefined()
     }
     expect(await has(ui, 'ccd_'), `${surface}: ccd_`).toBe(false)
     for (const text of ['Skills', /^52$/, 'MCP servers']) {
       expect(await ui.find({ type: 'Text', text }), `${surface}: ${text}`).toBeDefined()
     }
     // Log: newest first, the person's prompt last.
-    const log = (await ui.findAll({ type: 'Text' })).map(el => el.text)
+    const log = await texts(ui)
     const prompt = log.indexOf('fix the stock order qty')
     expect(prompt).toBeGreaterThan(-1)
     expect(log.indexOf('Bash ls -la ✓ 0.3s')).toBeGreaterThan(-1)
@@ -353,7 +498,7 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
   }
 })
 
-test('a header folds its section, the store keeps the map, a second press unfolds it', SLOW, async ($, on) => {
+test('a chevron folds its section, the store keeps the map, a second press unfolds it', SLOW, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   await seed($, clock, bottom(on, clock))
   const stored = async (): Promise<unknown> => {
@@ -367,27 +512,31 @@ test('a header folds its section, the store keeps the map, a second press unfold
     ['usage', 'Usage', 'Weekly'],
     ['turn', 'Turn stats', 'Whole turn'],
     ['agents', 'Subagents', /^Revert stockUnits$/],
-    ['mcp', 'MCP', '● codebase-memory'],
+    ['mcp', 'MCP', 'codebase-memory'],
     ['sources', 'Context sources', 'Skills'],
     ['log', 'Log', 'fix the stock order qty'],
   ]
 
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
+    const summary = await summaries(ui)
     for (const [id, title, text] of bodies) {
       const label = async (): Promise<unknown> => (await ui.find({ key: `toggle:${id}` }))?.props.label
       expect(await has(ui, text), `${surface} ${id} open`).toBe(true)
-      expect(await label()).toBe(`▾ ${title}`)
+      expect(await label()).toBe('▾')
 
       await ui.press({ key: `toggle:${id}` })
       expect(await has(ui, text), `${surface} ${id} folded`).toBe(false)
-      expect(await label()).toBe(`▸ ${title}`)
+      expect(await label()).toBe('▸')
+      // The header stays, with its title and its summary: only the body goes.
+      expect(await headers(ui), `${surface} ${id}`).toContain(`▸ ${title}`)
+      expect(await summaries(ui), `${surface} ${id} summary`).toStrictEqual(summary)
       kept[id] = true
       expect(await stored()).toEqual(kept)
 
       await ui.press({ key: `toggle:${id}` })
       expect(await has(ui, text), `${surface} ${id} unfolded`).toBe(true)
-      expect(await label()).toBe(`▾ ${title}`)
+      expect(await label()).toBe('▾')
       kept[id] = false
       expect(await stored()).toEqual(kept)
     }
@@ -407,7 +556,7 @@ test('the folded sections of the last session stay folded: the map comes from th
     expect(await has(ui, 'Whole turn')).toBe(false)
     expect(await has(ui, 'fix the stock order qty')).toBe(false)
     // A folded section keeps its summary.
-    expect(await ui.find({ type: 'Text', text: '~168 tok/s' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '~120 tok/s' })).toBeDefined()
     expect(await has(ui, 'Weekly')).toBe(true)
     await ui.unmount()
   }
@@ -448,8 +597,16 @@ test('a pane with nothing to show draws the title, an empty Context and the turn
     expect(await headers(ui)).toEqual(['▾ Turn stats'])
     expect(await has(ui, '$')).toBe(false)
     expect(await has(ui, '📁')).toBe(false)
-    expect(await ui.find({ type: 'Svg' })).toBeUndefined()
+    expect(await meters(ui)).toEqual([])
     expect(await has(ui, /[▰▱]/)).toBe(false)
+    // The desktop draws the empty ring, a track with no arc; the terminal draws no image at all.
+    const images = await ui.findAll({ type: 'Svg' })
+    if (surface === 'desktop') {
+      expect(images.map(el => el.props.source)).toContain(ringSvg(undefined))
+      expect(String(ringSvg(undefined))).not.toContain('stroke-dasharray')
+    } else {
+      expect(images).toEqual([])
+    }
     await ui.unmount()
   }
 })
@@ -464,8 +621,9 @@ test('a /clear empties the pane again: the context reads — until the next resp
 
   expect(await has(ui, '12.8%')).toBe(false)
   expect(await ui.find({ type: 'Text', text: /^—$/ })).toBeDefined()
-  // The limits are the session's still: their two meters stay, the context has none.
-  expect((await ui.findAll({ type: 'Svg' })).map(el => el.props.alt)).toEqual(['5-hour 3%', 'Weekly 24%'])
+  // The limits are the session's still: their two meters stay, the context has none, and its ring is empty.
+  expect((await meters(ui)).map(el => el.props.alt)).toEqual(['5-hour 3%', 'Weekly 24%'])
+  expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(ringSvg(undefined))
   expect(await ui.find({ type: 'Text', text: 'No completed turn yet' })).toBeDefined()
   expect(await headers(ui)).toEqual(['▾ Usage', '▾ Turn stats', '▾ MCP', '▾ Context sources'])
   await ui.unmount()
@@ -476,16 +634,19 @@ test('the meter is an Svg on desktop and ▰▱ text on terminal', SLOW, async (
   await seed($, clock, bottom(on, clock))
 
   const desktop = await mountPane($, 'desktop')
-  const svgs = await desktop.findAll({ type: 'Svg' })
-  expect(svgs.map(el => el.props.alt)).toEqual(['Context 12.8%', '5-hour 3%', 'Weekly 24%'])
-  expect(svgs.map(el => [el.props.width, el.props.height])).toEqual([[180, 8], [180, 8], [180, 8]])
-  // 12.8% of 180 px, blue.
-  expect(svgs[0]?.props.source).toBe(meterSvg(12.8, 180))
-  expect(String(svgs[0]?.props.source)).toContain('<rect width="23" height="8" rx="4" fill="#2f7de1"/>')
+  const bars = await meters(desktop)
+  expect(bars.map(el => el.props.alt)).toEqual(['Context 12.8%', '5-hour 3%', 'Weekly 24%'])
+  // At 40 columns the context bar has the body less its percent, a limit bar the body less its label, percent and
+  // countdown.
+  expect(bars.map(el => [el.props.width, el.props.height])).toEqual([[264, 8], [120, 8], [120, 8]])
+  // 12.8% of 264 px, blue.
+  expect(bars[0]?.props.source).toBe(meterSvg(12.8, 264))
+  expect(String(bars[0]?.props.source)).toContain('<rect width="34" height="8" rx="4" fill="#2f7de1"/>')
   expect(await has(desktop, /[▰▱]/)).toBe(false)
   await desktop.unmount()
 
-  // The terminal's table holds an Svg too, a stub that draws nothing: the meter has to be text there.
+  // The terminal's table holds an Svg too, a stub that draws nothing: nothing of the pane is an image there, the rules
+  // and the meters are text.
   const terminal = await mountPane($, 'terminal')
   expect(await terminal.find({ type: 'Svg' })).toBeUndefined()
   const filled = await terminal.findAll({ type: 'Text', text: /^▰+$/ })
@@ -498,22 +659,26 @@ test('the meter is an Svg on desktop and ▰▱ text on terminal', SLOW, async (
   await terminal.unmount()
 })
 
-test('the meter takes the width of the body: 12.5 px a column less 210, from 40 to 180', SLOW, async ($, on) => {
+test('the meters take the width of the body: 8 px a cell, less the room of their row', SLOW, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   await seed($, clock, bottom(on, clock))
 
-  expect([0, 20, 24, 25, 30, 31, 32, 40, 80].map(meterWidth)).toEqual([40, 40, 90, 103, 165, 178, 180, 180, 180])
+  // The context bar shares its row with the percent: (columns - 7) cells, from 48 px to 560.
+  expect([0, 12, 20, 25, 32, 40, 45, 80, 100].map(contextMeterWidth)).toEqual([
+    48, 48, 104, 144, 200, 264, 304, 560, 560,
+  ])
+  // A limit bar shares its row with a label, a percent and a countdown: (columns - 25) cells, from 40 px to 240.
+  expect([0, 12, 25, 32, 40, 45, 55, 80, 100].map(limitMeterWidth)).toEqual([40, 40, 40, 56, 120, 160, 240, 240, 240])
+
   const ui = await mountPane($, 'desktop')
-  for (const [bodyColumns, width] of [[40, 180], [25, 103], [20, 40]] as const) {
+  for (const [bodyColumns, context, limit] of [[40, 264, 120], [32, 200, 56], [12, 48, 40]] as const) {
     await ui.redraw({ ...PANE_PROPS, bodyColumns })
-    expect((await ui.findAll({ type: 'Svg' })).map(el => el.props.width), `${bodyColumns} columns`).toEqual([
-      width, width, width,
-    ])
+    expect((await meters(ui)).map(el => el.props.width), `${bodyColumns} columns`).toEqual([context, limit, limit])
   }
   await ui.unmount()
 })
 
-test('the percent and the meter turn amber from 80% and red from 95%', SLOW, async ($, on) => {
+test('the percent, the meter and the ring turn amber from 80% and red from 95%', SLOW, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   bottom(on, clock)
   await $.session.start(START)
@@ -534,8 +699,11 @@ test('the percent and the meter turn amber from 80% and red from 95%', SLOW, asy
       await measure($, tokens, limits)
       expect((await ui.find({ type: 'Text', text }))?.props.color, `${surface} ${text}`).toBe(color)
       if (surface === 'desktop') {
-        expect(String((await ui.find({ type: 'Svg' }))?.props.source), `${surface} ${text}`).toContain(
-          `fill="${fill}"/></svg>`,
+        const [context] = await meters(ui)
+        expect(String(context?.props.source), `${surface} ${text}`).toContain(`fill="${fill}"/></svg>`)
+        // The ring beside the label is the first image of the pane, and its arc is the colour of the bar.
+        expect(String((await ui.find({ type: 'Svg' }))?.props.source), `${surface} ring ${text}`).toContain(
+          `stroke="${fill}"`,
         )
       } else {
         expect((await ui.find({ type: 'Text', text: /^▰/ }))?.props.color, `${surface} ${text}`).toBe(fill)
@@ -548,11 +716,12 @@ test('the percent and the meter turn amber from 80% and red from 95%', SLOW, asy
     expect(await has(ui, /^Spend$/)).toBe(true)
     expect(await has(ui, '↻')).toBe(false) // no reset time was given: no countdown
     if (surface === 'desktop') {
-      const [, ...bars] = (await ui.findAll({ type: 'Svg' })).map(el => String(el.props.source))
+      const [, ...bars] = (await meters(ui)).map(el => String(el.props.source))
+      // 79.9%, 80% and 120% of 120 px.
       expect(bars.map(source => source.split('<rect ')[2])).toEqual([
-        'width="144" height="8" rx="4" fill="#2f7de1"/></svg>',
-        'width="144" height="8" rx="4" fill="#e0a030"/></svg>',
-        'width="180" height="8" rx="4" fill="#e5484d"/></svg>',
+        'width="96" height="8" rx="4" fill="#2f7de1"/></svg>',
+        'width="96" height="8" rx="4" fill="#e0a030"/></svg>',
+        'width="120" height="8" rx="4" fill="#e5484d"/></svg>',
       ])
     }
     await ui.unmount()
@@ -579,8 +748,11 @@ test('a turn of one tool step hides Response and Steps; the cache is green from 
     // The summary falls back to the whole turn: ~20 tok/s is in the header and in its row.
     expect(await ui.findAll({ type: 'Text', text: '~20 tok/s' }), surface).toHaveLength(2)
     expect(await ui.find({ type: 'Text', text: '900 ↑ · 20 ↓' }), surface).toBeDefined()
-    // The log has the person's prompt only, so its column is as wide as `you`.
-    expect(await logColumns(ui), surface).toEqual([['you', 3]])
+    // The log has the person's prompt only: the desktop's column of `who` is its own width, the terminal's is as wide
+    // as `you`.
+    expect(logColumns(await ui.drawn()), surface).toEqual([
+      { who: 'you', timeCells: 8, whoCells: surface === 'desktop' ? 12 : 3 },
+    ])
     await ui.unmount()
   }
 
@@ -621,6 +793,9 @@ test('the subagent list shows 8 rows, the running ones first and the newest firs
       const ui = await mountPane($, surface)
       const tasks = (await ui.findAll({ type: 'Text', text: /^task \d$/ })).map(el => el.text)
       expect(tasks, surface).toEqual(['task 8', 'task 7', 'task 6', 'task 5', 'task 4', 'task 3', 'task 2', 'task 1'])
+      const more = flat(await ui.drawn()).find(({ node }) => textsOf(node)[0] === '+2 more' && node.type === 'Box')
+      // The count lines up with the names: past the status mark and the gap, 3 cells on the desktop, 2 on the terminal.
+      expect(more?.node.props?.paddingLeft, surface).toBe(surface === 'desktop' ? 3 : 2)
       expect(await ui.find({ type: 'Text', text: '+2 more' }), surface).toBeDefined()
       expect((await summaries(ui)).agents, surface).toBe('9/10')
       // No request has been charged to any of them: a dash where the cost goes, on each of the 8 rows.
@@ -629,8 +804,8 @@ test('the subagent list shows 8 rows, the running ones first and the newest firs
     }
   })
 
-test('a subagent that did not finish well shows ✗, a stopped one dimmed, a running one ◐ in blue', SLOW,
-  async ($, on) => {
+test('a subagent shows its status as a shape and a colour: ✗ for failed, dimmed for stopped, ◐ in blue for running',
+  SLOW, async ($, on) => {
     const clock = mock.clock(on, { now: NOW })
     bottom(on, clock)
     await $.session.start(START)
@@ -641,17 +816,29 @@ test('a subagent that did not finish well shows ✗, a stopped one dimmed, a run
 
     for (const surface of SURFACES) {
       const ui = await mountPane($, surface)
-      const marks = await ui.findAll({ type: 'Text', text: /^[◐✓✗]$/ })
-      const icons = marks.map(el => [el.text, el.props.color, el.props.dimColor])
       // Running first (a4), then the newest start first; the four were spawned in one tick, so by order of spawn.
-      expect(icons, surface).toEqual([
-        ['◐', '#2f7de1', undefined],
-        ['✓', 'success', undefined],
-        ['✗', 'error', undefined],
-        ['✗', undefined, true],
-      ])
-      // Each mark has a cell of its own, so the descriptions start at the same place whatever the glyph.
-      expect(await markCells(ui), surface).toEqual([1, 1, 1, 1])
+      if (surface === 'terminal') {
+        const marks = await ui.findAll({ type: 'Text', text: /^[◐✓✗]$/ })
+        expect(marks.map(el => [el.text, el.props.color, el.props.dimColor]), surface).toEqual([
+          ['◐', '#2f7de1', undefined],
+          ['✓', 'success', undefined],
+          ['✗', 'error', undefined],
+          ['✗', undefined, true],
+        ])
+        // Each mark has a cell of its own, so the descriptions start at the same place whatever the glyph.
+        expect(await markCells(ui), surface).toEqual([['◐', 1], ['✓', 1], ['✗', 1], ['✗', 1]])
+      } else {
+        // An icon in a slot of 2 cells; its alt is the status, since the icon is the only place that says it.
+        expect(await markCells(ui), surface).toEqual([['running', 2], ['done', 2], ['failed', 2], ['stopped', 2]])
+        // Each is drawn in its own colour (blue, green, red, grey) and they differ in shape too: with the colours
+        // taken out, no two are alike.
+        const sources = (await ui.findAll({ type: 'Svg' }))
+          .filter(el => STATUSES.includes(String(el.props.alt)))
+          .map(el => String(el.props.source))
+        const colours = ['#2f7de1', '#2ea043', '#e5484d', '#8a8a8a']
+        sources.forEach((source, i) => expect(source, STATUSES[i]).toContain(`stroke="${colours[i]}"`))
+        expect(new Set(sources.map(source => source.replace(/#[0-9a-f]{6}/g, '#'))).size).toBe(4)
+      }
       await ui.unmount()
     }
   })
@@ -666,19 +853,26 @@ test('the log shows 15 lines, newest first, an error in red, and a long text cut
 
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
-    const texts = (await ui.findAll({ type: 'Text' })).map(el => el.text)
+    const log = await texts(ui)
     // 'failed' (the subagent), then prompt 19 down to prompt 6: 15 lines in all.
-    expect(texts.filter(text => /^(prompt \d+|failed)$/.test(text)), surface).toEqual([
+    expect(log.filter(text => /^(prompt \d+|failed)$/.test(text)), surface).toEqual([
       'failed', ...Array.from({ length: 14 }, (_, i) => `prompt ${19 - i}`),
     ])
-    // The `who` of the failed line is red, the others are plain.
+    // The `who` of the failed line is red, the others are dim: the text carries the row.
     const whos = await ui.findAll({ type: 'Text', text: /^(engineer|you)$/ })
-    expect(whos.map(el => [el.text, el.props.color])).toEqual([
-      ['engineer', 'error'], ...Array.from({ length: 14 }, () => ['you', undefined]),
+    expect(whos.map(el => [el.text, el.props.color, el.props.dimColor])).toEqual([
+      ['engineer', 'error', undefined], ...Array.from({ length: 14 }, () => ['you', undefined, true]),
     ])
-    expect((await ui.findAll({ type: 'Text', text: /^\d\d:\d\d:\d\d$/ })).length).toBe(15)
-    // The column of `who` is as wide as the longest of the 15 (`engineer`), so the texts line up.
-    expect((await logColumns(ui)).map(([, cells]) => cells), surface).toEqual(Array(15).fill(8))
+    const clocks = await ui.findAll({ type: 'Text', text: /^\d\d:\d\d:\d\d$/ })
+    expect(clocks).toHaveLength(15)
+    expect(clocks.every(el => el.props.dimColor === true)).toBe(true)
+    // Time and `who` are columns of fixed width, the same on every row. The desktop's `who` has a width of its own; the
+    // terminal's is as wide as the longest of the 15 (`engineer`). Either way the texts line up.
+    const columns = logColumns(await ui.drawn())
+    expect(columns, surface).toHaveLength(15)
+    expect(columns.map(column => column.timeCells), surface).toEqual(Array(15).fill(8))
+    expect(columns.map(column => column.whoCells), surface).toEqual(Array(15).fill(surface === 'desktop' ? 12 : 8))
+    // The text is cut to one line, in a cell that gives way.
     expect((await ui.find({ type: 'Text', text: 'prompt 19' }))?.props.wrap).toBe('truncate')
     await ui.unmount()
   }
@@ -693,38 +887,32 @@ test('a window of 0 draws a dash for the context, never NaN or Infinity', SLOW, 
     const ui = await mountPane($, surface)
     expect(await ui.find({ type: 'Text', text: /^—$/ }), surface).toBeDefined()
     expect(await has(ui, /NaN|Infinity|null|undefined|%/), surface).toBe(false)
-    expect(await ui.find({ type: 'Svg' }), surface).toBeUndefined()
+    expect(await meters(ui), surface).toEqual([])
     await ui.unmount()
   }
 })
 
 test('the view reads a percent that is not a finite number as no reading', () => {
-  const empty: PaneData = {
-    usage: { rateLimits: [] },
-    project: { name: '', branch: null },
-    mcp: null,
-    lastTurn: null,
-    agents: {},
-    log: [],
-    collapsed: {},
-    now: NOW,
-    surface: 'desktop',
-  }
-  const draw = (contextPct: number | undefined): Node =>
-    renderPane(
-      PLAIN_ELEMENTS,
-      { ...empty, usage: { rateLimits: [], contextTokens: 100, contextWindow: 0, contextPct } },
-      { bodyColumns: 40 },
-      { onToggle: () => undefined },
-    ) as unknown as Node
+  const drawn = (contextPct: number | undefined): Node =>
+    draw({ ...EMPTY, usage: { rateLimits: [], contextTokens: 100, contextWindow: 0, contextPct } }, 40)
+  const meterAlts = (tree: Node): unknown[] =>
+    flat(tree)
+      .filter(({ node }) => node.type === 'Svg' && /%$/.test(String(node.props?.alt)))
+      .map(({ node }) => node.props?.alt)
 
   // A finite percent is drawn, so the drawing here is not empty by mistake.
-  expect(textsOf(draw(12.8))).toContain('12.8%')
+  expect(textsOf(drawn(12.8))).toContain('12.8%')
+  expect(meterAlts(drawn(12.8))).toEqual(['Context 12.8%'])
   // NaN and the infinities, and the null that a build before the guard may have left behind in the state.
   for (const contextPct of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, null as never]) {
-    const tree = draw(contextPct)
-    expect(textsOf(tree), String(contextPct)).toEqual(['Session', 'Context', '—', 'No completed turn yet'])
-    expect(JSON.stringify(tree), String(contextPct)).not.toContain('"Svg"')
+    const tree = drawn(contextPct)
+    expect(textsOf(tree), String(contextPct)).toEqual([
+      'Session', 'Context', '—', 'Turn stats', 'No completed turn yet',
+    ])
+    // The ring is its track alone, and there is no meter.
+    expect(meterAlts(tree), String(contextPct)).toEqual([])
+    expect(JSON.stringify(tree), String(contextPct)).not.toMatch(/NaN|Infinity|null|undefined/)
+    expect(JSON.stringify(tree), String(contextPct)).toContain(JSON.stringify(ringSvg(undefined)))
   }
 })
 
@@ -740,12 +928,372 @@ test('a press folds the section and does not fail when the store cannot be writt
     // The write to the store is refused, the press is still a press: the section folds all the same.
     await ui.press({ key: 'toggle:log' })
     expect(await has(ui, 'fix the stock order qty'), `${surface} folded`).toBe(false)
-    expect(await label()).toBe('▸ Log')
+    expect(await label()).toBe('▸')
 
     await ui.press({ key: 'toggle:log' })
     expect(await has(ui, 'fix the stock order qty'), `${surface} unfolded`).toBe(true)
-    expect(await label()).toBe('▾ Log')
+    expect(await label()).toBe('▾')
     await ui.unmount()
+  }
+})
+
+
+// ---- The structure of the tree, drawn without the engine ----
+
+const isType = (text: string): boolean => text.startsWith('@')
+// The Text that shows exactly this string, with the element that holds it.
+const textNode = (tree: unknown, text: string): Placed | undefined =>
+  flat(tree).find(({ node }) => node.type === 'Text' && textsOf(node)[0] === text)
+// The subagent rows: a mark, the name group with its `@type`, the cost.
+const agentRows = (tree: unknown): Node[] =>
+  flat(tree)
+    .map(({ node }) => node)
+    .filter(node => node.type === 'Box' && childrenOf(node).length === 3 && textsOf(childrenOf(node)[1]).some(isType))
+// The rules: on the desktop an image 1600 px wide, on the terminal a row of ─.
+const isRuleNode = (node: Node): boolean =>
+  (node.type === 'Svg' && node.props?.width === 1600) || (node.type === 'Text' && /^─+$/.test(textsOf(node)[0] ?? ''))
+const ruleCount = (tree: unknown): number => flat(tree).filter(({ node }) => isRuleNode(node)).length
+
+test('no row can outgrow the pane: every cell is fixed or flexible, and cut text sits in a clipping cell', () => {
+  const folded = Object.fromEntries(SECTIONS.map(id => [id, true]))
+  const bare = { ...FULL, usage: { ...FULL.usage, costUsd: undefined }, project: { name: 'repo', branch: null } }
+
+  for (const surface of SURFACES) {
+    for (const bodyColumns of [8, 12, 30, 45, 120]) {
+      // The full pane, the same folded, the empty one, and one with no total, no branch and few figures.
+      for (const data of [FULL, { ...FULL, collapsed: folded }, EMPTY, bare]) {
+        expect(rowProblems(draw(onSurface(data, surface), bodyColumns)), `${surface} ${bodyColumns}`).toEqual([])
+      }
+    }
+  }
+
+  // The check has teeth: v1's row, whose cells could not shrink below their text, is found.
+  const text: Node = { type: 'Text', props: { wrap: 'truncate' }, children: ['a long description'] }
+  const v1: Node = {
+    type: 'Box',
+    props: { flexDirection: 'row' },
+    children: [{ type: 'Box', props: { flexShrink: 1 }, children: [text] }],
+  }
+  expect(rowProblems(v1)).toHaveLength(2)
+})
+
+test('the texts that can overrun a row carry the truncation props; the values never do', () => {
+  for (const surface of SURFACES) {
+    const tree = draw(onSurface(FULL, surface))
+    const cut = flat(tree)
+      .filter(({ node }) => node.type === 'Text' && node.props?.wrap === 'truncate')
+      .map(({ node }) => textsOf(node)[0])
+    const project = surface === 'desktop' ? PROJECT : `📁 ${PROJECT}`
+    // A summary, the cost split, the project, a description, a server, a log line and its `who`, a countdown, a label.
+    for (const text of [
+      '5-hour 3%', 'Session $126.09 · Subagents $22.50', project, 'task 9', 'Claude_Browser', LONG_TEXT,
+      'minimal-change', '↻ 2h 13m', 'Response', 'Spend',
+    ]) {
+      expect(cut, `${surface}: ${text}`).toContain(text)
+    }
+    // A figure, a percent, a cost, the title and the type of an agent are not cut.
+    for (const text of ['$148.59', '88.2%', '120%', '1m 18s', '$2.50', '@code-reviewer', 'Usage', 'Session']) {
+      const placed = textNode(tree, text)
+      expect(placed, `${surface}: ${text}`).toBeDefined()
+      expect(placed?.node.props?.wrap, `${surface}: ${text}`).toBeUndefined()
+    }
+  }
+})
+
+test('value columns hold their width and align right, so the figures line up on their right edge', () => {
+  const isRightAligned = (cell: Node | undefined): boolean =>
+    isFixed(cell) && cell?.props?.justifyContent === 'flex-end' && hasWidth(cell)
+
+  for (const surface of SURFACES) {
+    const tree = draw(onSurface(FULL, surface))
+    const cellOf = (text: string): Node | undefined => textNode(tree, text)?.parent
+    const widthOf = (cell: Node | undefined): number => Number(cell?.props?.width)
+
+    // The context percent has a cell wide enough for 100.0%.
+    expect(isRightAligned(cellOf('88.2%')), `${surface} context percent`).toBe(true)
+    expect(widthOf(cellOf('88.2%'))).toBeGreaterThanOrEqual('100.0%'.length)
+    // The limits: one width for the labels, one for the percents (wide enough for 100%), so the rows line up.
+    const labels = ['5-hour', 'Weekly', 'Spend', 'some_new_window'].map(cellOf)
+    expect(new Set(labels.map(widthOf)).size, `${surface} limit labels`).toBe(1)
+    expect(labels.every(label => isFixed(label) && hasWidth(label)), `${surface} limit labels`).toBe(true)
+    const percents = ['3%', '84%', '120%', '5%'].map(cellOf)
+    expect(percents.every(isRightAligned), `${surface} limit percents`).toBe(true)
+    expect(new Set(percents.map(widthOf)).size, `${surface} limit percents`).toBe(1)
+    expect(widthOf(percents[0])).toBeGreaterThanOrEqual('100%'.length)
+    // The costs of the subagents: eight rows, one width, wide enough for $148.59, each at the right edge.
+    const costs = agentRows(tree).map(row => childrenOf(row)[2])
+    expect(costs, surface).toHaveLength(8)
+    expect(costs.every(isRightAligned), `${surface} costs`).toBe(true)
+    expect(new Set(costs.map(widthOf)).size, `${surface} costs`).toBe(1)
+    expect(widthOf(costs[0])).toBeGreaterThanOrEqual('$148.59'.length)
+    // The label/value rows (Turn stats and Context sources): the label gives way, the value holds its size.
+    const rows = flat(tree).filter(({ node }) => node.props?.justifyContent === 'space-between')
+    const valueRows = rows.filter(({ node }) => {
+      const [label, value] = childrenOf(node)
+      return node.props?.columnGap === 2 && isFlex(label) && isFixed(value)
+    })
+    expect(valueRows, surface).toHaveLength(10 + 2)
+  }
+})
+
+test('the log keeps time and who in fixed columns, so every text starts at the same place', () => {
+  const log = (who: string, kind: LogEntry['kind'] = 'info'): LogEntry[] =>
+    ['a', 'b', 'c'].map((text, i) => ({ at: NOW - i * 1000, who, text, kind }))
+
+  // The desktop's column of `who` is one width whatever the names; the terminal's is the longest name, up to 14.
+  const names: Array<[who: string, terminalCells: number]> = [
+    ['you', 3], ['minimal-change', 14], ['a-name-longer-than-the-log-ever-keeps', 14],
+  ]
+  for (const [who, terminalCells] of names) {
+    for (const surface of SURFACES) {
+      const rows = logColumns(draw(onSurface({ ...EMPTY, log: log(who) }, surface)))
+      const cells = surface === 'desktop' ? 12 : terminalCells
+      expect(rows.map(row => [row.timeCells, row.whoCells]), `${surface} ${who}`).toEqual(Array(3).fill([8, cells]))
+    }
+  }
+  // The text takes what is left: it grows, gives way, and is cut.
+  const [line] = flat(draw({ ...EMPTY, log: log('you') })).filter(({ node }) => isTimeCell(childrenOf(node)[0]))
+  const text = childrenOf(line?.node)[2]
+  expect(text?.props).toMatchObject({ flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden' })
+  expect(childrenOf(text)[0]?.props?.wrap).toBe('truncate')
+  // An error shows its `who` in red; the others are dim, like the time.
+  const styles = (kind: LogEntry['kind']): unknown[] =>
+    flat(draw({ ...EMPTY, log: log('engineer', kind) }))
+      .filter(({ node }) => node.type === 'Text' && textsOf(node)[0] === 'engineer')
+      .map(({ node }) => [node.props?.color, node.props?.dimColor])
+  expect(styles('error')).toEqual(Array(3).fill(['error', undefined]))
+  expect(styles('ok')).toEqual(Array(3).fill([undefined, true]))
+})
+
+test('a header is an icon, a bold title, a dim chevron that folds, and a summary pushed to the right', () => {
+  for (const surface of SURFACES) {
+    const rows = headerRows(draw(onSurface(FULL, surface)))
+    expect(rows.map(row => row.id), surface).toEqual([...SECTIONS])
+    expect(rows.map(row => row.title), surface).toEqual(TITLES)
+    expect(rows.map(row => row.summary), surface).toEqual([
+      '5-hour 3%', '~62 tok/s', '2/10', '3', '77 skills · 3 MCP', undefined,
+    ])
+    for (const { cells, label } of rows) {
+      // On the desktop an icon slot comes first; the terminal draws none.
+      const [slot, title, chevron, summary, ...rest] = surface === 'desktop' ? cells : [undefined, ...cells]
+      expect(rest, surface).toEqual([])
+      if (surface === 'desktop') {
+        expect(slot?.props, surface).toMatchObject({ flexShrink: 0, width: 2 })
+        expect(childrenOf(slot).map(image => [image.type, image.props?.alt, image.props?.width, image.props?.height]))
+          .toEqual([['Svg', '', 14, 14]])
+      }
+      // The title holds its size, so it is never cut; it is a Text, in bold.
+      expect(isFixed(title), surface).toBe(true)
+      expect(childrenOf(title).map(el => [el.type, el.props?.bold]), surface).toEqual([['Text', true]])
+      // The chevron is the Button that folds: plain, dim at rest.
+      expect(chevron?.type, surface).toBe('Button')
+      expect(chevron?.props, surface).toMatchObject({ plain: true, dimColor: true })
+      expect(label, surface).toBe('▾')
+      // The summary takes the room that is left, at the right edge, and gives way before the title does.
+      expect(summary?.props, surface).toMatchObject({
+        flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden', justifyContent: 'flex-end',
+      })
+    }
+  }
+})
+
+test('the desktop draws an icon for each section and for the project; the terminal draws no image', () => {
+  const desktop = draw(onSurface(FULL, 'desktop'))
+  const icons = headerRows(desktop).map(row => String(childrenOf(row.cells[0])[0]?.props?.source))
+  // Six sections, six icons, no two alike, each an SVG document of its own.
+  expect(icons.every(source => /^<svg [^>]*width="14" height="14"[\s\S]*<\/svg>$/.test(source))).toBe(true)
+  expect(new Set(icons).size).toBe(6)
+  // The project and its branch have an icon each, of their own, and no emoji.
+  const groups = childrenOf(childrenOf(childrenOf(desktop)[0]).at(-1))
+  expect(groups.map(group => textsOf(group))).toEqual([
+    [PROJECT], [BRANCH],
+  ])
+  const projectIcons = groups.map(group => String(childrenOf(childrenOf(group)[0])[0]?.props?.source))
+  expect(new Set([...icons, ...projectIcons]).size).toBe(8)
+  expect(JSON.stringify(desktop)).not.toMatch(/📁|🌿/u)
+
+  const terminal = draw(onSurface(FULL, 'terminal'))
+  expect(flat(terminal).filter(({ node }) => node.type === 'Svg')).toEqual([])
+  expect(JSON.stringify(terminal)).not.toContain('<svg')
+  // The project line is v1's: an emoji and a name, no margin above it.
+  const line = childrenOf(childrenOf(terminal)[0]).at(-1)
+  expect(textsOf(line)).toEqual([`📁 ${PROJECT}`, `🌿 ${BRANCH}`])
+  expect(line?.props?.marginTop ?? 0).toBe(0)
+})
+
+test('the divider is an image cut by its Box on the desktop and a text rule on the terminal', () => {
+  const rules = flat(draw(onSurface(FULL, 'desktop'))).filter(({ node }) => isRuleNode(node))
+  expect(rules).toHaveLength(6)
+  for (const { node, parent } of rules) {
+    // A line 1 px tall in a clipping Box with room around it; it is wider than any pane, so the Box cuts it.
+    expect(node.props).toMatchObject({ height: 1, alt: '' })
+    expect(parent?.props).toMatchObject({ overflow: 'hidden', marginTop: 1, marginBottom: 1 })
+    expect(String(node.props?.source)).toContain('preserveAspectRatio="none"')
+  }
+
+  for (const bodyColumns of [20, 45]) {
+    const lines = flat(draw(onSurface(FULL, 'terminal'), bodyColumns)).filter(({ node }) => isRuleNode(node))
+    // One row each, as wide as the body, dim, with no margin.
+    expect(lines).toHaveLength(6)
+    for (const { node, parent } of lines) {
+      expect(textsOf(node)[0]).toBe('─'.repeat(bodyColumns))
+      expect(node.props).toMatchObject({ dimColor: true, wrap: 'truncate' })
+      expect(parent?.props?.marginTop).toBeUndefined()
+    }
+  }
+})
+
+test('the sections come in order, each beginning with its own rule, and a left-out section leaves no rule', () => {
+  for (const surface of SURFACES) {
+    const tree = draw(onSurface(FULL, surface))
+    // The top block comes first, with no rule above it and no Button to fold it; then the six sections.
+    const [top, ...sections] = childrenOf(tree)
+    expect(ruleCount(top), surface).toBe(0)
+    expect(flat(top).some(({ node }) => node.type === 'Button'), surface).toBe(false)
+    expect(sections, surface).toHaveLength(6)
+    // Each section is its rule, then its header, then its body.
+    expect(sections.map(section => [ruleCount(childrenOf(section)[0]), childrenOf(section).length]), surface).toEqual(
+      Array(6).fill([1, 3]),
+    )
+    expect(headerRows(tree).map(row => row.section), surface).toEqual(sections)
+
+    // Fold two of them: the rule and the header stay, the body goes, the summary stays.
+    const folded = headerRows(draw(onSurface({ ...FULL, collapsed: { turn: true, log: true } }, surface)))
+    expect(folded.map(row => row.label), surface).toEqual(['▾', '▸', '▾', '▾', '▾', '▸'])
+    expect(folded.map(row => childrenOf(row.section).length), surface).toEqual([3, 2, 3, 3, 3, 2])
+    expect(folded.map(row => row.summary), surface).toEqual(headerRows(tree).map(row => row.summary))
+
+    // A section with nothing to show is left out together with its rule: one rule for each header, always.
+    for (const sparse of [
+      EMPTY,
+      { ...FULL, usage: { ...FULL.usage, rateLimits: [] }, mcp: null, log: [] },
+      { ...FULL, usage: { ...FULL.usage, skills: undefined }, mcp: null, agents: {} },
+    ]) {
+      const drawn = draw(onSurface(sparse, surface))
+      expect(ruleCount(drawn), `${surface} ${headerRows(drawn).length} sections`).toBe(headerRows(drawn).length)
+    }
+  }
+})
+
+test('partial states draw what they have and leave the rest out', () => {
+  const read = (data: PaneData, surface: Surface): string[] =>
+    // Without the rules (▰▱ cells too: the terminal draws its meters as text).
+    textsOf(draw(onSurface(data, surface))).filter(text => !/^[─▰▱]+$/.test(text))
+
+  for (const surface of SURFACES) {
+    // Nothing at all: the title, an empty Context, and the turn placeholder in dim, under a header with no summary.
+    expect(read(EMPTY, surface), surface).toEqual(['Session', 'Context', '—', 'Turn stats', 'No completed turn yet'])
+    expect(textNode(draw(onSurface(EMPTY, surface)), 'No completed turn yet')?.node.props?.dimColor, surface).toBe(true)
+    expect(headerRows(draw(onSurface(EMPTY, surface))).map(row => row.summary), surface).toEqual([undefined])
+    expect(textNode(draw(onSurface(EMPTY, surface)), '—')?.node.props?.dimColor, surface).toBe(true)
+
+    // A reading with no tokens or window draws the meter and the percent, and no `tokens / window`.
+    const bare = { ...EMPTY, usage: { rateLimits: [], contextPct: 40 } }
+    expect(read(bare, surface), surface).toEqual(['Session', 'Context', '40.0%', 'Turn stats', 'No completed turn yet'])
+
+    // No total cost: `Session` stands alone on its row, and there is no split line.
+    const noTotal = draw(onSurface({ ...FULL, usage: { ...FULL.usage, costUsd: undefined } }, surface))
+    expect(textsOf(childrenOf(childrenOf(noTotal)[0])[0]), surface).toEqual(['Session'])
+    expect(textsOf(noTotal).some(text => text.startsWith('Session ')), surface).toBe(false)
+    // A total and no cost on any subagent: the total, and no split line. With costs, both parts.
+    const free = { ...FULL, agents: Object.fromEntries(AGENTS.map(row => [row.id, { ...row, costUsd: null }])) }
+    expect(read(free, surface), surface).toContain('$148.59')
+    expect(read(free, surface).some(text => text.startsWith('Session ')), surface).toBe(false)
+    expect(read(FULL, surface), surface).toContain('Session $126.09 · Subagents $22.50')
+
+    // No subagents: no section for them, so no header and no rule.
+    expect(headerRows(draw(onSurface({ ...FULL, agents: {} }, surface))).map(row => row.id), surface).toEqual([
+      'usage', 'turn', 'mcp', 'sources', 'log',
+    ])
+    // A subagent whose cost is not known yet draws a dim dash in the cost column.
+    const dash = textNode(draw(onSurface(FULL, surface)), '—')
+    expect(dash?.node.props?.dimColor, surface).toBe(true)
+    expect(dash?.parent?.props, surface).toMatchObject({ width: 7, justifyContent: 'flex-end' })
+
+    // No project name: no project row, though there is a branch. No branch: the folder alone.
+    const noName = draw(onSurface({ ...FULL, project: { name: '', branch: 'main' } }, surface))
+    expect(textsOf(noName).some(text => text.endsWith('main')), surface).toBe(false)
+    const noBranch = draw(onSurface({ ...FULL, project: { name: 'repo', branch: null } }, surface))
+    const folder = flat(noBranch).find(({ node }) => isFlex(node) && textsOf(node)[0]?.endsWith('repo') === true)
+    expect(childrenOf(folder?.parent), surface).toHaveLength(1)
+  }
+})
+
+test('the MCP servers wrap as whole chips: a green dot, the name in the plain colour, and a long name cut', () => {
+  for (const surface of SURFACES) {
+    const tree = draw(onSurface(FULL, surface))
+    const chips = flat(tree).find(({ node }) => node.props?.flexWrap === 'wrap')?.node
+    expect(chips?.props, surface).toMatchObject({ flexDirection: 'row', flexWrap: 'wrap', columnGap: 2 })
+    expect(childrenOf(chips).map(chip => textsOf(chip)[1]), surface).toEqual([
+      'Claude_Browser', 'a-server-whose-name-is-wider-than-any-pane-there-is-or-will-ever-be', 'issue-hub',
+    ])
+    for (const chip of childrenOf(chips)) {
+      // A chip can shrink and clips: a name wider than the pane goes on its own line and is cut.
+      expect(isFlex(chip), surface).toBe(true)
+      const [dot, name] = childrenOf(chip)
+      expect(isFixed(dot), surface).toBe(true)
+      expect(childrenOf(dot)[0]?.props, surface).toMatchObject({ color: 'success' })
+      // The no-break space keeps the gap between the dot and the name.
+      expect(textsOf(dot), surface).toEqual(['●\u00a0'])
+      expect(isFlex(name), surface).toBe(true)
+      expect(childrenOf(name)[0]?.props?.color, surface).toBeUndefined()
+      expect(childrenOf(name)[0]?.props?.wrap, surface).toBe('truncate')
+    }
+  }
+})
+
+test('the top block is the session and its total, the context, the cost split, then the project and its branch', () => {
+  for (const surface of SURFACES) {
+    const [top] = childrenOf(draw(onSurface(FULL, surface)))
+    const project = surface === 'desktop'
+      ? [PROJECT, BRANCH]
+      : [`📁 ${PROJECT}`, `🌿 ${BRANCH}`]
+    // (The terminal's meter is text: its ▰▱ cells are left out.)
+    expect(textsOf(top).filter(text => !/^[▰▱]+$/.test(text)), surface).toEqual([
+      'Session', '$148.59', 'Context', '529k / 600k', '88.2%', 'Session $126.09 · Subagents $22.50', ...project,
+    ])
+    // The total sits at the right edge of the first row, and is not bold: bold is for titles.
+    const [head, label, bar, , last] = childrenOf(top)
+    expect(head?.props, surface).toMatchObject({ justifyContent: 'space-between' })
+    expect(childrenOf(head).map(cell => isFixed(cell)), surface).toEqual([true, true])
+    expect(textNode(head, '$148.59')?.node.props?.bold, surface).toBeUndefined()
+    // The context: its label and `tokens / window` at the right edge; then the meter, and the percent at the right
+    // edge, in the colour of its threshold.
+    expect(childrenOf(label).at(-1)?.props, surface).toMatchObject({ flexGrow: 1, justifyContent: 'flex-end' })
+    expect(bar?.props, surface).toMatchObject({ justifyContent: 'space-between' })
+    expect(isFlex(childrenOf(bar)[0]), surface).toBe(true)
+    expect(isFixed(childrenOf(bar)[1]), surface).toBe(true)
+    expect(textNode(bar, '88.2%')?.node.props?.color, surface).toBe('warning')
+    // The project row: on the desktop it has room above it, on the terminal it has not.
+    expect(last?.props?.justifyContent, surface).toBe('space-between')
+    expect(last?.props?.marginTop ?? 0, surface).toBe(surface === 'desktop' ? 1 : 0)
+  }
+})
+
+test('the Context ring is a track and an arc from 12 o\'clock in the colour of the meter', () => {
+  const arcOf = (pct: number | undefined): string => ringSvg(pct).split('<circle ')[2] ?? ''
+  // No reading, or nothing in the window: the track alone.
+  for (const pct of [undefined, Number.NaN, Number.POSITIVE_INFINITY, 0, -3]) {
+    expect(ringSvg(pct), String(pct)).toBe(ringSvg(undefined))
+    expect(ringSvg(pct).match(/<circle /g), String(pct)).toHaveLength(1)
+  }
+  expect(ringSvg(undefined)).toContain('stroke="#808080" stroke-opacity="0.3"')
+  expect(ringSvg(88.2)).toStartWith('<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14"')
+  // The arc is p/100 of the circumference (34.56 for r = 5.5), from the top, clockwise.
+  expect(arcOf(88.2)).toContain('stroke-dasharray="30.48 34.56"')
+  expect(arcOf(88.2)).toContain('transform="rotate(-90 7 7)"')
+  expect(arcOf(12.8)).toContain('stroke-dasharray="4.42 34.56"')
+  expect(arcOf(50)).toContain('stroke-dasharray="17.28 34.56"')
+  // Its colour is the meter's: blue below 80, amber from 80, red from 95.
+  const colours = [[12.8, '#2f7de1'], [79.9, '#2f7de1'], [80, '#e0a030'], [94.9, '#e0a030'], [95, '#e5484d']] as const
+  for (const [pct, colour] of colours) {
+    expect(arcOf(pct), String(pct)).toContain(`stroke="${colour}"`)
+    expect(meterSvg(pct, 100), String(pct)).toContain(`fill="${colour}"/></svg>`)
+  }
+  // A full circle has no dash, so no hairline gap is left; a percent past the end is held on it.
+  for (const pct of [100, 250]) {
+    expect(arcOf(pct), String(pct)).not.toContain('stroke-dasharray')
+    expect(arcOf(pct), String(pct)).toContain('stroke="#e5484d"')
   }
 })
 
