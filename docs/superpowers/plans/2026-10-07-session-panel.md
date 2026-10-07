@@ -42,7 +42,7 @@
 - **Стоимость:** только из движка, по приросту `cost.usd` (§4.4). Таблиц цен и сети нет.
 - **Горячая перезагрузка.** После каждой правки исполнитель синхронизирует копию:
   ```bash
-  rsync -a --delete --exclude '.claude-plugin/types/' /home/philarete/projects/claude_mods/plugins/session-panel/ /home/philarete/.claude/dev-mods/bcaecb67-a219-4453-b027-9e930232ca47/session-panel/
+  rsync -a --delete --exclude '.claude-plugin/types/' --exclude '/tsconfig.json' /home/philarete/projects/claude_mods/plugins/session-panel/ /home/philarete/.claude/dev-mods/bcaecb67-a219-4453-b027-9e930232ca47/session-panel/
   ```
   Движок перезагружает мод в конце хода главного агента.
 - **Git-коммиты исполнители не делают.** Коммитит главный агент после ревью и только с разрешения пользователя.
@@ -365,6 +365,7 @@ export function fmtClock(ms: number): string
   - как считается стоимость: прирост `cost.usd` после каждого шага приписывается его агенту;
   - разработка: `rsync` и горячая перезагрузка;
   - авторство по §10.
+- [ ] **Шаг 1б. Комментарии об авторстве** над заимствованным кодом (§10): OpenChamber (MIT, © 2025 Bohdan Triapitsyn) — над `computeTurnStats`, `mergedLength`, `cacheHitPct`, `splitCost` в `stats.ts`; Desktop Statusline (MIT, George Liu) — над `fmtCountdown` в `stats.ts` и над `meterSvg` в `view.tsx`. Одна строка на комментарий.
 - [ ] **Шаг 2. Полная проверка** (делает `reality-checker`; результат — реальный вывод команд):
   - `claude plugin validate plugins/session-panel` и `claude plugin validate .` — без ошибок;
   - `claude plugin test plugins/session-panel` — все тесты PASS;
