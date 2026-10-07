@@ -103,13 +103,19 @@ async function toggleSection($: EngineInterface, id: SectionId): Promise<void> {
   await $.store.set('collapsed', folded)
 }
 
+// The desktop app's own MCP servers are not the person's. The API marks no server as built in, so they are matched by
+// name: the `ccd_` family by its prefix, these by the whole name. The user chose this on 2026-10-08.
+const DESKTOP_SERVERS: string[] = ['Claude_Browser', 'scheduled-tasks', 'terminal']
+
 // Reads the usage figures with the context breakdown: the skill count and the MCP servers come from it.
 async function refreshUsage($: EngineInterface): Promise<void> {
   const now = await $.session.usage({ breakdown: 'summary' })
   const { breakdown } = now.context
-  // WaitForMcpServers is not there for a module: every server that has tools in the context counts as connected. The
-  // desktop app's own servers (`ccd_…`) are not the person's: they are neither listed nor counted.
-  const names = [...new Set(breakdown?.mcpTools.map(tool => tool.serverName))].filter(name => !name.startsWith('ccd_'))
+  // WaitForMcpServers is not there for a module: every server that has tools in the context is listed, whatever its
+  // state. The desktop app's own servers (`ccd_…` and DESKTOP_SERVERS) are neither listed nor counted.
+  const names = [...new Set(breakdown?.mcpTools.map(tool => tool.serverName))].filter(
+    name => !name.startsWith('ccd_') && !DESKTOP_SERVERS.includes(name),
+  )
   // The window is the breakdown's: a compaction window under the model's shows up only there. Without one, the window
   // held stands, and the model's is the last resort.
   await update($, usageAtom, held => ({
@@ -117,8 +123,8 @@ async function refreshUsage($: EngineInterface): Promise<void> {
     ...usageFields(now, breakdown?.rawMaxTokens ?? held.contextWindow ?? now.context.window),
     skills: breakdown?.skills?.totalSkills,
   }))
-  const servers = names.map(name => ({ name, status: 'connected' as const }))
-  await update($, mcpAtom, () => ({ servers, exact: false }))
+  const servers = names.map(name => ({ name }))
+  await update($, mcpAtom, () => ({ servers }))
 }
 
 // The branch; the short commit on a detached HEAD; null outside a git repository or when git fails.

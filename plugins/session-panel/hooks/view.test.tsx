@@ -75,7 +75,8 @@ type World = {
   spawns: number
 }
 
-// The bottom of every chain: what the engine itself would answer. Its MCP list holds one of the app's own servers.
+// The bottom of every chain: what the engine itself would answer. Its MCP list holds the app's own servers:
+// `ccd_session` and the three that the desktop adds by name.
 // With `isStoreReadOnly` the store answers reads and refuses every write.
 const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isStoreReadOnly = false): World => {
   const w: World = { usd: 10, stepCost: 0, spawns: 0 }
@@ -122,7 +123,10 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     const breakdown = {
       rawMaxTokens: 1_000_000,
       skills: { totalSkills: 52, includedSkills: 52, tokens: 1, skillFrontmatter: [] },
-      mcpTools: [tool('codebase-memory'), tool('codebase-memory'), tool('issue-hub'), tool('ccd_session')],
+      mcpTools: [
+        'codebase-memory', 'codebase-memory', 'issue-hub',
+        'ccd_session', 'Claude_Browser', 'scheduled-tasks', 'terminal',
+      ].map(tool),
     }
 
     return {
@@ -359,11 +363,10 @@ const FULL: PaneData = {
   project: { name: PROJECT, branch: BRANCH },
   mcp: {
     servers: [
-      { name: 'Claude_Browser', status: 'connected' },
-      { name: 'a-server-whose-name-is-wider-than-any-pane-there-is-or-will-ever-be', status: 'connected' },
-      { name: 'issue-hub', status: 'connected' },
+      { name: 'Claude_Browser' },
+      { name: 'a-server-whose-name-is-wider-than-any-pane-there-is-or-will-ever-be' },
+      { name: 'issue-hub' },
     ],
-    exact: false,
   },
   lastTurn: {
     elapsedMs: 78_000, modelMs: 66_000, toolMs: 11_400, steps: 5, ttftMs: 4900, wholeTurnRate: 72, responseRate: 62,
@@ -479,8 +482,8 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
     for (const text of ['$0.030', '$0.020']) {
       expect(await has(ui, text), `${surface}: ${text}`).toBe(true)
     }
-    // MCP and Context sources: every server is a green dot and a name in the plain colour; the app's own server is
-    // neither listed nor counted.
+    // MCP and Context sources: every server is a green dot and a name in the plain colour; the app's own servers are
+    // neither listed nor counted, so both say 2.
     expect((await ui.findAll({ type: 'Text', text: '●' })).map(el => [el.text, el.props.color]), surface).toEqual([
       ['●\u00a0', 'success'], ['●\u00a0', 'success'],
     ])
@@ -489,7 +492,9 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
       expect(server, `${surface}: ${name}`).toBeDefined()
       expect(server?.props.color, `${surface}: ${name}`).toBeUndefined()
     }
-    expect(await has(ui, 'ccd_'), `${surface}: ccd_`).toBe(false)
+    for (const name of ['ccd_', 'Claude_Browser', 'scheduled-tasks', 'terminal']) {
+      expect(await has(ui, name), `${surface}: ${name}`).toBe(false)
+    }
     for (const text of ['Skills', /^52$/, 'MCP servers']) {
       expect(await ui.find({ type: 'Text', text }), `${surface}: ${text}`).toBeDefined()
     }

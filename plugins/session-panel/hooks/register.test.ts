@@ -109,6 +109,7 @@ type World = {
   usageFails: boolean // usage() rejects
   tokens: number | undefined // context.tokens of usage(): none before the first response of the window
   rawMaxTokens: number | undefined // the window the breakdown measures against; undefined: no breakdown in usage()
+  mcpServers: string[] // the server of each MCP tool the breakdown holds, so a server with two tools is listed twice
   usageInFlight: number
   maxUsageInFlight: number
   registered: unknown[]
@@ -137,6 +138,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
     usageFails: false,
     tokens: undefined,
     rawMaxTokens: 1_000_000,
+    mcpServers: ['codebase-memory', 'codebase-memory', 'issue-hub', 'ccd_session'],
     usageInFlight: 0,
     maxUsageInFlight: 0,
     registered: [],
@@ -199,15 +201,11 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
     w.usageInFlight -= 1
     if (w.usageFails) throw new Error('usage is not available')
     if (e.breakdown !== undefined) w.breakdowns += 1
+    const tool = (serverName: string) => ({ name: `mcp__${serverName}__t`, serverName, tokens: 1, isLoaded: true })
     const breakdown = {
       rawMaxTokens: w.rawMaxTokens,
       skills: { totalSkills: 52, includedSkills: 52, tokens: 1, skillFrontmatter: [] },
-      mcpTools: [
-        { name: 'mcp__codebase-memory__search_graph', serverName: 'codebase-memory', tokens: 1, isLoaded: true },
-        { name: 'mcp__codebase-memory__trace_path', serverName: 'codebase-memory', tokens: 1, isLoaded: true },
-        { name: 'mcp__issue-hub__search', serverName: 'issue-hub', tokens: 1, isLoaded: true },
-        { name: 'mcp__ccd_session__mark', serverName: 'ccd_session', tokens: 1, isLoaded: true },
-      ],
+      mcpTools: w.mcpServers.map(tool),
     }
 
     return {
@@ -394,14 +392,38 @@ test('start-up reads project, branch, skills and MCP servers in the background',
   const state = await readState($)
   expect(state.project).toEqual({ name: 'online_shop', branch: 'master' })
   // The app's own server (ccd_session) is not listed.
-  expect(state.mcp).toEqual({
-    servers: [{ name: 'codebase-memory', status: 'connected' }, { name: 'issue-hub', status: 'connected' }],
-    exact: false,
-  })
+  expect(state.mcp).toEqual({ servers: [{ name: 'codebase-memory' }, { name: 'issue-hub' }] })
   expect(state.usage.skills).toBe(52)
   expect(w.breakdowns).toBe(1)
   expect(w.runs).toEqual([{ argv: ['git', 'branch', '--show-current'], init: { cwd: ROOT, timeoutMs: 5000 } }])
 })
+
+// The names of the MCP servers the panel lists after start-up, for a breakdown that holds a tool of each of `servers`.
+const listedAfterStart = async ($: Engine, on: On, servers: string[]): Promise<string[]> => {
+  const clock = mock.clock(on)
+  bottom(on, clock).mcpServers = servers
+  await $.session.start(START)
+  await clock.advance(1)
+
+  return (await readState($)).mcp?.servers.map(server => server.name) ?? []
+}
+
+test('the desktop app\'s own MCP servers are neither listed nor counted', WITH_READER, async ($, on) => {
+  // `ccd_x` by its prefix, the next three by their whole names, and two servers that are the person's. The MCP header
+  // and Context sources show the length of this list, so both say 2.
+  const servers = ['ccd_x', 'Claude_Browser', 'codebase-memory', 'scheduled-tasks', 'terminal', 'issue-hub']
+
+  expect(await listedAfterStart($, on, servers)).toEqual(['codebase-memory', 'issue-hub'])
+})
+
+test('a server whose name only contains the name of a hidden one is the person\'s, and is listed', WITH_READER,
+  async ($, on) => {
+    // `terminal-tools` has `terminal` in it, `my-ccd_x` has `ccd_` in it and `ccd` is short of its underscore: the
+    // prefix and the names are matched whole.
+    const servers = ['terminal-tools', 'Claude_Browser2', 'my-ccd_x', 'scheduled-tasks-2', 'ccd']
+
+    expect(await listedAfterStart($, on, servers)).toEqual(servers)
+  })
 
 test('a detached HEAD shows the short commit; a git that fails or cannot start leaves no branch; cwd refreshes it',
   WITH_READER, async ($, on) => {

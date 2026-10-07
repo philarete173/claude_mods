@@ -62,8 +62,7 @@ export type PanelUsage = {
   skills?: number
 }
 export type PanelProject = { name: string; branch: string | null }
-export type PanelMcpStatus = 'connected' | 'failed' | 'needsAuth' | 'pending' | 'disabled'
-export type PanelMcp = { servers: { name: string; status: PanelMcpStatus }[]; exact: boolean }
+export type PanelMcp = { servers: { name: string }[] }
 
 declare module 'claude-code' {
   interface PluginState {

@@ -535,8 +535,8 @@ function agentsSection(d: Draw): RenderElement | null {
 }
 
 // The MCP servers, a green dot and the name each, wrapped whole; the summary is their count. The mod only learns which
-// servers have tools in the context (WaitForMcpServers is not there for a module), so it records every one as
-// connected. A name wider than the pane goes on its own line and is cut.
+// servers have tools in the context (WaitForMcpServers is not there for a module), so it cannot tell a failed one
+// from a connected one: every dot is green. A name wider than the pane goes on its own line and is cut.
 function mcpSection(d: Draw): RenderElement | null {
   const { Box, Text } = d.ui
   const { mcp } = d.data
