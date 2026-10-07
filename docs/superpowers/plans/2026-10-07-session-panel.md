@@ -60,7 +60,6 @@
 | `plugins/session-panel/hooks/stats.ts` | чистые функции: типы, формулы, распределение стоимости, журнал, форматы, `redact` | 2 |
 | `plugins/session-panel/hooks/stats.test.ts` | unit-тесты `stats.ts` | 2 |
 | `plugins/session-panel/types/index.d.ts` | контракт `PluginState['session-panel']` | 3 |
-| `plugins/session-panel/hooks/state.ts` | атомы `$.state` (`atom(...)`), общие для `register.tsx` и `view.tsx` | 3 |
 | `plugins/session-panel/hooks/register.test.ts` | тесты связки: сворачивание в store, команда, открытие | 3 |
 | `plugins/session-panel/hooks/view.tsx` | `renderPane`, `meterSvg`, секции, кнопки сворачивания | 4 |
 | `plugins/session-panel/hooks/view.test.tsx` | тесты отрисовки на desktop и terminal | 4 |
@@ -326,7 +325,7 @@ export function fmtClock(ms: number): string
   - `export function meterSvg(pct: number, widthPx: number): string`. Над функцией комментарий об авторстве: Desktop Statusline, George Liu, MIT;
   - строка split считается через `splitCost(usage.costUsd, Σ agents.costUsd)`.
 
-  Атомы импортируются из `hooks/state.ts`, а `register.tsx` импортирует `renderPane` из `view.tsx`.
+  Атомы объявлены в `register.tsx`: движок принимает источник состояния только из того же файла, поэтому `state.ts` нет. `register.tsx` импортирует `renderPane` из `view.tsx`; `view.tsx` атомы не импортирует, данные получает снимком.
 
 **Поведение (§3 спецификации):**
 - **Элементы:** `const { Box, Text, Button, Svg } = $.ui.resolve(e)`. Если `Svg` нет (terminal), шкала выводится текстом из 10 делений `▰▱`.
