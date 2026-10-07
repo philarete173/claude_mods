@@ -102,7 +102,11 @@ MCP servers                                3
 
 ### 4.1. Session и Project
 
-- **Context:** `$.session.usage().context.{tokens, window, percent}`. До первого ответа модели выводится `—`. Обновляется по событию `session.measure` (оно несёт `context`, `rateLimits`, `cost` и `changed`) и после `session.compact`.
+- **Context:**
+  - токены — `context.tokens` из `session.measure` (несёт `context`, `rateLimits`, `cost`, `changed`), `usage()` и после `session.compact`;
+  - окно — `breakdown.rawMaxTokens` из `usage({ breakdown: 'summary' })`. Это окно компакции с учётом ручной настройки (`autoCompactWindow` в settings; источник указан в `autocompactSource`). Если разбивки нет, берётся `context.window` (окно модели). Окно обновляется на `session.start` и таймером вместе с MCP;
+  - процент = токены / окно × 100, считается модом: `context.percent` движка считает от окна модели;
+  - до первого ответа модели выводится `—`.
 - **Total:** `usage().cost.usd`. Если поля нет (у хоста нет учёта стоимости), строка Total скрывается.
 - **Subagents:** Σ стоимостей субагентов, измеренных по приросту `cost.usd` (4.4). **Session** = `max(0, Total − Subagents)`. Строка показывается, только если Subagents > 0. Спайк подтвердил, что `cost.usd` включает субагентов.
 - **Project:** basename от `$.session.root()`. Поле `repo().name` не использовать: оно null для обычных репозиториев.
@@ -165,9 +169,10 @@ MCP servers                                3
 **Порядок:** сначала работающие, затем по времени старта, новые выше. Не больше 8 строк, остальные сводятся в `+N more`. Сводка в заголовке: `running/total`, если кто-то работает, иначе `total`.
 
 **Стоимость** измеряется по движку, без таблицы цен и без сети. Спайк показал: `cost.usd` растёт сразу после завершения каждого запроса модели, и прирост точно равен цене запроса.
-- После каждого чанка `stop` (любого агента) мод через `$.clock.after(1, …)` читает `usage().cost.usd`.
-- Прирост `delta = max(0, usd − lastUsd)` записывается на агента этого шага: основной агент (`main`) или субагент (`agentId`). Затем `lastUsd = max(lastUsd, usd)`.
-- `lastUsd` инициализируется текущим `cost.usd` на `session.start` (в том числе после перезагрузки мода), поэтому стоимость до загрузки остаётся на Session.
+- После каждого чанка `stop` (любого агента) мод через `$.clock.after(1, …)` читает `usage().cost.usd`. Чтения идут строго по очереди. Каждое чтение заодно обновляет Total.
+- Прирост `delta = usd − lastUsd` записывается на агента этого шага: основной агент (`main`) или субагент (`agentId`).
+- `lastUsd` вначале равен `null`, в том числе после перезагрузки мода и после `/clear`. Первое чтение и чтение ниже `lastUsd` (учёт обнулился) только задают базу, без прироста.
+- `turn.complete` субагента сначала дожидается своего чтения, а потом пишет итог в журнал.
 
 Погрешности, которые не влияют на сумму:
 - запросы двух агентов, завершившиеся в пределах 1–2 мс, могут перепутаться;
@@ -178,6 +183,7 @@ MCP servers                                3
 - **Основной источник** (подтверждается спайком): встроенный инструмент `WaitForMcpServers`, вызванный через `$.tool.call` без аргументов в фоне, не блокируя хук. Он возвращает `connected`, `failed`, `needsAuth`, `stillPending` и `disabled`. Total — сумма всех групп. Цвета: connected `success`, failed `error`, needsAuth `warning`, pending и disabled `dimColor`.
 - **Запасной источник:** уникальные `serverName` из `usage({ breakdown: 'summary' }).context.breakdown.mcpTools`. Все такие серверы считаются подключёнными; в заголовке выводится просто число.
 - **Когда обновлять:** на `session.start` и затем таймером раз в 60 секунд.
+- **Служебные серверы приложения** (имена с префиксом `ccd_`, встроенные серверы десктопа) не показываются и не считаются ни в MCP, ни в Context sources (решение пользователя от 2026-10-07).
 
 ### 4.6. Context sources
 
@@ -194,7 +200,7 @@ MCP servers                                3
 | Событие | who | text |
 |---|---|---|
 | `turn.start` | `you` (`engine`, если текст начинается с `<`) | `shorten(redact(text), 70)`; для `engine` — имя тега |
-| `tool.call` (после `next(e)`) | `main` или тип субагента (до 10 символов) | `${tool} ${target}` + ` ✓ 0.3s` / ` ✗` / ` denied`, всё через `shorten(redact(…), 64)` |
+| `tool.call` (после `next(e)`) | `main` или тип субагента (до 14 символов) | `shorten(redact(label), 64 − длина суффикса)` + суффикс ` ✓ 0.3s` / ` ✗` / ` denied`, где `label` = `${tool} ${target}` |
 | `agent.spawn` | `main` | `spawned · ${type}: ${description}` |
 | `turn.complete` с `agentId` | тип субагента | `done 1m 12s · $0.02 — ${answer до 80}` или `failed` / `stopped` (`kind: 'error'`) |
 | `session.compact` | `main` | `compacted 180k → 40k` |
@@ -216,6 +222,7 @@ MCP servers                                3
 - **Автооткрытие:** на `session.start` и на `session.attach`, но только если среди `$.session.surfaces()` есть `desktop`. В терминале панель открывается только командой.
 - **Команда:** `/session-panel` открывает или закрывает панель. Если панель не размещена, команда отвечает текстом с причиной из `UiOpenResult.reason`.
 - **Сворачивание:** состояние хранится в атоме `collapsed: Record<SectionId, boolean>`, где `SectionId` — один из `usage`, `turn`, `agents`, `mcp`, `sources`, `log`. Нажатие переключает атом и сохраняет карту в `$.store` под ключом `collapsed`. На `session.start` карта читается из `$.store`. По умолчанию всё развёрнуто.
+- **`/clear`** (`session.end` с причиной `clear`) сбрасывает текущий и последний ход, субагентов, журнал и показания контекста (до следующего ответа выводится `—`); база стоимости задаётся заново.
 - **Таймер:** `$.clock.every(30_000)`. Он делает `$.ui.invalidate('ui.render')` и обновляет статусы субагентов; MCP обновляется каждый второй тик.
 
 ## 6. Устройство
