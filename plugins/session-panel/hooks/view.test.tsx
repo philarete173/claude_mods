@@ -133,9 +133,13 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
       value: { startedAt: 0, context: { window: 1_000_000, breakdown }, rateLimits: [], cost: { usd: w.usd } } as never,
     }
   })
-  on('process.run', () => ({
-    value: { exitCode: 0, stdout: 'master\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
-  }))
+  // The branch is `master`, and one file is modified: `+3 / −1`.
+  on('process.run', (_$, e) => {
+    const stdouts: Record<string, string> = { branch: 'master\n', status: ' M a.ts\0', diff: '3\t1\ta.ts\n' }
+    const stdout = stdouts[e.argv.slice(1).find(arg => !arg.startsWith('-')) ?? ''] ?? ''
+
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   on('agent.list', () => ({ value: [] as never }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.invalidate', () => ({ value: undefined }))
@@ -363,6 +367,8 @@ const AGENTS = [
 ]
 const PROJECT = 'a_project_folder_with_a_long_name'
 const BRANCH = 'feature/a-branch-with-a-long-name'
+const CHANGES = { files: 12, lines: { added: 1204, removed: 387 } }
+const MINUS = '\u2212' // the minus sign of the lines removed, not the hyphen
 const LONG_TEXT = `Edit plugins/session-panel/hooks/view.tsx ${'and more '.repeat(10).trimEnd()}`
 // The outcomes of the lines, in turn: a short one, a long one, none, and a word.
 const OUTCOMES = ['✓ 0.1s', '✗ 1m 12s', undefined, 'denied']
@@ -389,7 +395,7 @@ const FULL: PaneData = {
       { kind: 'some_new_window', percentUsed: 5 },
     ],
   },
-  project: { name: PROJECT, branch: BRANCH, changes: null },
+  project: { name: PROJECT, branch: BRANCH, changes: CHANGES },
   mcp: {
     servers: [
       { name: 'Claude_Browser' },
@@ -454,20 +460,22 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
     for (const text of ['Context', '12.8%', 'Turn stats', '~61 tok/s', '$0.02']) {
       expect(await has(ui, text), `${surface}: ${text}`).toBe(true)
     }
-    // Top block: Total, the split and the context figures; the project is an icon and a name on the desktop, the emoji
-    // line of v1 on the terminal.
+    // Top block: Total, the split and the context figures.
     for (const text of ['$5.49', 'Session $5.44 · Subagents $0.050', '128k / 1M']) {
       expect(await has(ui, text), `${surface}: ${text}`).toBe(true)
     }
+    // Project block: the name beside its title, the branch, and the one file that git says is modified (+3 / −1). A row
+    // is an icon and its text on the desktop, an emoji and its text on the terminal; the folder emoji is gone.
     const shown = await texts(ui)
-    if (surface === 'desktop') {
-      expect(shown, surface).toContain('online_shop')
-      expect(shown, surface).toContain('master')
-      expect(shown.some(text => /[📁🌿]/u.test(text)), surface).toBe(false)
-    } else {
-      expect(shown, surface).toContain('📁 online_shop')
-      expect(shown, surface).toContain('🌿 master')
+    const isDesktop = surface === 'desktop'
+    for (const text of [
+      'Project', 'online_shop', isDesktop ? 'master' : '🌿 master', isDesktop ? '1 file changed' : '📝 1 file changed',
+      '+3', ' / ', `${MINUS}1`,
+    ]) {
+      expect(shown, `${surface}: ${text}`).toContain(text)
     }
+    expect(shown.some(text => text.includes('📁')), surface).toBe(false)
+    expect(shown.some(text => /[🌿📝]/u.test(text)), surface).toBe(!isDesktop)
     // The desktop drops an image whose alt is empty: every Svg of the mounted pane has one.
     const images = await ui.findAll({ type: 'Svg' })
     expect(images.every(el => typeof el.props.alt === 'string' && el.props.alt.trim() !== ''), surface).toBe(true)
@@ -483,7 +491,7 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
     // The chevron is a plain Button, dim at rest. The title is a Text, and the only bold ones are the titles.
     expect(buttons.every(button => button.props.plain === true && button.props.dimColor === true), surface).toBe(true)
     expect((await ui.findAll({ type: 'Text' })).filter(el => el.props.bold === true).map(el => el.text)).toEqual([
-      'Session', ...TITLES,
+      'Session', 'Project', ...TITLES,
     ])
     expect(await summaries(ui), surface).toStrictEqual({
       usage: '5-hour 3%', turn: '~120 tok/s', agents: '1/2', mcp: '2', sources: '52 skills · 2 MCP', log: undefined,
@@ -1015,6 +1023,10 @@ const agentRows = (tree: unknown): Node[] =>
 const isRuleNode = (node: Node): boolean =>
   (node.type === 'Svg' && node.props?.width === 1600) || (node.type === 'Text' && /^─+$/.test(textsOf(node)[0] ?? ''))
 const ruleCount = (tree: unknown): number => flat(tree).filter(({ node }) => isRuleNode(node)).length
+// The Project block: the child of the pane whose header, the row after its rule, has the bold `Project`. Its children
+// are the rule, the header, then the branch row and the changes row where they are drawn.
+const projectOf = (tree: Node): Node | undefined =>
+  childrenOf(tree).find(child => textsOf(childrenOf(child)[1])[0] === 'Project')
 
 test('no row can outgrow the pane: every cell is fixed or flexible, and cut text sits in a clipping cell', () => {
   const folded = Object.fromEntries(SECTIONS.map(id => [id, true]))
@@ -1071,17 +1083,20 @@ test('the texts that can overrun a row carry the truncation props; the values ne
     const cut = flat(tree)
       .filter(({ node }) => node.type === 'Text' && node.props?.wrap === 'truncate')
       .map(({ node }) => textsOf(node)[0])
-    const project = surface === 'desktop' ? PROJECT : `📁 ${PROJECT}`
-    // A summary, the cost split, the project, a description, the type of an agent, a server, a log line and its `who`,
-    // a countdown, a label.
+    const isDesktop = surface === 'desktop'
+    // A summary, the cost split, the project, its branch and the label of its changes, a description, the type of an
+    // agent, a server, a log line and its `who`, a countdown, a label.
     for (const text of [
-      '5-hour 3%', 'Session $126.09 · Subagents $22.50', project, 'task 9', '@code-reviewer', 'Claude_Browser',
-      LONG_TEXT, 'minimal-change', '↻ 2h 13m', 'Response', 'Spend',
+      '5-hour 3%', 'Session $126.09 · Subagents $22.50', PROJECT, isDesktop ? BRANCH : `🌿 ${BRANCH}`,
+      isDesktop ? '12 files changed' : '📝 12 files changed', 'task 9', '@code-reviewer', 'Claude_Browser', LONG_TEXT,
+      'minimal-change', '↻ 2h 13m', 'Response', 'Spend',
     ]) {
       expect(cut, `${surface}: ${text}`).toContain(text)
     }
-    // A figure, a percent, a cost and a title are not cut.
-    for (const text of ['$148.59', '88.2%', '120%', '1m 18s', '$2.50', 'Usage', 'Session']) {
+    // A figure, a percent, a cost, the lines of the changes and a title are not cut.
+    for (const text of [
+      '$148.59', '88.2%', '120%', '1m 18s', '$2.50', '+1204', ' / ', `${MINUS}387`, 'Usage', 'Session', 'Project',
+    ]) {
       const placed = textNode(tree, text)
       expect(placed, `${surface}: ${text}`).toBeDefined()
       expect(placed?.node.props?.wrap, `${surface}: ${text}`).toBeUndefined()
@@ -1571,28 +1586,28 @@ test('a header is an icon, a bold title, a dim chevron that folds, and a summary
   }
 })
 
-test('the desktop draws an icon for each section and for the project; the terminal draws no image', () => {
+test('the desktop draws an icon for each section, the branch and the changes; the terminal draws no image', () => {
+  const isIcon = (source: string): boolean => /^<svg [^>]*width="14" height="14"[\s\S]*<\/svg>$/.test(source)
   const desktop = draw(onSurface(FULL, 'desktop'))
   const icons = headerRows(desktop).map(row => String(childrenOf(row.cells[0])[0]?.props?.source))
   // Six sections, six icons, no two alike, each an SVG document of its own.
-  expect(icons.every(source => /^<svg [^>]*width="14" height="14"[\s\S]*<\/svg>$/.test(source))).toBe(true)
+  expect(icons.every(isIcon)).toBe(true)
   expect(new Set(icons).size).toBe(6)
-  // The project and its branch have an icon each, of their own, and no emoji.
-  const groups = childrenOf(childrenOf(childrenOf(desktop)[0]).at(-1))
-  expect(groups.map(group => textsOf(group))).toEqual([
-    [PROJECT], [BRANCH],
-  ])
-  const projectIcons = groups.map(group => String(childrenOf(childrenOf(group)[0])[0]?.props?.source))
-  expect(new Set([...icons, ...projectIcons]).size).toBe(8)
-  expect(JSON.stringify(desktop)).not.toMatch(/📁|🌿/u)
+  // The branch and the changes have an icon each, of their own, and no emoji. The header of the block has none.
+  const [, header, branch, changes] = childrenOf(projectOf(desktop))
+  expect(flat(header).filter(({ node }) => node.type === 'Svg')).toEqual([])
+  const rowIcons = [branch, changes].map(row => String(childrenOf(childrenOf(row)[0])[0]?.props?.source))
+  expect(rowIcons.every(isIcon)).toBe(true)
+  expect(new Set([...icons, ...rowIcons]).size).toBe(8)
+  expect(JSON.stringify(desktop)).not.toMatch(/📁|🌿|📝/u)
 
   const terminal = draw(onSurface(FULL, 'terminal'))
   expect(flat(terminal).filter(({ node }) => node.type === 'Svg')).toEqual([])
   expect(JSON.stringify(terminal)).not.toContain('<svg')
-  // The project line is v1's: an emoji and a name, no margin above it.
-  const line = childrenOf(childrenOf(terminal)[0]).at(-1)
-  expect(textsOf(line)).toEqual([`📁 ${PROJECT}`, `🌿 ${BRANCH}`])
-  expect(line?.props?.marginTop ?? 0).toBe(0)
+  // The rows are v1's kind of line: an emoji and the text, in a row of their own.
+  const [, , branchLine, changesLine] = childrenOf(projectOf(terminal))
+  expect(textsOf(branchLine)).toEqual([`🌿 ${BRANCH}`])
+  expect(textsOf(changesLine)).toEqual(['📝 12 files changed', '+1204', ' / ', `${MINUS}387`])
 })
 
 // The desktop drops an Svg whose alt is empty without a word: the validator accepts the tree, the image is not drawn
@@ -1619,15 +1634,17 @@ test('every image on the desktop has a non-empty alt, so none of them is dropped
     }
   }
 
-  // The top block: the ring says `Context` with a reading and without one; then the meter, the folder and the branch.
-  const [top, ...sections] = childrenOf(draw(onSurface(FULL, 'desktop')))
-  expect(alts(top)).toEqual(['Context', 'Context 88.2%', 'Project', 'Branch'])
+  // The top block: the ring says `Context` with a reading and without one; then the meter. The Project block has its
+  // rule, then an icon for the branch and one for the changes, each saying what its row is.
+  const [top, project, ...sections] = childrenOf(draw(onSurface(FULL, 'desktop')))
+  expect(alts(top)).toEqual(['Context', 'Context 88.2%'])
+  expect(alts(project)).toEqual(['rule', 'Branch', 'Changes'])
   expect(alts(childrenOf(draw(onSurface(EMPTY, 'desktop')))[0])).toEqual(['Context'])
   // Each section: its rule, then its icon, which says the title drawn in bold beside it.
   expect(sections.map(section => alts(section).slice(0, 2))).toEqual(TITLES.map(title => ['rule', title]))
   expect(alts(draw(onSurface(EMPTY, 'desktop')))).toEqual(['Context', 'rule', 'Turn stats'])
   // A status icon says its status: it is the only place that does.
-  const agents = childrenOf(draw(onSurface(statuses, 'desktop')))[3]
+  const agents = childrenOf(draw(onSurface(statuses, 'desktop')))[4]
   expect(alts(agents).slice(2).sort()).toEqual(['done', 'failed', 'running', 'stopped'])
   // Only a meter says a percent, so the `/%$/` filter of the tests finds the meters and nothing else.
   expect(alts(draw(onSurface(FULL, 'desktop'))).filter(alt => /%$/.test(String(alt)))).toEqual([
@@ -1637,7 +1654,7 @@ test('every image on the desktop has a non-empty alt, so none of them is dropped
 
 test('the divider is an image cut by its Box on the desktop and a text rule on the terminal', () => {
   const rules = flat(draw(onSurface(FULL, 'desktop'))).filter(({ node }) => isRuleNode(node))
-  expect(rules).toHaveLength(6)
+  expect(rules).toHaveLength(7) // the Project block and the six sections
   for (const { node, parent } of rules) {
     // A line 1 px tall in a clipping Box with room around it; it is wider than any pane, so the Box cuts it.
     expect(node.props).toMatchObject({ height: 1, alt: 'rule' })
@@ -1648,7 +1665,7 @@ test('the divider is an image cut by its Box on the desktop and a text rule on t
   for (const bodyColumns of [20, 45]) {
     const lines = flat(draw(onSurface(FULL, 'terminal'), bodyColumns)).filter(({ node }) => isRuleNode(node))
     // One row each, as wide as the body, dim, with no margin.
-    expect(lines).toHaveLength(6)
+    expect(lines).toHaveLength(7)
     for (const { node, parent } of lines) {
       expect(textsOf(node)[0]).toBe('─'.repeat(bodyColumns))
       expect(node.props).toMatchObject({ dimColor: true, wrap: 'truncate' })
@@ -1686,10 +1703,11 @@ test('the engine draws a terminal body of 0 columns, or fewer, with empty rules'
   for (const bodyColumns of [0, -3]) {
     // `drawn` rejects with the engine's refusal when its validation does not accept the tree.
     const ui = await mountPane($, 'terminal', { ...PANE_PROPS, bodyColumns })
+    // The Project block and the six sections.
     const sections = childrenOf(await ui.drawn()).slice(1)
-    expect(sections, `${bodyColumns} columns`).toHaveLength(6)
+    expect(sections, `${bodyColumns} columns`).toHaveLength(7)
     const rules = sections.map(section => textsOf(childrenOf(section)[0]).join(''))
-    expect(rules, `${bodyColumns} columns`).toEqual(Array(6).fill(''))
+    expect(rules, `${bodyColumns} columns`).toEqual(Array(7).fill(''))
     await ui.unmount()
   }
 })
@@ -1697,10 +1715,14 @@ test('the engine draws a terminal body of 0 columns, or fewer, with empty rules'
 test('the sections come in order, each beginning with its own rule, and a left-out section leaves no rule', () => {
   for (const surface of SURFACES) {
     const tree = draw(onSurface(FULL, surface))
-    // The top block comes first, with no rule above it and no Button to fold it; then the six sections.
-    const [top, ...sections] = childrenOf(tree)
+    // The top block comes first, with no rule above it and no Button to fold it; then the Project block, which has a
+    // rule of its own and no Button either; then the six sections.
+    const [top, project, ...sections] = childrenOf(tree)
     expect(ruleCount(top), surface).toBe(0)
     expect(flat(top).some(({ node }) => node.type === 'Button'), surface).toBe(false)
+    expect(project, surface).toBe(projectOf(tree))
+    expect(ruleCount(project), surface).toBe(1)
+    expect(flat(project).some(({ node }) => node.type === 'Button'), surface).toBe(false)
     expect(sections, surface).toHaveLength(6)
     // Each section is its rule, then its header, then its body.
     expect(sections.map(section => [ruleCount(childrenOf(section)[0]), childrenOf(section).length]), surface).toEqual(
@@ -1714,14 +1736,16 @@ test('the sections come in order, each beginning with its own rule, and a left-o
     expect(folded.map(row => childrenOf(row.section).length), surface).toEqual([3, 2, 3, 3, 3, 2])
     expect(folded.map(row => row.summary), surface).toEqual(headerRows(tree).map(row => row.summary))
 
-    // A section with nothing to show is left out together with its rule: one rule for each header, always.
+    // A section with nothing to show is left out together with its rule: one rule for each header, always, and one for
+    // the Project block when there is one.
     for (const sparse of [
       EMPTY,
       { ...FULL, usage: { ...FULL.usage, rateLimits: [] }, mcp: null, log: [] },
       { ...FULL, usage: { ...FULL.usage, skills: undefined }, mcp: null, agents: {} },
     ]) {
       const drawn = draw(onSurface(sparse, surface))
-      expect(ruleCount(drawn), `${surface} ${headerRows(drawn).length} sections`).toBe(headerRows(drawn).length)
+      const rules = headerRows(drawn).length + (sparse.project.name === '' ? 0 : 1)
+      expect(ruleCount(drawn), `${surface} ${headerRows(drawn).length} sections`).toBe(rules)
     }
   }
 })
@@ -1761,12 +1785,6 @@ test('partial states draw what they have and leave the rest out', () => {
     expect(dash?.node.props?.dimColor, surface).toBe(true)
     expect(dash?.parent?.props, surface).toMatchObject({ width: 7, justifyContent: 'flex-end' })
 
-    // No project name: no project row, though there is a branch. No branch: the folder alone.
-    const noName = draw(onSurface({ ...FULL, project: { name: '', branch: 'main', changes: null } }, surface))
-    expect(textsOf(noName).some(text => text.endsWith('main')), surface).toBe(false)
-    const noBranch = draw(onSurface({ ...FULL, project: { name: 'repo', branch: null, changes: null } }, surface))
-    const folder = flat(noBranch).find(({ node }) => isFlex(node) && textsOf(node)[0]?.endsWith('repo') === true)
-    expect(childrenOf(folder?.parent), surface).toHaveLength(1)
   }
 })
 
@@ -1803,18 +1821,15 @@ test('the MCP servers wrap as whole chips: a green dot, the name in the plain co
   }
 })
 
-test('the top block is the session and its total, the context, the cost split, then the project and its branch', () => {
+test('the top block is the session and its total, the context and the cost split, with no project in it', () => {
   for (const surface of SURFACES) {
     const [top] = childrenOf(draw(onSurface(FULL, surface)))
-    const project = surface === 'desktop'
-      ? [PROJECT, BRANCH]
-      : [`📁 ${PROJECT}`, `🌿 ${BRANCH}`]
     // (The terminal's meter is text: its ▰▱ cells are left out.)
     expect(textsOf(top).filter(text => !/^[▰▱]+$/.test(text)), surface).toEqual([
-      'Session', '$148.59', 'Context', '529k / 600k', '88.2%', 'Session $126.09 · Subagents $22.50', ...project,
+      'Session', '$148.59', 'Context', '529k / 600k', '88.2%', 'Session $126.09 · Subagents $22.50',
     ])
     // The total sits at the right edge of the first row, and is not bold: bold is for titles.
-    const [head, label, bar, , last] = childrenOf(top)
+    const [head, label, bar, split] = childrenOf(top)
     expect(head?.props, surface).toMatchObject({ justifyContent: 'space-between' })
     expect(childrenOf(head).map(cell => isFixed(cell)), surface).toEqual([true, true])
     expect(textNode(head, '$148.59'), surface).toBeDefined()
@@ -1826,9 +1841,220 @@ test('the top block is the session and its total, the context, the cost split, t
     expect(isFlex(childrenOf(bar)[0]), surface).toBe(true)
     expect(isFixed(childrenOf(bar)[1]), surface).toBe(true)
     expect(textNode(bar, '88.2%')?.node.props?.color, surface).toBe('warning')
-    // The project row: on the desktop it has room above it, on the terminal it has not.
-    expect(last?.props?.justifyContent, surface).toBe('space-between')
-    expect(last?.props?.marginTop ?? 0, surface).toBe(surface === 'desktop' ? 1 : 0)
+    // The split line is the last row of the card: no project row follows it.
+    expect(textsOf(split), surface).toEqual(['Session $126.09 · Subagents $22.50'])
+    expect(childrenOf(top), surface).toHaveLength(4)
+  }
+})
+
+// ---- The Project block ----
+
+// The project of the pane given, over a project that has everything: a name, a branch and changes.
+const projectData = (project: Partial<PaneData['project']>, surface: Surface): PaneData => ({
+  ...onSurface(FULL, surface), project: { name: 'repo', branch: 'main', changes: CHANGES, ...project },
+})
+const isChangesLabel = (text: string | undefined): boolean => /files? changed$/.test(text ?? '')
+// The rows of the block after its header, by what they say: the branch, and the changes; undefined when not drawn.
+const blockRows = (tree: Node): { branch: Node | undefined; changes: Node | undefined } => {
+  const rows = childrenOf(projectOf(tree)).slice(2)
+
+  const isChanges = (row: Node): boolean => isChangesLabel(textsOf(row)[0])
+
+  return { branch: rows.find(row => !isChanges(row)), changes: rows.find(isChanges) }
+}
+// What the changes row shows after its label: the lines, as the three Texts read together; undefined when it has none.
+const numbersOf = (changes: PaneData['project']['changes'], surface: Surface): string | undefined => {
+  const [, ...numbers] = textsOf(blockRows(draw(projectData({ changes }, surface))).changes)
+
+  return numbers.length === 0 ? undefined : numbers.join('')
+}
+
+test('the Project block is a rule, the title with the folder dim at the right, the branch, and the changes', () => {
+  for (const surface of SURFACES) {
+    const isDesktop = surface === 'desktop'
+    const block = projectOf(draw(onSurface(FULL, surface)))
+    const [rule, header, branch, changes, ...more] = childrenOf(block)
+    expect(more, surface).toEqual([])
+    // A rule above it, as above a section.
+    expect(ruleCount(rule), surface).toBe(1)
+
+    // The header: the bold title in a fixed cell, and the folder dim at the right, cut from its end. It has no icon and
+    // no chevron: the block does not fold.
+    const [title, folder, ...rest] = childrenOf(header)
+    expect(rest, surface).toEqual([])
+    expect(isFixed(title), surface).toBe(true)
+    expect(childrenOf(title).map(el => [textsOf(el), el.props?.bold]), surface).toEqual([[['Project'], true]])
+    expect(folder?.props, surface).toMatchObject({
+      flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden', justifyContent: 'flex-end',
+    })
+    expect(childrenOf(folder).map(el => [textsOf(el), ...styleOf(el)]), surface).toEqual([
+      [[PROJECT], undefined, true, 'truncate'],
+    ])
+    expect(flat(header).some(({ node }) => node.type === 'Svg' || node.type === 'Button'), surface).toBe(false)
+
+    // The branch: on the desktop an icon in its slot, then the branch; on the terminal the emoji and the branch. The
+    // text is cut, alone in a cell that clips.
+    const branchCells = childrenOf(branch)
+    expect(branchCells.length, surface).toBe(isDesktop ? 2 : 1)
+    if (isDesktop) expect(childrenOf(branchCells[0])[0]?.props, surface).toMatchObject({ alt: 'Branch', width: 14 })
+    expect(isFlex(branchCells.at(-1)), surface).toBe(true)
+    expect(childrenOf(branchCells.at(-1)).map(el => [textsOf(el), el.props?.wrap]), surface).toEqual([
+      [[isDesktop ? BRANCH : `🌿 ${BRANCH}`], 'truncate'],
+    ])
+
+    // The changes: an icon on the desktop, the label, which is cut and takes the room that is left, and the lines at
+    // the right: three Texts in a fixed cell, `+1204` in the success colour, ` / ` dim, and `−387` in the error colour.
+    const cells = childrenOf(changes)
+    expect(cells.length, surface).toBe(isDesktop ? 3 : 2)
+    if (isDesktop) expect(childrenOf(cells[0])[0]?.props, surface).toMatchObject({ alt: 'Changes', width: 14 })
+    const [label, numbers] = cells.slice(-2)
+    expect(isFlex(label), surface).toBe(true)
+    expect(label?.props?.flexGrow, surface).toBe(1)
+    expect(childrenOf(label).map(el => [textsOf(el), el.props?.wrap]), surface).toEqual([
+      [[isDesktop ? '12 files changed' : '📝 12 files changed'], 'truncate'],
+    ])
+    expect(numbers?.props, surface).toMatchObject({ flexDirection: 'row', flexShrink: 0 })
+    expect(childrenOf(numbers).map(el => [el.type, textsOf(el), ...styleOf(el)]), surface).toEqual([
+      ['Text', ['+1204'], 'success', undefined, undefined],
+      ['Text', [' / '], undefined, true, undefined],
+      ['Text', [`${MINUS}387`], 'error', undefined, undefined],
+    ])
+  }
+})
+
+test('the minus of the lines removed is the minus sign U+2212, not a hyphen', () => {
+  expect(MINUS).toBe('\u2212')
+  for (const surface of SURFACES) {
+    const numbers = childrenOf(childrenOf(blockRows(draw(onSurface(FULL, surface))).changes).at(-1))
+    expect(textsOf(numbers[2]), surface).toEqual(['\u2212387'])
+    expect(textsOf(numbers).join(''), surface).not.toContain('-')
+  }
+})
+
+test('one changed file reads `1 file changed`, any other number reads `n files changed`', () => {
+  for (const surface of SURFACES) {
+    const mark = surface === 'desktop' ? '' : '📝 '
+    const labelOf = (files: number): string | undefined =>
+      textsOf(blockRows(draw(projectData({ changes: { files, lines: null } }, surface))).changes)[0]
+
+    expect(labelOf(1), surface).toBe(`${mark}1 file changed`)
+    expect([0, 2, 11, 1204].map(labelOf), surface).toEqual(
+      [0, 2, 11, 1204].map(files => `${mark}${files} files changed`),
+    )
+  }
+})
+
+test('the numbers are drawn when a line was added or removed, and not when there are none or they are unknown', () => {
+  for (const surface of SURFACES) {
+    // No line counts, and both counts 0 (only binary files changed): the row is the label alone.
+    expect(numbersOf({ files: 2, lines: null }, surface), surface).toBeUndefined()
+    expect(numbersOf({ files: 2, lines: { added: 0, removed: 0 } }, surface), surface).toBeUndefined()
+    // One count of 0 is drawn as it is; the numbers are plain integers.
+    expect(numbersOf({ files: 1, lines: { added: 5, removed: 0 } }, surface), surface).toBe('+5 / \u22120')
+    expect(numbersOf({ files: 1, lines: { added: 0, removed: 7 } }, surface), surface).toBe('+0 / \u22127')
+    expect(numbersOf({ files: 3, lines: { added: 8, removed: 1 } }, surface), surface).toBe('+8 / \u22121')
+    expect(numbersOf({ files: 9, lines: { added: 1_234_567, removed: 20_000 } }, surface), surface).toBe(
+      '+1234567 / \u221220000',
+    )
+
+    // With no numbers the row has no cell that holds its size but the icon's slot.
+    const row = blockRows(draw(projectData({ changes: { files: 2, lines: null } }, surface))).changes
+    expect(childrenOf(row).filter(cell => isFixed(cell) && !hasWidth(cell)), surface).toEqual([])
+  }
+})
+
+test('what is missing is left out: no changes, no changes row; no branch, no branch row; no name, no block', () => {
+  for (const surface of SURFACES) {
+    const noChanges = draw(projectData({ changes: null }, surface))
+    expect(blockRows(noChanges).changes, surface).toBeUndefined()
+    expect(blockRows(noChanges).branch, surface).toBeDefined()
+    expect(childrenOf(projectOf(noChanges)), surface).toHaveLength(3) // the rule, the header, the branch
+
+    const noBranch = draw(projectData({ branch: null }, surface))
+    expect(blockRows(noBranch).branch, surface).toBeUndefined()
+    expect(blockRows(noBranch).changes, surface).toBeDefined()
+    expect(childrenOf(projectOf(noBranch)), surface).toHaveLength(3) // the rule, the header, the changes
+
+    // Neither: the title and the folder alone.
+    const bare = draw(projectData({ branch: null, changes: null }, surface))
+    expect(childrenOf(projectOf(bare)), surface).toHaveLength(2)
+    expect(textsOf(projectOf(bare)).filter(shown => !/^─+$/.test(shown)), surface).toEqual(['Project', 'repo'])
+
+    // No name, though there is a branch and there are changes: no block, no rule of its own, nothing of it in the pane.
+    const noName = draw(projectData({ name: '' }, surface))
+    expect(projectOf(noName), surface).toBeUndefined()
+    expect(childrenOf(noName), surface).toHaveLength(7) // the top block and the six sections
+    expect(ruleCount(noName), surface).toBe(6)
+    const shown = textsOf(noName)
+    expect(shown.some(text => /(files? changed|^Project|main)$/.test(text)), surface).toBe(false)
+  }
+})
+
+test('a project value from before the changes existed draws without a changes row', () => {
+  for (const surface of SURFACES) {
+    const older = { name: 'repo', branch: 'main' } as PaneData['project']
+    const tree = draw(onSurface({ ...FULL, project: older }, surface))
+    expect(blockRows(tree).changes, surface).toBeUndefined()
+    expect(blockRows(tree).branch, surface).toBeDefined()
+    expect(rowProblems(tree), surface).toEqual([])
+    expect(JSON.stringify(tree), surface).not.toMatch(/NaN|Infinity|null|undefined/)
+  }
+})
+
+test('the pane draws the Session card, then the Project block, then Usage', () => {
+  for (const surface of SURFACES) {
+    const tree = draw(onSurface(FULL, surface))
+    const [top, project, usageSection] = childrenOf(tree)
+    expect(textsOf(top)[0], surface).toBe('Session')
+    expect(project, surface).toBe(projectOf(tree))
+    expect(textsOf(childrenOf(project)[1])[0], surface).toBe('Project')
+    expect(headerRows(tree)[0]?.section, surface).toBe(usageSection)
+    expect(headerRows(tree)[0]?.title, surface).toBe('Usage')
+    // The titles in bold, in the order they are drawn.
+    const bold = flat(tree).filter(({ node }) => node.type === 'Text' && node.props?.bold === true)
+    expect(bold.map(({ node }) => textsOf(node)[0]), surface).toEqual(['Session', 'Project', ...TITLES])
+  }
+})
+
+test('the changes icon is drawn with the alt `Changes`, in a slot of its own, on the desktop only', () => {
+  const images = flat(draw(onSurface(FULL, 'desktop'))).filter(({ node }) => node.type === 'Svg')
+  const changes = images.filter(({ node }) => node.props?.alt === 'Changes')
+  expect(changes).toHaveLength(1)
+  expect(changes[0]?.node.props).toMatchObject({ width: 14, height: 14 })
+  expect(String(changes[0]?.node.props?.source)).toMatch(/^<svg [^>]*width="14" height="14"[\s\S]*<\/svg>$/)
+  expect(changes[0]?.parent?.props).toMatchObject({ width: 2, flexShrink: 0 })
+  // The folder icon of the old project row is not drawn any more: the alt `Project` is no image's.
+  expect(images.map(({ node }) => node.props?.alt)).not.toContain('Project')
+  expect(flat(draw(onSurface(FULL, 'terminal'))).filter(({ node }) => node.type === 'Svg')).toEqual([])
+})
+
+test('the Project block cannot outgrow the pane, and its numbers stay whole when the label is cut', () => {
+  const variants: Array<Partial<PaneData['project']>> = [
+    {}, { branch: null }, { changes: null }, { branch: null, changes: null }, { name: PROJECT, branch: BRANCH },
+    { changes: { files: 1, lines: null } }, { changes: { files: 2, lines: { added: 0, removed: 0 } } },
+    { changes: { files: 99_999, lines: { added: 1_234_567, removed: 7_654_321 } } },
+  ]
+  // At the narrowest and the widest body the tests use.
+  for (const surface of SURFACES) {
+    for (const bodyColumns of [8, 120]) {
+      for (const [i, project] of variants.entries()) {
+        const tree = draw(projectData(project, surface), bodyColumns)
+        const where = `${surface} ${bodyColumns} columns, variant ${i}`
+        expect(rowProblems(projectOf(tree)), where).toEqual([])
+
+        // The label gives way and clips; the numbers hold their size, with no clip and no cut text in them.
+        const row = blockRows(tree).changes
+        const numbers = childrenOf(row).filter(cell => isFixed(cell) && !hasWidth(cell))
+        if (numbers.length > 0) {
+          const [label] = childrenOf(row).slice(-2)
+          expect(isFlex(label), where).toBe(true)
+          expect(childrenOf(label)[0]?.props?.wrap, where).toBe('truncate')
+          expect(numbers, where).toHaveLength(1)
+          expect(numbers[0]?.props?.overflow, where).toBeUndefined()
+          expect(flat(numbers[0]).every(({ node }) => node.props?.wrap === undefined), where).toBe(true)
+        }
+      }
+    }
   }
 })
 

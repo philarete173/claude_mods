@@ -120,7 +120,7 @@ const ICON_ROOT =
 const icon = (body: string): string => `<svg ${ICON_ROOT}>${body}</svg>`
 const dot = (cy: number): string => `<circle cx="2.25" cy="${cy}" r=".9" fill="${NEUTRAL}" stroke="none"/>`
 
-const ICON: Record<SectionId | 'folder' | 'branch', string> = {
+const ICON: Record<SectionId | 'branch' | 'changes', string> = {
   // Usage: a stopwatch.
   usage: icon('<circle cx="7" cy="8" r="4.75"/><path d="M5.5 1.5h3M7 1.5v1.75M7 8V5.75"/>'),
   // Turn stats: a bar chart.
@@ -139,14 +139,15 @@ const ICON: Record<SectionId | 'folder' | 'branch', string> = {
   ),
   // Log: a list.
   log: icon(`<path d="M5 3.5h7M5 7h7M5 10.5h7"/>${dot(3.5)}${dot(7)}${dot(10.5)}`),
-  // Project: a folder.
-  folder: icon(
-    '<path d="M1.5 3.75c0-.55.45-1 1-1h2.6l1.4 1.5h5c.55 0 1 .45 1 1v5.5c0 .55-.45 1-1 1h-9c-.55 0-1-.45-1-1z"/>',
-  ),
   // Branch: git-branch.
   branch: icon(
     '<path d="M4 1.75v7.5"/><circle cx="4" cy="11" r="1.75"/><circle cx="10" cy="3.5" r="1.75"/>' +
       '<path d="M10 5.25c0 2.75-2.25 3.75-4.6 4.4"/>',
+  ),
+  // Changes: a page with a pencil.
+  changes: icon(
+    '<path d="M5.5 12.5H4A1.5 1.5 0 0 1 2.5 11V3A1.5 1.5 0 0 1 4 1.5h3.5l3 3v1M7.5 1.5v2a1 1 0 0 0 1 1h2"/>' +
+      '<path d="M6.25 11.5l-.5 1.75 1.75-.5 4-4a1.06 1.06 0 0 0-1.25-1.25z"/>',
   ),
 }
 
@@ -376,30 +377,11 @@ function contextRows(d: Draw): RenderElement[] {
   ]
 }
 
-// The project at the left and its branch at the right; either gives way, the longer name first. On the desktop each is
-// an icon and a name, on the terminal the emoji line of v1.
-function projectRow(d: Draw): RenderElement {
-  const { Box, Svg } = d.ui
-  const { name, branch } = d.data.project
-  const group = (iconSvg: string, alt: string, emoji: string, text: string): RenderElement => (
-    <Box flexDirection="row" alignItems="center" columnGap={1} flexShrink={1} minWidth={0} overflow="hidden">
-      {Svg === undefined ? shrinkText(d, `${emoji} ${text}`) : [iconSlot(d, iconSvg, alt), shrinkText(d, text)]}
-    </Box>
-  )
-
-  return (
-    <Box flexDirection="row" justifyContent="space-between" columnGap={2} marginTop={Svg === undefined ? 0 : 1}>
-      {group(ICON.folder, 'Project', '📁', name)}
-      {branch !== null && group(ICON.branch, 'Branch', '🌿', branch)}
-    </Box>
-  )
-}
-
-// Session and Total, the context, the split of the cost when subagents ran, the project and its branch. The card never
-// folds and has no rule above it. The total is primary weight: bold is for titles.
+// Session and Total, the context, and the split of the cost when subagents ran. The card never folds and has no rule
+// above it. The total is primary weight: bold is for titles.
 function topBlock(d: Draw): RenderElement {
   const { Box, Text } = d.ui
-  const { usage, project, agents } = d.data
+  const { usage, agents } = d.data
   const subagentsUsd = Object.values(agents).reduce((sum, agent) => sum + (agent.costUsd ?? 0), 0)
   const split = splitCost(usage.costUsd, subagentsUsd)
 
@@ -421,7 +403,63 @@ function topBlock(d: Draw): RenderElement {
           {`Session ${fmtUsd(split.session)} · Subagents ${fmtUsd(split.subagents)}`}
         </Text>
       )}
-      {project.name !== '' && projectRow(d)}
+    </Box>
+  )
+}
+
+// ---- Project block ----
+
+const MINUS = '\u2212' // the minus sign of the lines removed, not the hyphen
+
+// The lines added and removed, `+8 / −1`: three Texts in a fixed cell, so the numbers stay whole when the label beside
+// them is cut.
+function linesCell(d: Draw, lines: { added: number; removed: number }): RenderElement {
+  const { Box, Text } = d.ui
+
+  return (
+    <Box flexDirection="row" flexShrink={0}>
+      <Text color={OK}>{`+${lines.added}`}</Text>
+      <Text dimColor>{' / '}</Text>
+      <Text color={BAD}>{`${MINUS}${lines.removed}`}</Text>
+    </Box>
+  )
+}
+
+// The project, as OpenChamber's Project block shows it: under a rule, the bold title with the folder dim at the right
+// (cut from the end), then the branch, then the changes of the working tree: how many files, and at the right the
+// lines added and removed. Like the Session card it never folds, so its header has no icon and no chevron. A row is an
+// icon and its text on the desktop, and the text behind an emoji on the terminal, as v1 drew it. The block is left out
+// when there is no project name; the branch row when there is no branch; the changes row when there are no changes; the
+// numbers when the lines are unknown or are none (only binary files changed).
+function projectBlock(d: Draw): RenderElement | null {
+  const { Box, Text, Svg } = d.ui
+  // A value that an earlier build left in the state has no `changes`: it has none to show.
+  const { name, branch, changes = null } = d.data.project
+  if (name === '') return null
+  const marked = (emoji: string, text: string): string => (Svg === undefined ? `${emoji} ${text}` : text)
+
+  return (
+    <Box flexDirection="column">
+      {divider(d)}
+      <Box flexDirection="row" alignItems="center" columnGap={1}>
+        <Box flexDirection="row" flexShrink={0}>
+          <Text bold>Project</Text>
+        </Box>
+        {endText(d, name, { dimColor: true })}
+      </Box>
+      {branch !== null && (
+        <Box flexDirection="row" alignItems="center" columnGap={1}>
+          {iconSlot(d, ICON.branch, 'Branch')}
+          {shrinkText(d, marked('🌿', branch))}
+        </Box>
+      )}
+      {changes !== null && (
+        <Box flexDirection="row" alignItems="center" columnGap={1}>
+          {iconSlot(d, ICON.changes, 'Changes')}
+          {growText(d, marked('📝', changes.files === 1 ? '1 file changed' : `${changes.files} files changed`))}
+          {changes.lines !== null && changes.lines.added + changes.lines.removed > 0 && linesCell(d, changes.lines)}
+        </Box>
+      )}
     </Box>
   )
 }
@@ -680,6 +718,7 @@ export function renderPane(els: ElementTable, data: PaneData, props: PaneProps, 
   return (
     <Box flexDirection="column">
       {topBlock(d)}
+      {projectBlock(d)}
       {usageSection(d)}
       {turnSection(d)}
       {agentsSection(d)}
