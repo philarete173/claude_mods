@@ -1,6 +1,6 @@
 # Session Panel: visual spec v2
 
-> Changes after the approved preview: every Svg carries a non-empty alt (§5.2, §11); the subagent `@type` sits in a column of its own (§6.7); the log's `who` column is 13 cells on the desktop. The HTML preview `docs/design/session-panel-preview.html` stays the approved v2 mock-up and predates these changes.
+> Changes after the approved preview: every Svg carries a non-empty alt (§5.2, §11); the subagent `@type` sits in a column of its own (§6.7); the log's `who` column is 13 cells on the desktop; in a narrow pane the log drops `who` first and a subagent row drops `@type` below 12 description cells (§6.7, §6.10); the project is a block of its own, with a changes row (§6.3). The HTML preview `docs/design/session-panel-preview.html` stays the approved v2 mock-up and predates these changes.
 
 Date: 2026-10-07. Status: proposal. The user approves the look in `docs/design/session-panel-preview.html` before implementation.
 
@@ -18,17 +18,23 @@ Scope: presentation only. The sections, their content, the formats and every for
    - Session and the total;
    - Context with its ring and `tokens / window`;
    - a meter row ending in the percent;
-   - the cost split;
-   - after 8 px, project and branch.
-6. **The terminal draws the same tree without any `Svg`:** text rules, `▰▱` meters, glyph marks and the `📁`/`🌿` line.
+   - the cost split.
+6. **The Project block follows it, as in OpenChamber:**
+   - a rule, then the bold `Project` with the folder name, dim, at the right;
+   - the branch;
+   - the changes of the working tree: the number of files, and at the right the lines added and removed;
+   - it never folds, so its header has no icon and no chevron.
+7. **The terminal draws the same tree without any `Svg`:** text rules, `▰▱` meters, glyph marks and the `🌿`/`📝` lines.
 
 ```text
 Session                                           $148.59
 ◔  Context                                    529k / 600k
 ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▭▭▭▭▭       88.2%
 Session $123.23 · Subagents $25.36
-                                                              8 px
-▭  claude_mods                                      ⑂  main
+──────────────────────────────────────────────────────────
+Project                                        claude_mods
+⑂  main
+✎  12 files changed                           +2061 / −111
 ──────────────────────────────────────────────────────────    8 px · 1 px rule · 8 px
 ▥  Turn stats ▾                                  ~72 tok/s
 Whole turn                                       ~72 tok/s
@@ -104,10 +110,10 @@ Text uses theme keys, so it follows the app's theme (TextProps: "Colors are a th
 | Role | Prop | Where |
 |---|---|---|
 | Primary | none | titles, labels, values, descriptions, names, log text, the total |
-| Secondary | `dimColor` | header summaries, the cost split, `tokens / window`, `@type`, time, `who`, countdowns, `+N more`, empty-state text, `—` |
+| Secondary | `dimColor` | header summaries, the cost split, `tokens / window`, `@type`, time, `who`, countdowns, `+N more`, empty-state text, `—`, the folder name of the Project header, the `/` between the lines added and removed |
 | Threshold | `color="warning"` from 80 %, `color="error"` from 95 % | context and limit percents (unchanged) |
-| Good | `color="success"` | Cache from 50 % (unchanged); the MCP dot |
-| Error | `color="error"` | `who` of a log entry of kind `error` |
+| Good | `color="success"` | Cache from 50 % (unchanged); the MCP dot; the lines added, `+A` |
+| Error | `color="error"` | `who` of a log entry of kind `error`, and its text when the log row has neither `who` nor an outcome cell (§6.10); the lines removed, `−D` |
 
 SVG is drawn as an image (l.11570–11577), so its colours are raw and the same in both themes:
 
@@ -129,7 +135,7 @@ TextProps has no size or family (l.11869–11887). The hierarchy comes from thre
 
 | Level | Props | Used by |
 |---|---|---|
-| Title | `bold` | `Session`, the six section titles. Nothing else is bold. |
+| Title | `bold` | `Session`, `Project`, the six section titles. Nothing else is bold. |
 | Primary | none | everything a person reads for a value |
 | Secondary | `dimColor` | everything that explains a value |
 
@@ -138,9 +144,8 @@ TextProps has no size or family (l.11869–11887). The hierarchy comes from thre
 | Token | Cells | Use |
 |---|---|---|
 | `GAP` | 1 (8 px) | icon slot → text; between the columns of a log, subagent or limit row; title → chevron; meter → percent |
-| `GAP_WIDE` | 2 (16 px) | the least room between a label and its value in space-between rows; between MCP chips; project ↔ branch |
+| `GAP_WIDE` | 2 (16 px) | the least room between a label and its value in space-between rows; between MCP chips |
 | `RULE_MARGIN` | 1 (8 px) | above and below each divider (desktop only) |
-| `BLOCK_GAP` | 1 (8 px) | above the project row (desktop only) |
 | row gap | 0 | rows stack at the text line (~19 px on the desktop) |
 
 Rhythm on the desktop:
@@ -151,12 +156,12 @@ Rhythm on the desktop:
 ### 3.4 Sizes and constants (drop-in for view.tsx)
 
 ```ts
-// Layout, in cells: the unit of Box numbers. On the desktop a cell is CELL_PX wide (spec §2.1).
+// Layout is in cells, the unit of Box numbers. On the desktop a cell is CELL_PX wide, measured on the live pane (§2.1).
 // It is used only to turn `bodyColumns` into the px of the meters; confirmed on the live pane on 2026-10-07 (§11,
 // check 1).
 const CELL_PX = 8
-const ICON_PX = 14 // every icon, CSS px
-const ICON_CELLS = 2 // the slot an icon sits in; text after it starts 3 cells in
+const ICON_PX = 14 // every icon, in CSS px
+const ICON_CELLS = 2 // the slot an icon sits in: the text after it starts 3 cells in
 const PCT_CELLS = 6 // `100.0%`
 const LIMIT_LABEL_CELLS = 7 // `5-hour`, `Weekly`, `Spend`
 const LIMIT_PCT_CELLS = 5 // `100%`
@@ -169,11 +174,18 @@ const WHO_CELLS = 13 // desktop: the `who` of the log
 const WHO_CELLS_MAX = TYPE_MAX // terminal: the longest `who` that shortType keeps
 const TYPE_CELLS = 15 // desktop: the `@type` of a subagent
 const TYPE_CELLS_MAX = TYPE_MAX + 1 // terminal: the `@` and the longest type that shortType keeps
-const TEXT_METER_CELLS = 10 // unchanged
+const TEXT_METER_CELLS = 10
 const RULE_PX = 1600 // the divider image; the Box around it cuts it to the pane
-const MAX_AGENT_ROWS = 8 // unchanged
-const MAX_LOG_ROWS = 15 // unchanged
-const MIN_LOG_TEXT_CELLS = 8 // the least text a log line keeps before its outcome column gives way
+const MAX_AGENT_ROWS = 8
+const MAX_LOG_ROWS = 15
+const MIN_LOG_TEXT_CELLS = 8 // the least text a log line keeps: below it `who` gives way, then the outcome column
+// In a narrow pane the identity column gives way first, as in the log: a subagent row leaves out its `@type`, on
+// every row, when the description would keep fewer cells than this beside it.
+const MIN_AGENT_DESC_CELLS = 12
+const LOG_GAP_CELLS = 1 // the gap between the cells of a log row
+const AGENT_GAP_CELLS = 1 // the gap between the cells of a subagent row, and between those of its group
+const AGENT_ROW_GAPS = 3 // the gaps of a subagent row that has its type: two between its cells, one in its group
+const TEXT_MARK_CELLS = 1 // the mark of a subagent row where there is no icon slot
 ```
 
 `Draw` gains the body width and the two meter widths, and loses `meterPx`:
@@ -190,16 +202,21 @@ const d: Draw = { ui: { Box, Text, Button, Svg }, data, handlers, cols,
 ## 4. Pane skeleton
 
 ```tsx
-<Box flexDirection="column">
-  {topBlock(d)}        {/* never folds; no rule above it */}
-  {usageSection(d)}    {/* each section begins with its own rule, so a hidden section leaves no double rule */}
-  {turnSection(d)}
-  {agentsSection(d)}
-  {mcpSection(d)}
-  {sourcesSection(d)}
-  {logSection(d)}
-</Box>
+  return (
+    <Box flexDirection="column">
+      {topBlock(d)}
+      {projectBlock(d)}
+      {usageSection(d)}
+      {turnSection(d)}
+      {agentsSection(d)}
+      {mcpSection(d)}
+      {sourcesSection(d)}
+      {logSection(d)}
+    </Box>
+  )
 ```
+
+The Session card and the Project block never fold. The card has no rule above it; every other block begins with its own rule, so a block that is left out leaves no double rule.
 
 The pane frame (title "Session", expand and close controls, outer padding, scroll) belongs to the app and is not ours.
 
@@ -251,7 +268,7 @@ function iconSlot(d: Draw, source: string, alt: string): RenderElement | null {
 }
 ```
 
-Every Svg needs a non-empty `alt`. The desktop draws no image whose `alt` is empty: the validator accepts it, the image is dropped, and its slot stays (found on the first live render, §11 check 4). A decorative icon carries the label of its row: a section icon its title, the ring `Context`, the folder `Project`, the branch `Branch`. The rule says `rule`.
+Every Svg needs a non-empty `alt`. The desktop draws no image whose `alt` is empty: the validator accepts it, the image is dropped, and its slot stays (found on the first live render, §11 check 4). A decorative icon carries the label of its row: a section icon its title, the ring `Context`, the branch `Branch`, the changes `Changes`. The rule says `rule`.
 
 ### 5.3 Text cells
 
@@ -332,7 +349,7 @@ function section(d: Draw, id: SectionId, title: string, summary: string, body: R
 ```tsx
 function topBlock(d: Draw): RenderElement {
   const { Box, Text } = d.ui
-  const { usage, project, agents } = d.data
+  const { usage, agents } = d.data
   const subagentsUsd = Object.values(agents).reduce((sum, agent) => sum + (agent.costUsd ?? 0), 0)
   const split = splitCost(usage.costUsd, subagentsUsd)
 
@@ -350,9 +367,10 @@ function topBlock(d: Draw): RenderElement {
       </Box>
       {contextRows(d)}
       {split.session !== null && split.subagents > 0 && (
-        <Text dimColor wrap="truncate">{`Session ${fmtUsd(split.session)} · Subagents ${fmtUsd(split.subagents)}`}</Text>
+        <Text dimColor wrap="truncate">
+          {`Session ${fmtUsd(split.session)} · Subagents ${fmtUsd(split.subagents)}`}
+        </Text>
       )}
-      {project.name !== '' && projectRow(d)}
     </Box>
   )
 }
@@ -420,30 +438,84 @@ export function contextMeterWidth(bodyColumns: number): number {
 
 At the default width (≈ 45 columns) this gives 304 px. The bar ends about 25 px before the `8` of `88.2%`: the 8 px gap, the 0–7 px left over by `bodyColumns`, and the room `88.2%` leaves in its 6 cells.
 
-### 6.3 Project row (inside the top block)
+### 6.3 Project block
+
+The Project block follows the top block and comes before Usage, as OpenChamber's Project block does. It never folds, so its header has no icon and no chevron. Where the numbers come from is in §4.1 of the main spec.
+
+- **Layout.** A rule (§5.1), then three rows:
+  - the header: the bold `Project`, and the folder name, dim, at the right;
+  - the branch: an icon slot and the branch;
+  - the changes: an icon slot, `N files changed` (`1 file changed` for one file), and at the right the lines added and removed.
+- **Cells.**
+  - The folder name is an `endText` cell: it takes the room that is left and puts its text at the right edge.
+  - The branch is a `shrinkText` cell. The changes label is a `growText` cell, so the numbers start at the same x whatever the label says.
+  - The numbers are one FIXED cell (`linesCell`) of three Texts: `+A` in `success`, a dim `/`, and `−D` in `error`.
+- **U+2212.** The minus of the lines removed is the minus sign U+2212, not the hyphen.
+- **No-break spaces.** The slash has a no-break space at each side (`LINES_SEP`). With plain spaces at its edges the desktop may draw `+8/−1`, as it may drop a plain space at the end of a flex item (§6.8).
+- **Cut.** The folder name and the branch are cut from the end. The changes label gives way first, and the numbers never cut (§9).
+- **Left out.**
+  - With no project name, the whole block.
+  - With no branch, the branch row.
+  - Outside a repository, on a clean tree, when git failed, or when its list of files was over 4 MiB, the changes row.
+  - When the lines are unknown (an unborn HEAD, a failed diff) or both 0 (only binary files changed), the numbers: the count alone shows.
+- **Terminal.** No icon slots: the branch and changes rows start with an emoji instead, `🌿 main` and `📝 12 files changed` (§10).
 
 ```tsx
-function projectRow(d: Draw): RenderElement {
-  const { Box, Svg } = d.ui
-  const { name, branch } = d.data.project
-  const group = (iconSvg: string, alt: string, emoji: string, text: string): RenderElement => (
-    <Box flexDirection="row" alignItems="center" columnGap={1} flexShrink={1} minWidth={0} overflow="hidden">
-      {Svg === undefined ? shrinkText(d, `${emoji} ${text}`) : [iconSlot(d, iconSvg, alt), shrinkText(d, text)]}
-    </Box>
-  )
+// The lines added and removed, `+8 / −1`: three Texts in a fixed cell, so the numbers stay whole when the label beside
+// them is cut.
+function linesCell(d: Draw, lines: { added: number; removed: number }): RenderElement {
+  const { Box, Text } = d.ui
 
   return (
-    <Box flexDirection="row" justifyContent="space-between" columnGap={2} marginTop={Svg === undefined ? 0 : 1}>
-      {group(ICON.folder, 'Project', '📁', name)}
-      {branch !== null && group(ICON.branch, 'Branch', '🌿', branch)}
+    <Box flexDirection="row" flexShrink={0}>
+      <Text color={OK}>{`+${lines.added}`}</Text>
+      <Text dimColor>{LINES_SEP}</Text>
+      <Text color={BAD}>{`${MINUS}${lines.removed}`}</Text>
     </Box>
   )
 }
 ```
 
-- The project sits at the left and the branch at the right.
-- Both groups can shrink. The longer name gives way more, because the shrink is shared in proportion to width.
-- The 8 px above the row sets project and branch apart from the session figures, without a rule. The card stays one block.
+```tsx
+// The project, as OpenChamber's Project block shows it: under a rule, the bold title with the folder dim at the right
+// (cut from the end), then the branch, then the changes of the working tree: how many files, and at the right the
+// lines added and removed. Like the Session card it never folds, so its header has no icon and no chevron. A row is an
+// icon and its text on the desktop, and the text behind an emoji on the terminal, as v1 drew it. The block is left out
+// when there is no project name; the branch row when there is no branch; the changes row when there are no changes; the
+// numbers when the lines are unknown or are none (only binary files changed).
+function projectBlock(d: Draw): RenderElement | null {
+  const { Box, Text, Svg } = d.ui
+  // A value that an earlier build left in the state has no `changes`: it has none to show.
+  const { name, branch, changes = null } = d.data.project
+  if (name === '') return null
+  const marked = (emoji: string, text: string): string => (Svg === undefined ? `${emoji} ${text}` : text)
+
+  return (
+    <Box flexDirection="column">
+      {divider(d)}
+      <Box flexDirection="row" alignItems="center" columnGap={1}>
+        <Box flexDirection="row" flexShrink={0}>
+          <Text bold>Project</Text>
+        </Box>
+        {endText(d, name, { dimColor: true })}
+      </Box>
+      {branch !== null && (
+        <Box flexDirection="row" alignItems="center" columnGap={1}>
+          {iconSlot(d, ICON.branch, 'Branch')}
+          {shrinkText(d, marked('🌿', branch))}
+        </Box>
+      )}
+      {changes !== null && (
+        <Box flexDirection="row" alignItems="center" columnGap={1}>
+          {iconSlot(d, ICON.changes, 'Changes')}
+          {growText(d, marked('📝', changes.files === 1 ? '1 file changed' : `${changes.files} files changed`))}
+          {changes.lines !== null && changes.lines.added + changes.lines.removed > 0 && linesCell(d, changes.lines)}
+        </Box>
+      )}
+    </Box>
+  )
+}
+```
 
 ### 6.4 Label/value row
 
@@ -512,9 +584,9 @@ function agentRow(d: Draw, agent: AgentRow, typeCells: number): RenderElement {
   const mark = AGENT_MARKS[agent.status]
 
   return (
-    <Box flexDirection="row" alignItems="center" columnGap={1}>
+    <Box flexDirection="row" alignItems="center" columnGap={AGENT_GAP_CELLS}>
       {Svg === undefined ? (
-        <Box flexDirection="row" width={1} flexShrink={0}>
+        <Box flexDirection="row" width={TEXT_MARK_CELLS} flexShrink={0}>
           <Text color={mark.color} dimColor={mark.isDim}>
             {mark.glyph}
           </Text>
@@ -522,11 +594,20 @@ function agentRow(d: Draw, agent: AgentRow, typeCells: number): RenderElement {
       ) : (
         iconSlot(d, STATUS_SVG[agent.status], agent.status)
       )}
-      <Box flexDirection="row" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden" columnGap={1}>
+      <Box
+        flexDirection="row"
+        flexGrow={1}
+        flexShrink={1}
+        minWidth={0}
+        overflow="hidden"
+        columnGap={AGENT_GAP_CELLS}
+      >
         {growText(d, agent.description)}
-        <Box flexDirection="row" width={typeCells} flexShrink={0} overflow="hidden">
-          <Text dimColor wrap="truncate">{`@${shortType(agent.type)}`}</Text>
-        </Box>
+        {typeCells > 0 && (
+          <Box flexDirection="row" width={typeCells} flexShrink={0} overflow="hidden">
+            <Text dimColor wrap="truncate">{`@${shortType(agent.type)}`}</Text>
+          </Box>
+        )}
       </Box>
       <Box flexDirection="row" width={COST_CELLS} flexShrink={0} justifyContent="flex-end">
         {agent.costUsd === null ? <Text dimColor>—</Text> : <Text>{fmtUsd(agent.costUsd)}</Text>}
@@ -534,7 +615,9 @@ function agentRow(d: Draw, agent: AgentRow, typeCells: number): RenderElement {
     </Box>
   )
 }
+```
 
+```tsx
 function agentsSection(d: Draw): RenderElement | null {
   const { Box, Text, Svg } = d.ui
   const agents = orderAgents(Object.values(d.data.agents))
@@ -546,12 +629,17 @@ function agentsSection(d: Draw): RenderElement | null {
   // that is drawn, the desktop a width of its own.
   const longest = Math.max(...shown.map(agent => `@${shortType(agent.type)}`.length))
   const typeCells = Svg === undefined ? Math.min(TYPE_CELLS_MAX, longest) : TYPE_CELLS
-  const rows = shown.map(agent => agentRow(d, agent, typeCells))
+  // What the description keeps beside the type: the body less the mark, the type, the cost and the gaps of a row. With
+  // less than MIN_AGENT_DESC_CELLS the type is left out of every row.
+  const markCells = Svg === undefined ? TEXT_MARK_CELLS : ICON_CELLS
+  const descCells = d.cols - markCells - typeCells - COST_CELLS - AGENT_ROW_GAPS * AGENT_GAP_CELLS
+  const hasType = descCells >= MIN_AGENT_DESC_CELLS
+  const rows = shown.map(agent => agentRow(d, agent, hasType ? typeCells : 0))
   const more = agents.length - MAX_AGENT_ROWS
   if (more > 0) {
-    // The icon slot and its gap on the desktop, the one-cell mark and its gap on the terminal.
+    // The line starts where the descriptions do: after the mark and its gap.
     rows.push(
-      <Box flexDirection="row" paddingLeft={Svg === undefined ? 2 : 3}>
+      <Box flexDirection="row" paddingLeft={markCells + AGENT_GAP_CELLS}>
         <Text dimColor>{`+${more} more`}</Text>
       </Box>,
     )
@@ -565,45 +653,54 @@ The row has four columns. The description and the `@type` column sit in one grou
 
 1. **Status mark** (FIXED).
 2. **Description** (FLEX, grows: `growText`). It takes the rest of the row, so the `@type` column starts at the same x on every row.
-3. **`@type`** (FIXED, `typeCells` wide).
+3. **`@type`** (FIXED, `typeCells` wide), while the description keeps room beside it (below).
    - Desktop: `TYPE_CELLS`, 15 cells (120 px). The cut types `@frontend-deve…` and `@minimal-chang…` measure about 111 px on the live pane.
    - Terminal: the longest `@type` drawn, at most `TYPE_CELLS_MAX` (15).
 4. **Cost** (FIXED, `COST_CELLS`, 7 cells, right-aligned). Costs line up on their right edge, and every description ends at the same x.
 
-In a pane too narrow for the type column, every description is 0 wide and the group clips the column at the same x on every row.
+**In a narrow pane the type gives way first**, as `who` does in the log (§6.10). `agentsSection` works out what a description would keep beside the type: the body less the mark (`markCells`: `ICON_CELLS` on the desktop, `TEXT_MARK_CELLS` on the terminal), the type column, `COST_CELLS` and the gaps of the row (`AGENT_ROW_GAPS` of `AGENT_GAP_CELLS` each: two between the cells and one in the group). With fewer than `MIN_AGENT_DESC_CELLS` (12) cells the type column leaves every row, not some of them: `agentRow` gets `typeCells` 0, and the description takes the whole group. The choice is made once per section, so every description still ends at the same x.
 
 The status icon's `alt` is the status word (`running`, `done`, `failed`, `stopped`): the icon is the only place that says it.
 
 **"+N more"** aligns with the descriptions:
 
 ```tsx
-<Box flexDirection="row" paddingLeft={Svg === undefined ? 2 : 3}>
-  <Text dimColor>{`+${more} more`}</Text>
-</Box>
+    // The line starts where the descriptions do: after the mark and its gap.
+    rows.push(
+      <Box flexDirection="row" paddingLeft={markCells + AGENT_GAP_CELLS}>
+        <Text dimColor>{`+${more} more`}</Text>
+      </Box>,
+    )
 ```
 
-On the desktop, 3 cells = the 2-cell icon slot + the 1-cell gap. On the terminal, 2 cells = the 1-cell mark + the 1-cell gap.
+The line starts at `markCells` + `AGENT_GAP_CELLS`, where the descriptions start whether or not the type column is drawn. On the desktop that is 3 cells = the 2-cell icon slot + the 1-cell gap. On the terminal it is 2 cells = the 1-cell mark + the 1-cell gap.
 
 ### 6.8 MCP chips
 
 ```tsx
-const chips = mcp.servers.map(server => (
-  <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
-    <Box flexDirection="row" flexShrink={0}>
-      <Text color={OK}>{'● '}</Text>
+function mcpSection(d: Draw): RenderElement | null {
+  const { Box, Text } = d.ui
+  const { mcp } = d.data
+  if (mcp === null || mcp.servers.length === 0) return null
+  const chips = mcp.servers.map(server => (
+    <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
+      <Box flexDirection="row" flexShrink={0}>
+        <Text color={OK}>{DOT}</Text>
+      </Box>
+      {shrinkText(d, server.name)}
     </Box>
-    {shrinkText(d, server.name)}
-  </Box>
-))
-return section(d, 'mcp', 'MCP', String(mcp.servers.length), [
-  <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
-    {chips}
-  </Box>,
-])
+  ))
+
+  return section(d, 'mcp', 'MCP', String(mcp.servers.length), [
+    <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+      {chips}
+    </Box>,
+  ])
+}
 ```
 
 - **Dot and name.** Only the dot is green; the name is primary text. This is less noise than v1's all-green names, and the dot still says "connected".
-- **No-break space.** The ` ` keeps one space between the dot and the name. A plain space at the end of a flex item may be dropped by the desktop's whitespace rules.
+- **No-break space.** `DOT` is the dot and a no-break space (`'●\u00a0'`), so one space stays between the dot and the name. A plain space at the end of a flex item may be dropped by the desktop's whitespace rules.
 - **Wrapping.** Chips wrap whole. A single name wider than the pane goes on its own line and is cut.
 
 ### 6.9 Context sources
@@ -614,14 +711,16 @@ return section(d, 'mcp', 'MCP', String(mcp.servers.length), [
 
 ```tsx
 // The newest log lines: time, who, what, and how it went. Time and `who` are dim fixed columns, so every text starts
-// at the same x; the text is cut to one line, an error shows its `who` in red. On the desktop `who` has a width of its
-// own, so the text column does not jump with the longest `who`; on the terminal it is the longest one there is, up to
-// the most shortType keeps. The outcome (the mark and the time of an action, or `denied`) is a fixed column at the
-// right edge, as wide as the longest one drawn, in red for an error. The desktop adds a cell: a ✓ or a ✗ varies by
-// font, and the margin keeps the mark whole. A line without an outcome has the cell empty, so every text is cut at
-// the same x. With no outcome among the lines drawn there is no column. Nor is there one while the text beside it
-// would keep fewer than MIN_LOG_TEXT_CELLS cells (the body less the time, `who`, the outcome and the three gaps of
-// the row): the row has three cells then, and the outcome of a line goes back to the end of its text, cut with it.
+// at the same x; the text is cut to one line. On the desktop `who` has a width of its own, so the text column does not
+// jump with the longest `who`; on the terminal it is the longest one there is, up to the most shortType keeps. The
+// outcome (the mark and the time of an action, or `denied`) is a fixed column at the right edge, as wide as the
+// longest one drawn, a cell wider on the desktop: a ✓ or a ✗ varies by font, and the margin keeps the mark whole. A
+// line without one has the cell empty. An error shows its `who` and its outcome in red, the others are dim; in
+// [time, text], which has neither cell, its text is red.
+// The layout is the first of these whose text keeps MIN_LOG_TEXT_CELLS cells, one for every row: [time, who, text,
+// outcome]; then `who` gives way, [time, text, outcome]; then [time, text], where a line shows its outcome in front of
+// its text, so that the cut at the end keeps it. That one is also the layout when nothing fits. With no outcome among
+// the lines drawn there is no outcome cell, and a line shows its text alone.
 function logSection(d: Draw): RenderElement | null {
   const { Box, Text, Svg } = d.ui
   const lines = d.data.log.slice(0, MAX_LOG_ROWS)
@@ -630,27 +729,35 @@ function logSection(d: Draw): RenderElement | null {
   const whoCells = Svg === undefined ? Math.min(WHO_CELLS_MAX, longestWho) : WHO_CELLS
   const longestOutcome = Math.max(...lines.map(line => line.outcome?.length ?? 0))
   const outcomeCells = longestOutcome === 0 ? 0 : longestOutcome + (Svg === undefined ? 0 : 1)
-  // The cells the text keeps: the body less the time, `who` and outcome cells and the 3 gaps of a row of four.
-  const textCells = d.cols - TIME_CELLS - whoCells - outcomeCells - 3
-  const hasOutcomeColumn = outcomeCells > 0 && textCells >= MIN_LOG_TEXT_CELLS
+  // The cells the text keeps in a layout: the body less the time, `who` and outcome cells it has, and its gaps (the
+  // cells of the row less one).
+  const textCells = (withWho: boolean, withOutcome: boolean): number =>
+    d.cols - TIME_CELLS - (withWho ? whoCells : 0) - (withOutcome ? outcomeCells : 0) -
+    (1 + Number(withWho) + Number(withOutcome)) * LOG_GAP_CELLS
+  const hasOutcomes = outcomeCells > 0
+  const hasWho = textCells(true, hasOutcomes) >= MIN_LOG_TEXT_CELLS
+  const hasOutcomeCell = hasOutcomes && (hasWho || textCells(false, true) >= MIN_LOG_TEXT_CELLS)
+  const isTextOnly = !hasWho && !hasOutcomeCell
   const rows = lines.map(line => (
-    <Box flexDirection="row" columnGap={1}>
+    <Box flexDirection="row" columnGap={LOG_GAP_CELLS}>
       <Box flexDirection="row" width={TIME_CELLS} flexShrink={0}>
         <Text dimColor>{fmtClock(line.at)}</Text>
       </Box>
-      <Box flexDirection="row" width={whoCells} flexShrink={0} overflow="hidden">
-        {line.kind === 'error' ? (
-          <Text color={BAD} wrap="truncate">{line.who}</Text>
-        ) : (
-          <Text dimColor wrap="truncate">{line.who}</Text>
-        )}
-      </Box>
+      {hasWho && (
+        <Box flexDirection="row" width={whoCells} flexShrink={0} overflow="hidden">
+          {line.kind === 'error' ? (
+            <Text color={BAD} wrap="truncate">{line.who}</Text>
+          ) : (
+            <Text dimColor wrap="truncate">{line.who}</Text>
+          )}
+        </Box>
+      )}
       <Box flexDirection="row" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
-        <Text wrap="truncate">
-          {hasOutcomeColumn || line.outcome === undefined ? line.text : `${line.text} ${line.outcome}`}
+        <Text color={isTextOnly && line.kind === 'error' ? BAD : undefined} wrap="truncate">
+          {hasOutcomeCell || line.outcome === undefined ? line.text : `${line.outcome} ${line.text}`}
         </Text>
       </Box>
-      {hasOutcomeColumn && (
+      {hasOutcomeCell && (
         <Box flexDirection="row" width={outcomeCells} flexShrink={0} overflow="hidden" justifyContent="flex-end">
           {line.outcome !== undefined && (line.kind === 'error' ? (
             <Text color={BAD} wrap="truncate">{line.outcome}</Text>
@@ -667,7 +774,7 @@ function logSection(d: Draw): RenderElement | null {
 ```
 
 - **Time and `who`** are fixed columns.
-  - Every text starts at the same x: 8 + 1 + 13 + 1 = 23 cells = 184 px on the desktop.
+  - In the full layout every text starts at the same x: 8 + 1 + 13 + 1 = 23 cells = 184 px on the desktop.
   - Proportional digits can no longer move the columns.
   - The `who` column no longer shrinks with the text beside it. It did in v1, which moved the text column row to row.
 - **Weight.** Time and `who` are dim, so the text carries the row. An error `who` is red.
@@ -680,8 +787,12 @@ function logSection(d: Draw): RenderElement | null {
 - **Outcome width per surface.** Worked out once per section, from the lines drawn.
   - Terminal: the longest outcome, in characters.
   - Desktop: the longest outcome + 1 cell. A ✓ or a ✗ varies by font, and the margin keeps the mark whole.
-  - With no outcome among the lines drawn there is no column: the row has three cells, as before.
-- **Fallback.** The text keeps the body less the time, `who` and outcome cells and the 3 gaps of a row of four. Under `MIN_LOG_TEXT_CELLS` (8) cells of text there is no column: the row has three cells, and the outcome of a line goes back to the end of its text, cut with it.
+  - With no outcome among the lines drawn there is no outcome cell, and a line shows its text alone.
+- **Narrow pane: `who` gives way first.** The layout is the first of these whose text keeps at least `MIN_LOG_TEXT_CELLS` (8) cells (the body less the time, `who` and outcome cells the layout has, and its gaps), one for every row of the section:
+  1. [time, who, text, outcome];
+  2. [time, text, outcome]: `who` has given way;
+  3. [time, text]: the outcome goes in front of the text, as `✓ 0.3s Bash ls`, so that the cut at the end of the text keeps it. This is also the layout when nothing fits.
+- **Red text.** The last layout has neither a `who` nor an outcome cell to carry the red of an error, so the text of an error line is red there. In the other layouts the text stays primary.
 
 ### 6.11 Empty and partial states
 
@@ -691,7 +802,10 @@ function logSection(d: Draw): RenderElement | null {
 | No total cost | `Session` alone on the first row; no split line |
 | No subagents | no split line; no Subagents section (and no rule for it) |
 | No completed turn | Turn stats header with no summary, body `No completed turn yet` (dim) |
-| No project name | no project row; no branch → the folder group alone |
+| No project name | no Project block (§6.3) |
+| No branch | the Project block without the branch row |
+| No repository, a clean tree, a failed git, or a status over 4 MiB | no changes row |
+| Lines unknown (an unborn HEAD, a failed diff) or both 0 (only binary files changed) | the changes row with the count alone, no numbers |
 | Subagent cost unknown | dim `—` in the cost column |
 | More than 8 subagents | `+N more` (§6.7) |
 | No rate limits, MCP servers, sources or log | the section and its rule are left out |
@@ -704,29 +818,44 @@ All icons are 14 × 14 CSS px, drawn on a 14-unit grid with a 1.4 stroke, round 
 <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="#8a8a8a" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">…</svg>
 ```
 
+`NEUTRAL` is the grey `#8a8a8a` of §3.1.
+
 ```ts
-const NEUTRAL = '#8a8a8a'
-const ICON_ROOT = `xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="${NEUTRAL}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"`
+const ICON_ROOT =
+  'xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14" fill="none"' +
+  ` stroke="${NEUTRAL}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"`
 const icon = (body: string): string => `<svg ${ICON_ROOT}>${body}</svg>`
 const dot = (cy: number): string => `<circle cx="2.25" cy="${cy}" r=".9" fill="${NEUTRAL}" stroke="none"/>`
 
-const ICON: Record<SectionId | 'folder' | 'branch', string> = {
+const ICON: Record<SectionId | 'branch' | 'changes', string> = {
   // Usage: a stopwatch.
   usage: icon('<circle cx="7" cy="8" r="4.75"/><path d="M5.5 1.5h3M7 1.5v1.75M7 8V5.75"/>'),
   // Turn stats: a bar chart.
   turn: icon('<path d="M3.5 11.5v-4M7 11.5v-9M10.5 11.5v-6"/>'),
   // Subagents: a bot.
-  agents: icon('<rect x="2.5" y="4.75" width="9" height="7" rx="2"/><path d="M7 4.75V2.5H5M5.25 7.75v1.25M8.75 7.75v1.25"/>'),
+  agents: icon(
+    '<rect x="2.5" y="4.75" width="9" height="7" rx="2"/><path d="M7 4.75V2.5H5M5.25 7.75v1.25M8.75 7.75v1.25"/>',
+  ),
   // MCP: a plug.
-  mcp: icon('<path d="M5.25 1.5v3M8.75 1.5v3M7 10.25v2.25"/><path d="M3.5 4.5h7v2.75a3 3 0 0 1-3 3h-1a3 3 0 0 1-3-3z"/>'),
+  mcp: icon(
+    '<path d="M5.25 1.5v3M8.75 1.5v3M7 10.25v2.25"/><path d="M3.5 4.5h7v2.75a3 3 0 0 1-3 3h-1a3 3 0 0 1-3-3z"/>',
+  ),
   // Context sources: layers.
-  sources: icon('<path d="M7 1.5 12.5 4.25 7 7 1.5 4.25z"/><path d="M1.5 7 7 9.75 12.5 7M1.5 9.75 7 12.5 12.5 9.75"/>'),
+  sources: icon(
+    '<path d="M7 1.5 12.5 4.25 7 7 1.5 4.25z"/><path d="M1.5 7 7 9.75 12.5 7M1.5 9.75 7 12.5 12.5 9.75"/>',
+  ),
   // Log: a list.
   log: icon(`<path d="M5 3.5h7M5 7h7M5 10.5h7"/>${dot(3.5)}${dot(7)}${dot(10.5)}`),
-  // Project: a folder.
-  folder: icon('<path d="M1.5 3.75c0-.55.45-1 1-1h2.6l1.4 1.5h5c.55 0 1 .45 1 1v5.5c0 .55-.45 1-1 1h-9c-.55 0-1-.45-1-1z"/>'),
   // Branch: git-branch.
-  branch: icon('<path d="M4 1.75v7.5"/><circle cx="4" cy="11" r="1.75"/><circle cx="10" cy="3.5" r="1.75"/><path d="M10 5.25c0 2.75-2.25 3.75-4.6 4.4"/>'),
+  branch: icon(
+    '<path d="M4 1.75v7.5"/><circle cx="4" cy="11" r="1.75"/><circle cx="10" cy="3.5" r="1.75"/>' +
+      '<path d="M10 5.25c0 2.75-2.25 3.75-4.6 4.4"/>',
+  ),
+  // Changes: a page with a pencil.
+  changes: icon(
+    '<path d="M5.5 12.5H4A1.5 1.5 0 0 1 2.5 11V3A1.5 1.5 0 0 1 4 1.5h3.5l3 3v1M7.5 1.5v2a1 1 0 0 0 1 1h2"/>' +
+      '<path d="M6.25 11.5l-.5 1.75 1.75-.5 4-4a1.06 1.06 0 0 0-1.25-1.25z"/>',
+  ),
 }
 ```
 
@@ -763,13 +892,15 @@ The ring is 14 × 14, centred at (7, 7), with r = 5.5, stroke 2 and circumferenc
 const RING_R = 5.5
 const RING_C = 2 * Math.PI * RING_R
 
+// The Context ring: a track, and an arc of the percent from 12 o'clock, clockwise, in the colour of the meter. No arc
+// when there is no reading or the percent is 0; a full circle at 100, so no hairline gap is left. Butt caps keep the
+// arc as long as the percent says.
 export function ringSvg(pct: number | undefined): string {
   const p = pct === undefined || !Number.isFinite(pct) ? 0 : clampPct(pct)
-  const track = `<circle cx="7" cy="7" r="${RING_R}" fill="none" stroke="#808080" stroke-opacity="0.3" stroke-width="2"/>`
+  const circle = `<circle cx="7" cy="7" r="${RING_R}" fill="none"`
   const dash = p >= 100 ? '' : ` stroke-dasharray="${((p / 100) * RING_C).toFixed(2)} ${RING_C.toFixed(2)}"`
-  const arc = p > 0
-    ? `<circle cx="7" cy="7" r="${RING_R}" fill="none" stroke="${meterColor(p)}" stroke-width="2"${dash} transform="rotate(-90 7 7)"/>`
-    : ''
+  const track = `${circle} stroke="#808080" stroke-opacity="0.3" stroke-width="2"/>`
+  const arc = p > 0 ? `${circle} stroke="${meterColor(p)}" stroke-width="2"${dash} transform="rotate(-90 7 7)"/>` : ''
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14">${track}${arc}</svg>`
 }
@@ -793,10 +924,12 @@ Butt caps keep the arc honest: round caps would add a stroke-width to its visibl
 | Context meter row | the bar's Box clips, only if `CELL_PX` overestimates | nothing | percent |
 | Limit row | countdown (ellipsis) and the bar's Box, in proportion | nothing | label (cut inside its own 7 cells), percent |
 | Split line | its end (ellipsis) | nothing | nothing else on the row |
-| Project row | the longer of project and branch | the other | icons |
-| Subagent row | description (ellipsis) | the `@type` column, clipped by the group at the same x on every row (panes too narrow for it) | mark, cost |
+| Project header | the folder name (ellipsis, from the end) | nothing | `Project` |
+| Branch row | the branch (ellipsis, from the end) | nothing | icon |
+| Changes row | the label `N files changed` (ellipsis) | nothing | the numbers cell (`+A / −D`), icon |
+| Subagent row | the `@type` column, which leaves every row when the description would keep fewer than 12 cells (§6.7) | description (ellipsis) | mark, cost |
 | MCP chip | the name, only when it alone is wider than the pane | nothing | the dot |
-| Log row | text (ellipsis) | nothing | time, the outcome (below 8 cells of text it stops being a column and ends the text, §6.10); `who` cuts inside its own column |
+| Log row | text (ellipsis) | `who` leaves the row; then the outcome moves in front of the text (each below 8 cells of text, §6.10) | time, the outcome while it is a column; `who` cuts inside its own column |
 
 The ellipsis is the surface's own, from `wrap="truncate"`. No string is shortened by hand for layout: `shorten()` in the log formulas is content and stays as it is.
 
@@ -805,8 +938,8 @@ The ellipsis is the surface's own, from `wrap="truncate"`. No string is shortene
 | Element | Desktop | Terminal |
 |---|---|---|
 | Divider | 1600 × 1 px SVG in a clipping Box, 8 px above and below | `Text dimColor` of `'─'.repeat(bodyColumns)`, no margins (one row, as v1's blank line was) |
-| Section icon, ring, folder, branch | `Svg` in a 2-cell slot | dropped (`iconSlot` returns null) |
-| Project row | folder + name … branch icon + branch, 8 px above | `📁 name` … `🌿 branch`, as v1, no margin |
+| Section icon, ring, branch, changes | `Svg` in a 2-cell slot | dropped (`iconSlot` returns null) |
+| Project block | rule; bold `Project` + the folder name at the right; branch icon + branch; changes icon + `12 files changed`, the numbers at the right | text rule; `Project` + the folder name at the right; `🌿 main`; `📝 12 files changed`, the numbers at the right |
 | Meter | `meterSvg` at the computed px width | ten cells of `▰▱` in the meter colours, as v1 |
 | Status mark | 14 px status icon, `alt` = status | v1 glyphs in a 1-cell Box: `◐` blue, `✓` success, `✗` error, `✗` dim |
 | `+N more` indent | 3 cells | 2 cells |
@@ -840,17 +973,22 @@ Checks on the first live render, before the tests are frozen:
    - If the bar's right end is cut off or touches the percent, `CELL_PX` is too big; if the gap is over 45 px, it is too small.
    - Either way, set `CELL_PX` to the body's px width ÷ `bodyColumns`.
 2. **Rule spacing.** Between the last row of a block and the next header there should be about 17 px of space, split by the 1 px line. If it is about 35 px, the image is being laid out in a text line: drop the divider Box's `marginTop` and `marginBottom` to 0.
-3. **Narrow pane.** Narrow the pane to about 300 px. No row crosses the edge, and descriptions, log text and summaries end in `…`. Costs, percents and `@type` stay whole.
+3. **Narrow pane.** Narrow the pane to about 300 px. No row crosses the edge, and descriptions, log text and summaries end in `…`. Costs and percents stay whole; `@type` and the log's `who` are either whole or left out (§6.7, §6.10).
 4. **Empty alt.** If the transcript says a `ui.render` tree was refused and names `alt`, give each decorative icon the label of its row and the rule `alt="rule"`.
 5. **Chevron.** It is dim at rest and full strength under the pointer. A click folds the section and the header keeps its summary.
+6. **Lines separator.** On the desktop the changes row reads `+8 / −1`, with the spaces around the slash, not `+8/−1` (the no-break spaces of `LINES_SEP`, §6.3).
+7. **Changes refresh.** The changes row updates about a second after an edit or a command by any agent.
 
 Results of the live renders (2026-10-07 and 2026-10-08):
 
 1. Pass. At ~300 px the bar ends ~18 px left of the percent; `CELL_PX` 8 stays.
 2. Pass. 12–14 px between the ink and the rule on each side, ≈ 17 px box to box.
 3. Pass. At ~300 px no row crosses the edge; descriptions and log text end in `…`. Since Task 8 the log's outcome column gives way when the text would keep fewer than 8 cells (about 40 columns on the desktop), so at ~300 px the log shows the outcome at the end of the text, by design.
+   - Task 9 changed the narrow rules (§6.7, §6.10) and replaces the Task 8 rule above: in a narrow pane `who` gives way first, then the outcome moves in front of the text, and a subagent row drops `@type` when its description would keep fewer than 12 cells. By the constants, below about 40 columns on the desktop the log drops `who` and the subagent rows drop `@type`, and below about 26 the outcome moves in front of the text. These figures are computed, not seen live; to be confirmed in the next live check.
 4. The tree was not refused, but the desktop drew no Svg with an empty `alt`: the icons, the ring and the rules were missing while their slots stayed. Fixed by giving every Svg a label (commit c5f73d1).
 5. Pass. A click on the chevron folds the section, and the folded state survives a reload.
+6. Pending.
+7. Pending.
 
 ## 12. Compromises forced by the API
 
@@ -884,12 +1022,12 @@ These tests encode v1's tree and need updating with the implementation:
 | `headers()` | Button labels are now `▾`/`▸`. Read the bold title `Text` in the same header row instead. |
 | `summaries()` | The header row's children are [icon slot (desktop only)], title Box, Button, summary Box. The summary is the `Text` in the last child. |
 | Header assertions | Buttons are still `toggle:<id>`, six of them, all `plain`. Add `dimColor === true`. |
-| Top block (desktop) | `📁 online_shop` and `🌿 master` become Svg + `Text 'online_shop'` / `'master'`. The terminal is unchanged. |
+| Project block | The project is no longer in the top block. Header: the bold `Project` and the dim folder name, no Button, no icon. Branch row: Svg + Text on the desktop, `🌿 master` on the terminal. Changes row: Svg + label + the three Texts of `linesCell` on the desktop, `📝 12 files changed` + the numbers on the terminal; `1 file changed` for one. Left out: no name, no block; no branch, no branch row; no changes, no row; no lines or both 0, no numbers. |
 | Svg lists (alts, widths) | Filter to meters (`alt` matching `/%$/`). Icons and rules carry their row's label, and statuses have `alt` = status. Meter alts are unchanged. |
 | Empty pane | The desktop now draws the ring track. Assert "no meter" (no Svg with a `%` alt) instead of "no Svg". |
 | Meter widths | `meterWidth` becomes `contextMeterWidth` and `limitMeterWidth` (§6.2, §6.5). |
 | `markCells()` | Desktop marks are Svg in a 2-cell slot. The terminal is unchanged (1-cell Box with `◐ ✓ ✗`). |
-| `logColumns()` | The time `Text` sits in an 8-cell Box. The row is [time Box, who Box, text Box, outcome Box], the last one only when the column is drawn; `who` is 13 cells on the desktop. |
+| `logColumns()` | The time `Text` sits in an 8-cell Box. The row is [time Box, who Box, text Box, outcome Box]; the `who` Box and the outcome Box are there only in the layouts that draw them (§6.10); `who` is 13 cells on the desktop. |
 | MCP | `● name` in `success` becomes `Text '● '` in `success` + `Text 'name'` with no colour. |
 
 ## 14. d.ts references

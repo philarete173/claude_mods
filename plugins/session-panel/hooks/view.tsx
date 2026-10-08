@@ -339,7 +339,7 @@ function section(d: Draw, id: SectionId, title: string, summary: string, body: R
   )
 }
 
-// ---- Top block (§6.1–§6.3) ----
+// ---- Top block (§6.1–§6.2) ----
 
 // The context of the window: a ring, the label and `tokens / window`; under it the meter and the percent. A dash when
 // there is no reading: before any response, after a /clear, or with a percent that is not a number (NaN, Infinity, or a
@@ -412,7 +412,7 @@ function topBlock(d: Draw): RenderElement {
   )
 }
 
-// ---- Project block ----
+// ---- Project block (§6.3) ----
 
 // The lines added and removed, `+8 / −1`: three Texts in a fixed cell, so the numbers stay whole when the label beside
 // them is cut.
