@@ -55,7 +55,7 @@ Elapsed                                             1m 18s
   - `width={1}` + `columnGap={1}` put the subagent descriptions 16 px in;
   - `marginTop={1}` adds about 8 px over the 19 px line.
 - **The old "12.5 px per column" was a planning guess.** v1 cannot refute it, because its meter is clamped at 180 px either way.
-- **`CELL_PX = 8`** is used only to turn `bodyColumns` into the px widths of the meters. §11 says how to confirm it once.
+- **`CELL_PX = 8`** is used only to turn `bodyColumns` into the px widths of the meters. Confirmed on the live pane on 2026-10-07 (§11, check 1).
 - **`Svg` `width` and `height` are CSS px** (l.11588–11595).
 
 ### 2.2 Surfaces
@@ -152,7 +152,9 @@ Rhythm on the desktop:
 
 ```ts
 // Layout, in cells: the unit of Box numbers. On the desktop a cell is CELL_PX wide (spec §2.1).
-const CELL_PX = 8 // measured on the desktop; confirm once (spec §11)
+// It is used only to turn `bodyColumns` into the px of the meters; confirmed on the live pane on 2026-10-07 (§11,
+// check 1).
+const CELL_PX = 8
 const ICON_PX = 14 // every icon, CSS px
 const ICON_CELLS = 2 // the slot an icon sits in; text after it starts 3 cells in
 const PCT_CELLS = 6 // `100.0%`

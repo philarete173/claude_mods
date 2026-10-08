@@ -104,7 +104,7 @@ MCP servers                                3
 
 - **Context:**
   - токены — `context.tokens` из `session.measure` (несёт `context`, `rateLimits`, `cost`, `changed`), `usage()` и после `session.compact`;
-  - окно — `breakdown.rawMaxTokens` из `usage({ breakdown: 'summary' })`. Это окно компакции с учётом ручной настройки (`autoCompactWindow` в settings; источник указан в `autocompactSource`). Если разбивки нет, берётся `context.window` (окно модели). Окно обновляется на `session.start` и таймером вместе с MCP;
+  - окно — `breakdown.rawMaxTokens` из `usage({ breakdown: 'summary' })`. Это окно компакции с учётом ручной настройки (`autoCompactWindow` в settings; источник указан в `autocompactSource`). Если разбивки нет, берётся `context.window` (окно модели). Окно обновляется на `session.start` и таймером вместе с MCP. При смене модели (окно в `session.measure` изменилось) разбивка `usage({ breakdown: 'summary' })` перечитывается сразу, не дожидаясь таймера;
   - процент = токены / окно × 100, считается модом: `context.percent` движка считает от окна модели;
   - до первого ответа модели выводится `—`.
 - **Total:** `usage().cost.usd`. Если поля нет (у хоста нет учёта стоимости), строка Total скрывается.
@@ -127,7 +127,7 @@ MCP servers                                3
 
 ### 4.3. Turn stats
 
-Показывается последний **завершённый** ход основного агента: события без `agentId`, между `turn.start` и `turn.complete` с одним `turnId`. Пока идёт новый ход, на экране остаются данные предыдущего.
+Показывается последний **завершённый** ход основного агента: события без `agentId`, между `turn.start` и `turn.complete` с одним `turnId`. Ход, прерванный до первого ответа (ни одного шага), предыдущий не заменяет. Пока идёт новый ход, на экране остаются данные предыдущего.
 
 **Замер шага.** Хук `turn.step` — асинхронный генератор. Внутри него:
 - `tStart = await $.clock.now()` при входе;
@@ -183,7 +183,7 @@ MCP servers                                3
 
 - **Источник:** уникальные `serverName` из `usage({ breakdown: 'summary' }).context.breakdown.mcpTools`. Встроенный `WaitForMcpServers` модулям недоступен (§11, проба 4), поэтому статусов подключения нет: все такие серверы считаются подключёнными (зелёный `● name`), в заголовке выводится их число.
 - **Когда обновлять:** на `session.start` и затем таймером раз в 60 секунд.
-- **Служебные серверы приложения** (имена с префиксом `ccd_`, встроенные серверы десктопа) не показываются и не считаются ни в MCP, ни в Context sources (решение пользователя от 2026-10-07).
+- **Служебные серверы приложения** — имена с префиксом `ccd_`, а также `Claude_Browser`, `scheduled-tasks` и `terminal` (точное совпадение имени) — не показываются и не считаются ни в MCP, ни в Context sources (решения пользователя от 2026-10-07 и 2026-10-08; API не отмечает встроенные серверы, поэтому сверка идёт по имени).
 
 ### 4.6. Context sources
 
@@ -201,8 +201,8 @@ MCP servers                                3
 |---|---|---|
 | `turn.start` | `you` (`engine`, если текст начинается с `<`) | `shorten(redact(text), 70)`; для `engine` — имя тега |
 | `tool.call` (после `next(e)`) | `main` или тип субагента (до 14 символов; обрезанный кончается на `…`) | `shorten(redact(label), 64 − длина суффикса)` + суффикс ` ✓ 0.3s` / ` ✗` / ` denied`, где `label` = `${tool} ${target}`. Успешный вызов Agent/Task и успешный SendMessage на id известного субагента не пишутся: о них говорят строки `spawned`/`resumed` и итог субагента. Неудачные и запрещённые вызовы пишутся. |
-| `agent.spawn` | `main` | `spawned · ${type}: ${description}` |
-| `turn.step` субагента, чья запись закрыта | `main` | `resumed · ${type}: ${description}` |
+| `agent.spawn` | `main` | ``shorten(redact(`spawned · ${type}: ${description}`), 70)`` |
+| `turn.step` субагента, чья запись закрыта | `main` | ``shorten(redact(`resumed · ${type}: ${description}`), 70)`` |
 | `turn.complete` с `agentId` | тип субагента | `done 1m 12s · $0.02 — ${answer до 80}` или `failed` (`kind: 'error'`) / `stopped` (`kind: 'info'`, остановка не ошибка; в списке — приглушённый ✗) |
 | `session.compact` | `main` | `compacted 180k → 40k` |
 
@@ -221,9 +221,9 @@ MCP servers                                3
 
 - **Окно:** id `session-panel`, заголовок `Session`.
 - **Автооткрытие:** на `session.start` и на `session.attach`, но только если среди `$.session.surfaces()` есть `desktop`. В терминале панель открывается только командой.
-- **Команда:** `/session-panel` открывает или закрывает панель. Если панель не размещена, команда отвечает текстом с причиной из `UiOpenResult.reason`.
-- **Сворачивание:** состояние хранится в атоме `collapsed: Record<SectionId, boolean>`, где `SectionId` — один из `usage`, `turn`, `agents`, `mcp`, `sources`, `log`. Нажатие переключает атом и сохраняет карту в `$.store` под ключом `collapsed`. На `session.start` карта читается из `$.store`. По умолчанию всё развёрнуто.
-- **`/clear`** (`session.end` с причиной `clear`) сбрасывает текущий и последний ход, субагентов, журнал и показания контекста (до следующего ответа выводится `—`); база стоимости задаётся заново.
+- **Команда:** `/session-panel` открывает или закрывает панель. Если панель не размещена, команда отвечает текстом с причиной из `UiOpenResult.reason`. Команда объявлена с `immediate: true` и срабатывает посреди хода.
+- **Сворачивание:** состояние хранится в атоме `collapsed: Record<SectionId, boolean>`, где `SectionId` — один из `usage`, `turn`, `agents`, `mcp`, `sources`, `log`. Нажатие переключает атом и сохраняет карту в `$.store` под ключом `collapsed`. На `session.start` карта читается из `$.store`. Значение из хранилища принимается, только если это объект с булевыми значениями. По умолчанию всё развёрнуто.
+- **`/clear` и `resume`** (`session.end` с причиной `clear` или `resume`) сбрасывают текущий и последний ход, субагентов, журнал и показания контекста (до следующего ответа выводится `—`); база стоимости задаётся заново; при `resume` на месте разговора оказывается другой.
 - **Таймер:** `$.clock.every(30_000)`. Он делает `$.ui.invalidate('ui.render')` и обновляет статусы субагентов; MCP обновляется каждый второй тик.
 
 ## 6. Устройство
@@ -235,13 +235,14 @@ claude_mods/                         маркетплейс
   plugins/session-panel/
     .claude-plugin/plugin.json       name, version, description, "types": "./types/index.d.ts"
     hooks/hooks.json                 { "modules": ["./register.tsx"] }
-    hooks/register.tsx               события → атомы, команда, открытие, таймер
-    hooks/state.ts                   атомы $.state, общие для register и view
+    hooks/register.tsx               события → атомы $.state (объявлены здесь: движок принимает источник
+                                     состояния только из того же файла), команда, открытие, таймер
     hooks/view.tsx                   отрисовка Pane: секции, шкалы, сворачивание
     hooks/stats.ts                   чистые функции: формулы 4.3, склейка интервалов,
                                      распределение стоимости 4.4, redact/shorten, форматы 3.2
     hooks/*.test.ts(x)               тесты (раздел 7)
     types/index.d.ts                 контракт PluginState['session-panel']
+    LICENSE, THIRD_PARTY_NOTICES.md  лицензия мода и лицензии заимствованных проектов
 ```
 
 - **Состояние** (`$.state`, атомы, переживают горячую перезагрузку): `usage`, `project`, `mcp`, `turn` (накопитель текущего хода), `lastTurn` (готовая статистика), `agents`, `log`, `collapsed`.
@@ -304,7 +305,7 @@ claude_mods/                         маркетплейс
 | claude-flightdeck (scasella) | регулярные выражения `redact` и устройство журнала |
 | Desktop Statusline (George Liu, centminmod) | SVG-шкала, цвета и пороги, форматы отсчёта |
 
-Авторство указывается в README и в комментарии над заимствованным кодом.
+Авторство указывается в README и в комментарии над заимствованным кодом. Тексты лицензий заимствованных проектов — в `plugins/session-panel/THIRD_PARTY_NOTICES.md`, рядом лежит копия LICENSE мода.
 
 ## 11. Итоги спайка (2026-10-07)
 

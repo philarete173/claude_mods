@@ -252,7 +252,7 @@ export function fmtClock(ms: number): string
 Зависит от задачи 1: перед отправкой исполнителю главный агент дописывает в спецификацию раздел «Итоги спайка» с решениями. Использует задачу 2.
 
 **Файлы:**
-- Создать: `plugins/session-panel/types/index.d.ts`, `plugins/session-panel/hooks/state.ts`, `plugins/session-panel/hooks/register.test.ts`.
+- Создать: `plugins/session-panel/types/index.d.ts`, `plugins/session-panel/hooks/register.test.ts`.
 - Изменить: `plugin.json` (добавить `"types": "./types/index.d.ts"`).
 - Заменить целиком: `plugins/session-panel/hooks/register.tsx`.
 
@@ -261,14 +261,14 @@ export function fmtClock(ms: number): string
 - Даёт (контракт `PluginState['session-panel']`, ключ → тип):
   - `usage: { contextTokens?: number; contextWindow?: number; contextPct?: number; costUsd?: number; rateLimits: { kind: string; percentUsed: number; resetsAt?: number }[]; skills?: number }`;
   - `project: { name: string; branch: string | null }`;
-  - `mcp: { servers: { name: string; status: 'connected' | 'failed' | 'needsAuth' | 'pending' | 'disabled' }[]; exact: boolean } | null`;
+  - `mcp: { servers: { name: string }[] } | null`;
   - `turn: TurnAcc | null`;
   - `lastTurn: TurnStats | null`;
   - `agents: Record<string, AgentRow>`;
   - `log: LogEntry[]`;
   - `collapsed: Record<string, boolean>`.
 
-  Атомы создаются через `atom({ plugin: 'session-panel', key }, initial)` по образцу `examples/pane-state.d.ts`. Атомы объявляются и экспортируются в `hooks/state.ts`, который создаётся в этой задаче. `register.tsx` и `view.tsx` импортируют их оттуда. Значение `resetsAt` хранится в epoch-миллисекундах: если API даёт секунды или ISO-строку, оно приводится к миллисекундам при записи.
+  Атомы создаются через `atom({ plugin: 'session-panel', key }, initial)` по образцу `examples/pane-state.d.ts`. Атомы объявляются в `register.tsx`: движок принимает источник состояния только из того же файла (см. ниже); `view.tsx` получает данные снимком. Значение `resetsAt` хранится в epoch-миллисекундах: если API даёт секунды или ISO-строку, оно приводится к миллисекундам при записи.
 
 **Поведение** (§4–§5 спецификации; хуки только наблюдают):
 - **`session.start`:**
@@ -291,7 +291,7 @@ export function fmtClock(ms: number): string
 - **`agent.spawn`:** `const r = await next(e)`; `agents[r.agentId] = { id, description, type, model: r.model, status: 'running', startedAt: now, endedAt: null, costUsd: null }`; запись в журнал; вернуть `r`.
 - **`session.compact`:** `const r = await next(e)`; запись в журнал `compacted <fmtTokens(before)> → <fmtTokens(after)>`; обновить usage; вернуть `r`.
 - **`classic.CwdChanged`:** обновить project/branch.
-- **MCP** — по итогам спайка: `WaitForMcpServers` (`exact: true`) или запасной источник из breakdown (`exact: false`).
+- **MCP** — по итогам спайка (§11, проба 4) `WaitForMcpServers` модулям недоступен: источник — `breakdown.mcpTools`; в значении только имена серверов.
 - **Отрисовка временная (до задачи 4):** `ui.render` для `{ component: 'Pane', requestId: 'session-panel' }` выводит `Box` из строк `Text`, по одной на атом, в виде `key: JSON` длиной до 200 символов.
 
 - [ ] **Шаг 1. Написать падающие тесты** в `register.test.ts` на том, что позволяет `claude-code/testing` (в d.ts искать `claude-code/testing`, `mock.store`, `mock.clock`, `$.ui.mount`):
@@ -382,3 +382,4 @@ export function fmtClock(ms: number): string
 
 - **Задача 6. Визуальная переработка** по отзыву пользователя на живую панель: секции с иконками и разделителями, ячейки без выхода за край, шкалы по ширине панели, кольцо контекста. Визуальная спецификация — `docs/superpowers/specs/2026-10-07-session-panel-visual.md`, утверждённое превью — `docs/design/session-panel-preview.html`. В ту же задачу вошла новая формула Response.
 - **Задача 7. Субагенты.** `@type` стоит в столбце постоянной ширины. Продолженный сообщением субагент снова показан как работающий. Запуск и продолжение дают в журнале по одной строке.
+- **Правки по итоговому ревью:** сброс панели при `resume`, как при `/clear`; прерванный до ответа ход не заменяет последний; окно перечитывается при смене модели; строки `spawned`/`resumed` маскируются и укорачиваются; команда с `immediate`; встроенные серверы десктопа скрыты; `THIRD_PARTY_NOTICES.md`.
