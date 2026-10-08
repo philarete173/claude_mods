@@ -90,6 +90,11 @@ const WARN = 'warning'
 const BAD = 'error'
 // The dot of an MCP chip. The no-break space keeps the gap: a plain space at the end of a flex item may be dropped.
 const DOT = '●\u00a0'
+// The minus sign of the lines removed, not the hyphen.
+const MINUS = '\u2212'
+// The slash between the lines added and removed, a Text of its own. The no-break spaces keep the gaps, as DOT's does:
+// with plain ones at its edges `+8 / −1` may draw as `+8/−1`.
+const LINES_SEP = '\u00a0/\u00a0'
 
 const LIMIT_LABELS: Record<string, string> = { five_hour: '5-hour', seven_day: 'Weekly', spend_limit: 'Spend' }
 const AGENT_MARKS: Record<AgentStatus, { glyph: string; color?: string; isDim?: boolean }> = {
@@ -409,8 +414,6 @@ function topBlock(d: Draw): RenderElement {
 
 // ---- Project block ----
 
-const MINUS = '\u2212' // the minus sign of the lines removed, not the hyphen
-
 // The lines added and removed, `+8 / −1`: three Texts in a fixed cell, so the numbers stay whole when the label beside
 // them is cut.
 function linesCell(d: Draw, lines: { added: number; removed: number }): RenderElement {
@@ -419,7 +422,7 @@ function linesCell(d: Draw, lines: { added: number; removed: number }): RenderEl
   return (
     <Box flexDirection="row" flexShrink={0}>
       <Text color={OK}>{`+${lines.added}`}</Text>
-      <Text dimColor>{' / '}</Text>
+      <Text dimColor>{LINES_SEP}</Text>
       <Text color={BAD}>{`${MINUS}${lines.removed}`}</Text>
     </Box>
   )

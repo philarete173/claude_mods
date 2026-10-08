@@ -136,7 +136,9 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
   // The branch is `master`, and one file is modified: `+3 / −1`.
   on('process.run', (_$, e) => {
     const stdouts: Record<string, string> = { branch: 'master\n', status: ' M a.ts\0', diff: '3\t1\ta.ts\n' }
-    const stdout = stdouts[e.argv.slice(1).find(arg => !arg.startsWith('-')) ?? ''] ?? ''
+    // The command is the first word that is no option and no value of `-c`.
+    const command = e.argv.slice(1).find((arg, i, all) => !arg.startsWith('-') && all[i - 1] !== '-c') ?? ''
+    const stdout = stdouts[command] ?? ''
 
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -369,6 +371,7 @@ const PROJECT = 'a_project_folder_with_a_long_name'
 const BRANCH = 'feature/a-branch-with-a-long-name'
 const CHANGES = { files: 12, lines: { added: 1204, removed: 387 } }
 const MINUS = '\u2212' // the minus sign of the lines removed, not the hyphen
+const SEP = '\u00a0/\u00a0' // the slash between the lines: no-break spaces, which the desktop does not drop
 const LONG_TEXT = `Edit plugins/session-panel/hooks/view.tsx ${'and more '.repeat(10).trimEnd()}`
 // The outcomes of the lines, in turn: a short one, a long one, none, and a word.
 const OUTCOMES = ['✓ 0.1s', '✗ 1m 12s', undefined, 'denied']
@@ -470,7 +473,7 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
     const isDesktop = surface === 'desktop'
     for (const text of [
       'Project', 'online_shop', isDesktop ? 'master' : '🌿 master', isDesktop ? '1 file changed' : '📝 1 file changed',
-      '+3', ' / ', `${MINUS}1`,
+      '+3', SEP, `${MINUS}1`,
     ]) {
       expect(shown, `${surface}: ${text}`).toContain(text)
     }
@@ -1095,7 +1098,7 @@ test('the texts that can overrun a row carry the truncation props; the values ne
     }
     // A figure, a percent, a cost, the lines of the changes and a title are not cut.
     for (const text of [
-      '$148.59', '88.2%', '120%', '1m 18s', '$2.50', '+1204', ' / ', `${MINUS}387`, 'Usage', 'Session', 'Project',
+      '$148.59', '88.2%', '120%', '1m 18s', '$2.50', '+1204', SEP, `${MINUS}387`, 'Usage', 'Session', 'Project',
     ]) {
       const placed = textNode(tree, text)
       expect(placed, `${surface}: ${text}`).toBeDefined()
@@ -1607,7 +1610,7 @@ test('the desktop draws an icon for each section, the branch and the changes; th
   // The rows are v1's kind of line: an emoji and the text, in a row of their own.
   const [, , branchLine, changesLine] = childrenOf(projectOf(terminal))
   expect(textsOf(branchLine)).toEqual([`🌿 ${BRANCH}`])
-  expect(textsOf(changesLine)).toEqual(['📝 12 files changed', '+1204', ' / ', `${MINUS}387`])
+  expect(textsOf(changesLine)).toEqual(['📝 12 files changed', '+1204', SEP, `${MINUS}387`])
 })
 
 // The desktop drops an Svg whose alt is empty without a word: the validator accepts the tree, the image is not drawn
@@ -1784,7 +1787,6 @@ test('partial states draw what they have and leave the rest out', () => {
     const dash = textNode(draw(onSurface(FULL, surface)), '—')
     expect(dash?.node.props?.dimColor, surface).toBe(true)
     expect(dash?.parent?.props, surface).toMatchObject({ width: 7, justifyContent: 'flex-end' })
-
   }
 })
 
@@ -1903,7 +1905,7 @@ test('the Project block is a rule, the title with the folder dim at the right, t
     ])
 
     // The changes: an icon on the desktop, the label, which is cut and takes the room that is left, and the lines at
-    // the right: three Texts in a fixed cell, `+1204` in the success colour, ` / ` dim, and `−387` in the error colour.
+    // the right: three Texts in a fixed cell, `+1204` in the success colour, the slash dim, `−387` in the error one.
     const cells = childrenOf(changes)
     expect(cells.length, surface).toBe(isDesktop ? 3 : 2)
     if (isDesktop) expect(childrenOf(cells[0])[0]?.props, surface).toMatchObject({ alt: 'Changes', width: 14 })
@@ -1916,18 +1918,21 @@ test('the Project block is a rule, the title with the folder dim at the right, t
     expect(numbers?.props, surface).toMatchObject({ flexDirection: 'row', flexShrink: 0 })
     expect(childrenOf(numbers).map(el => [el.type, textsOf(el), ...styleOf(el)]), surface).toEqual([
       ['Text', ['+1204'], 'success', undefined, undefined],
-      ['Text', [' / '], undefined, true, undefined],
+      ['Text', [SEP], undefined, true, undefined],
       ['Text', [`${MINUS}387`], 'error', undefined, undefined],
     ])
   }
 })
 
-test('the minus of the lines removed is the minus sign U+2212, not a hyphen', () => {
+test('the lines removed use the minus sign U+2212, and the slash has no-break spaces, not plain ones', () => {
   expect(MINUS).toBe('\u2212')
+  expect(SEP).toBe('\u00a0/\u00a0')
   for (const surface of SURFACES) {
     const numbers = childrenOf(childrenOf(blockRows(draw(onSurface(FULL, surface))).changes).at(-1))
     expect(textsOf(numbers[2]), surface).toEqual(['\u2212387'])
-    expect(textsOf(numbers).join(''), surface).not.toContain('-')
+    // The slash is a Text of its own, and a plain space at the edge of a flex item may be dropped by the desktop.
+    expect(textsOf(numbers[1]), surface).toEqual(['\u00a0/\u00a0'])
+    expect(textsOf(numbers).join(''), surface).not.toMatch(/[ -]/)
   }
 })
 
@@ -1950,11 +1955,11 @@ test('the numbers are drawn when a line was added or removed, and not when there
     expect(numbersOf({ files: 2, lines: null }, surface), surface).toBeUndefined()
     expect(numbersOf({ files: 2, lines: { added: 0, removed: 0 } }, surface), surface).toBeUndefined()
     // One count of 0 is drawn as it is; the numbers are plain integers.
-    expect(numbersOf({ files: 1, lines: { added: 5, removed: 0 } }, surface), surface).toBe('+5 / \u22120')
-    expect(numbersOf({ files: 1, lines: { added: 0, removed: 7 } }, surface), surface).toBe('+0 / \u22127')
-    expect(numbersOf({ files: 3, lines: { added: 8, removed: 1 } }, surface), surface).toBe('+8 / \u22121')
+    expect(numbersOf({ files: 1, lines: { added: 5, removed: 0 } }, surface), surface).toBe(`+5${SEP}${MINUS}0`)
+    expect(numbersOf({ files: 1, lines: { added: 0, removed: 7 } }, surface), surface).toBe(`+0${SEP}${MINUS}7`)
+    expect(numbersOf({ files: 3, lines: { added: 8, removed: 1 } }, surface), surface).toBe(`+8${SEP}${MINUS}1`)
     expect(numbersOf({ files: 9, lines: { added: 1_234_567, removed: 20_000 } }, surface), surface).toBe(
-      '+1234567 / \u221220000',
+      `+1234567${SEP}${MINUS}20000`,
     )
 
     // With no numbers the row has no cell that holds its size but the icon's slot.
