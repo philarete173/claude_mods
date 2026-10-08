@@ -15,11 +15,13 @@ import {
   mergedLength,
   orderAgents,
   parseStatus,
+  plainText,
   pushLog,
   redact,
   shortType,
   shorten,
   splitCost,
+  stripFormat,
   sumNumstat,
   sumUsage,
   toolLabel,
@@ -83,7 +85,7 @@ test('computeTurnStats: the fixture of the brief', () => {
   expectNear(s.wholeTurnRate, 61.18, 0.005)
   // The last step: 477 tokens over its whole request, 6000 to 13700 ms: 477 / 7.7.
   expectNear(s.responseRate, 61.95, 0.005)
-  expect(s.tokensIn).toBe(12)
+  expect(s.tokensIn).toBe(99912) // all the input: 12 not cached, 99000 read from the cache, 900 written to it
   expect(s.tokensOut).toBe(777)
   expectNear(s.cachePct, 99.09, 0.005)
   expectNear(s.costUsd, 0.005)
@@ -146,9 +148,27 @@ test('computeTurnStats: without turn usage the step usages are summed', () => {
     ],
   }
   const s = computeTurnStats(acc, 33500, undefined, 5.005)
-  expect(s.tokensIn).toBe(100)
+  expect(s.tokensIn).toBe(400) // 100 not cached and 300 read from the cache
   expect(s.tokensOut).toBe(777)
   expect(s.cachePct).toBe(75)
+})
+
+test('computeTurnStats: Tokens in is all the input the turn sent, and the cache share is of that same input', () => {
+  const cases: Array<[usage: Usage, tokensIn: number, cachePct: number | null]> = [
+    [{ input_tokens: 5, cache_read_input_tokens: 100, cache_creation_input_tokens: 20, output_tokens: 7 }, 125, 80],
+    // Each part alone, and a part that is missing counts 0.
+    [{ input_tokens: 40 }, 40, 0],
+    [{ cache_read_input_tokens: 40 }, 40, 100],
+    [{ cache_creation_input_tokens: 40 }, 40, 0],
+    // The turn after a pause: the cache has expired, and the whole context is written to it. The cost is in the number.
+    [{ input_tokens: 3, cache_creation_input_tokens: 182_000, output_tokens: 900 }, 182_003, 0],
+    [{ output_tokens: 9 }, 0, null],
+  ]
+  for (const [usage, tokensIn, cachePct] of cases) {
+    const s = computeTurnStats(A, 1000, usage, null)
+    expect(s.tokensIn, JSON.stringify(usage)).toBe(tokensIn)
+    expect(s.cachePct, JSON.stringify(usage)).toBe(cachePct)
+  }
 })
 
 test('computeTurnStats: costUsd is null unless both readings exist', () => {
@@ -215,6 +235,86 @@ test('shorten', () => {
   expect(shorten('  a \n  b  ', 10)).toBe('a b')
   expect(shorten('abcdefghijk', 5)).toBe('abcd…')
   expect(shorten('abcde', 5)).toBe('abcde')
+})
+
+// U+202E (right-to-left override) and the other format characters (category Cf) draw nothing, but they reorder or join
+// what is around them: they are taken out.
+const FORMAT_CHARS: Array<[name: string, char: string]> = [
+  ['U+202E, the right-to-left override', '\u202E'],
+  ['U+202D, the left-to-right override', '\u202D'],
+  ['U+202A, the left-to-right embedding', '\u202A'],
+  ['U+2066, the left-to-right isolate', '\u2066'],
+  ['U+2069, the pop of an isolate', '\u2069'],
+  ['U+200E, the left-to-right mark', '\u200E'],
+  ['U+200B, the zero-width space', '\u200B'],
+  ['U+200D, the zero-width joiner', '\u200D'],
+  ['U+FEFF, the byte order mark', '\uFEFF'],
+  ['U+00AD, the soft hyphen', '\u00AD'],
+]
+
+test('stripFormat takes out the characters of category Cf, and leaves everything else as it was', () => {
+  for (const [name, char] of FORMAT_CHARS) expect(stripFormat(`a${char}b${char}${char}c`), name).toBe('abc')
+  // Letters of other scripts, accents, emoji, the plain space and the no-break space, tabs and line breaks stay.
+  const kept = 'main ветка é 日本語 🚀 a\u00A0b\tc\nd'
+  expect(stripFormat(kept)).toBe(kept)
+  expect(stripFormat('')).toBe('')
+})
+
+test('shorten takes the format characters out before it cuts', () => {
+  for (const [name, char] of FORMAT_CHARS) expect(shorten(`Edit ${char}fdp.exe`, 20), name).toBe('Edit fdp.exe')
+  // They do not count towards the length: 70 visible characters are no more than 70, with 30 of them mixed in.
+  const long = 'x'.repeat(70)
+  expect(shorten(`${long.slice(0, 35)}${'\u202E'.repeat(30)}${long.slice(35)}`, 70)).toBe(long)
+  // And a cut text ends in the ellipsis after the visible characters alone.
+  expect(shorten(`ab\u202Ecdefgh`, 5)).toBe('abcd…')
+  // A text of nothing else is empty.
+  expect(shorten('\u202E\u200B', 5)).toBe('')
+})
+
+test('redact takes the format characters out first: one inside a secret does not keep it from being masked', () => {
+  const split = `ghp_abc\u200Bdefgh12345678`
+  expect(redact(split)).toBe('•••')
+  // What the pane shows is shorten(redact(text)): the secret must not be there once the characters are gone.
+  expect(shorten(redact(`echo ${split}`), 64)).toBe('echo •••')
+  expect(redact('key sk-abcd\u202Eefgh1234 end')).toBe('key ••• end')
+  expect(redact('plain text')).toBe('plain text')
+})
+
+test('plainText takes the `**` of a pair, backticks and the `#` marks of a heading at a line start out', () => {
+  const cases: Array<[markdown: string, plain: string]> = [
+    ['**Verdict:** ok', 'Verdict: ok'],
+    ['**One** and **two**', 'One and two'],
+    ['a **b** c', 'a b c'],
+    ['**bold with spaces inside**', 'bold with spaces inside'], // the spaces inside stay: only the pair goes
+    ['`a`', 'a'],
+    ['run `git status` now', 'run git status now'],
+    ['```\ncode\n```', '\ncode\n'],
+    ['**`code`**', 'code'],
+    ['# Title', 'Title'],
+    ['# Title\nbody', 'Title\nbody'],
+    ['## Findings\n\n### Detail\ntext', 'Findings\n\nDetail\ntext'],
+    ['**One** and `two`', 'One and two'],
+    ['', ''],
+  ]
+  for (const [markdown, plain] of cases) expect(plainText(markdown), JSON.stringify(markdown)).toBe(plain)
+})
+
+test('plainText leaves `__`, a `**` with no pair or a space beside it, and a `#` that is no heading, alone', () => {
+  const kept = [
+    // Never `__`: a dunder is a name, not bold.
+    '__init__.py', '__Verdict:__ ok', 'def __init__(self): pass', 'snake__case',
+    // A `**` that stands alone or has a space beside it is an exponent, not bold.
+    'x ** 2', '2**10', 'a ** b ** c', '2 ** 10 and 3 ** 4', '**', '****', '** spaced **', '**bold **', '** bold**',
+    // A pair has to be on one line.
+    '**one\ntwo**',
+    // A `#` that is no heading: no space after it, or not at the start of a line.
+    '#hashtag', 'issue #12 is open', 'a # b',
+    // One star or one underscore is no mark.
+    '*one* and _two_ and snake_case',
+  ]
+  for (const text of kept) expect(plainText(text), JSON.stringify(text)).toBe(text)
+  // In a mix, the pair goes and the rest stays.
+  expect(plainText('**fixed `__init__.py`** and x ** 2')).toBe('fixed __init__.py and x ** 2')
 })
 
 test('redact', () => {

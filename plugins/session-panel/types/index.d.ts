@@ -33,6 +33,7 @@ export type TurnStats = {
   ttftMs: number | null
   wholeTurnRate: number | null
   responseRate: number | null
+  // All the input the turn sent: what was not cached, what was read from the cache and what was written to it.
   tokensIn: number
   tokensOut: number
   cachePct: number | null
@@ -65,9 +66,18 @@ export type PanelUsage = {
 export type PanelChanges = {
   // The files that changed: modified, added, deleted, renamed and new ones, each counted once.
   files: number
+  // True when the output of `git status` was cut (git's output has a limit): `files` then counts its complete entries
+  // only, so it is a lower bound, and `lines` is null. Absent when `files` is exact.
+  hasMoreFiles?: true
   // The lines added and removed, those of the new files included up to the limit that NEW_FILES_MAX in register.tsx
-  // sets; null when the counts are unknown, as on an unborn HEAD or after a diff that failed.
-  lines: { added: number; removed: number } | null
+  // sets; null when the counts are unknown, as on an unborn HEAD, after a diff that failed or after a cut status.
+  lines: {
+    added: number
+    removed: number
+    // True when new files past that limit, or a new file whose count failed, add no lines: `added` is then a lower
+    // bound. Absent when `added` is exact.
+    hasMoreAdded?: true
+  } | null
 }
 export type PanelProject = {
   // The folder of the session root.
@@ -76,6 +86,8 @@ export type PanelProject = {
   branch: string | null
   // Null when there is nothing to show: outside a git repository, on a clean tree, or when git failed. Also null from
   // the moment the name changes until the changes of the new folder are read: a count is never kept under another name.
+  // And null where they are not read: before the first turn of the main agent, and for a folder whose `git status`
+  // threw twice in a row (a timeout, or git that cannot be started).
   changes: PanelChanges | null
 }
 export type PanelMcp = { servers: { name: string }[] }

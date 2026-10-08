@@ -6,12 +6,12 @@
 // reference written in another file.
 import { atom, read, update } from 'claude-code'
 import type {
-  EngineInterface, PluginState, Register, SessionContextUsage, SessionCost, SessionRateLimit,
+  EngineInterface, PluginState, ProcessRunResult, Register, SessionContextUsage, SessionCost, SessionRateLimit,
 } from 'claude-code'
 
 import {
-  addAgentCost, attributeCost, computeTurnStats, fmtDuration, fmtTokens, fmtUsd, parseStatus, pushLog, redact,
-  shortType, shorten, sumNumstat, toolLabel,
+  addAgentCost, attributeCost, computeTurnStats, fmtDuration, fmtTokens, fmtUsd, parseStatus, plainText, pushLog,
+  redact, shortType, shorten, stripFormat, sumNumstat, toolLabel,
 } from './stats'
 import type { AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, Usage } from './stats'
 import { renderPane } from './view'
@@ -64,9 +64,22 @@ const GIT_READ: string[] = [
   'git', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'diff.autoRefreshIndex=false',
 ]
 
-// The variables that such a call runs with, set over the process's own. git 2.44 and later honour GIT_NO_LAZY_FETCH,
-// and older git ignores it.
+// The variables that such a call runs with, set over the process's own. git 2.44 and later, and some distributions'
+// 2.43 builds (a backport), honour GIT_NO_LAZY_FETCH; other git ignores it.
 const GIT_READ_ENV: Record<string, string> = { GIT_NO_LAZY_FETCH: '1' }
+
+// git's empty tree. As the source of attributes (GIT_ATTR_SOURCE) it leaves no .gitattributes in force, so no
+// attribute-selected filter (a clean or process filter, Git LFS among them) runs on an untracked file that a --no-index
+// call reads. `.git/info/attributes` and the person's own attributes file still apply, and a git that has no
+// GIT_ATTR_SOURCE ignores it. A SHA-256 repository rejects this id: git dies there, so its new files count no lines,
+// and the loop that counts them marks that (hasMoreAdded).
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+
+// What every --no-index call runs with: GIT_READ_ENV, and the empty tree as the source of attributes.
+const NO_INDEX_ENV: Record<string, string> = { ...GIT_READ_ENV, GIT_ATTR_SOURCE: EMPTY_TREE }
+
+// How many `git status` calls in a row may throw for one root before its changes are no longer read (statusThrows).
+const STATUS_THROWS_MAX = 2
 
 // How many new files have their lines counted. A new file is in no diff against HEAD, so each takes a git call of its
 // own; the files past this many add no lines, so past it the plus is a lower bound.
@@ -106,6 +119,20 @@ let projectWait: { askedAt: number; delayMs: number } | null = null
 // delay of the next delayed read follows it (PROJECT_GAP_FACTOR).
 let lastReadMs = 0
 
+// Whether a turn of the main agent has started since this module loaded; false at load. `git status` and `git diff` can
+// run filters that the repository's own config names, and the engine types give a hook no sign that the person has
+// accepted the folder; a turn cannot start before that. So the tree is read from the first turn on, and until then the
+// project is its name and its branch (`git branch` runs no filters). A reload of the module starts it over: the tree is
+// not read again until the next turn.
+let hasMainTurn = false
+
+// The root whose `git status` calls threw, and how many in a row. A throw is a timeout or a git that cannot be
+// started; a non-zero exit, as outside a repository, is none. Past STATUS_THROWS_MAX the changes of that root are not
+// read again while the module lives, and the branch still is: a session inside a huge tree, such as a dotfiles
+// repository in $HOME, would otherwise spend the whole timeout on every read. A status that does not throw resets the
+// count, and so does a read for another root.
+let statusThrows: { root: string; count: number } | null = null
+
 // ISO 8601 to epoch ms, which is what the `usage` value keeps; undefined when there is none or it does not parse.
 const toMs = (iso: string | undefined): number | undefined => {
   const ms = iso === undefined ? Number.NaN : Date.parse(iso)
@@ -143,7 +170,8 @@ const agentOutcome = (
   const took = fmtDuration(durationMs)
   if (status === 'stopped') return { text: status, outcome: took }
   if (status !== 'done') return { text: status, outcome: `✗ ${took}` }
-  const said = shorten(redact(answer), 80)
+  // The answer is markdown, which the pane shows as it is: its marks go first.
+  const said = shorten(redact(plainText(answer)), 80)
   const head = row.costUsd === null ? 'done' : `done · ${fmtUsd(row.costUsd)}`
 
   return { text: said === '' ? head : `${head} — ${said}`, outcome: `✓ ${took}` }
@@ -179,9 +207,16 @@ async function whoIs($: EngineInterface, agentId: string | undefined): Promise<s
   return row === undefined ? 'agent' : shortType(row.type)
 }
 
-// Folds or unfolds a section of the pane, and keeps the map in the store, where the next session finds it.
+// Folds or unfolds a section of the pane, and keeps the map in the store, where the next session finds it. The press
+// builds on the map of the store, which another session may have written since this one read it (or this one has not
+// read it yet): its folds stay, and only this section is set, to the opposite of what the pane shows now. When the
+// store has no map to give (it holds none, it cannot be read, or what it holds is no map of booleans) the pane's own
+// map is the base.
 async function toggleSection($: EngineInterface, id: SectionId): Promise<void> {
-  const folded = await update($, collapsedAtom, held => ({ ...held, [id]: held[id] !== true }))
+  const stored = await $.store.get('collapsed').catch(() => undefined)
+  const folded = await update($, collapsedAtom, held => ({
+    ...(isFoldedMap(stored) ? stored : held), [id]: held[id] !== true,
+  }))
   await $.store.set('collapsed', folded)
 }
 
@@ -209,13 +244,14 @@ async function refreshUsage($: EngineInterface): Promise<void> {
   await update($, mcpAtom, () => ({ servers }))
 }
 
-// The branch; the short commit on a detached HEAD; null outside a git repository or when git fails.
+// The branch; the short commit on a detached HEAD; null outside a git repository or when git fails. The format
+// characters of the name are taken out (stripFormat): a U+202E in it would reorder what the pane shows.
 async function gitBranch($: EngineInterface, root: string): Promise<string | null> {
   const init = { cwd: root, timeoutMs: 5000 }
   try {
     const named = await $.process.run(['git', 'branch', '--show-current'], init)
     if (named.exitCode !== 0) return null
-    const branch = named.stdout.trim()
+    const branch = stripFormat(named.stdout).trim()
     if (branch !== '') return branch
     const head = await $.process.run(['git', 'rev-parse', '--short', 'HEAD'], init)
 
@@ -225,46 +261,79 @@ async function gitBranch($: EngineInterface, root: string): Promise<string | nul
   }
 }
 
-// The stdout of a git call that reads the changes: null unless it ended with one of `exits` and was not cut, or when
-// it could not be started. A call that reads the tree (GIT_READ) passes `--no-optional-locks`: a plain one may refresh
+// Runs a git call that reads the changes; null when it threw: it ran past CHANGES_TIMEOUT_MS and was killed, or git
+// could not be started. A call that reads the tree (GIT_READ) passes `--no-optional-locks`: a plain one may refresh
 // the index and take index.lock, which makes the git commands of the person or the agent fail. It passes
 // `-c core.fsmonitor=false` too, or git may run the fsmonitor hook that the person configured, or start its own daemon,
 // and `-c diff.autoRefreshIndex=false`, or a diff of the tree refreshes the index all the same, taking index.lock and
 // rewriting .git/index. The `env` it is given, GIT_READ_ENV, keeps a partial clone from fetching the objects it lacks
 // from its remote, which is network.
-async function gitOut(
-  $: EngineInterface, argv: string[], cwd: string, exits: number[], env?: Record<string, string>,
-): Promise<string | null> {
+async function gitRun(
+  $: EngineInterface, argv: string[], cwd: string, env?: Record<string, string>,
+): Promise<ProcessRunResult | null> {
   try {
-    const init = { cwd, timeoutMs: CHANGES_TIMEOUT_MS, ...(env === undefined ? {} : { env }) }
-    const ran = await $.process.run(argv, init)
-
-    return exits.includes(ran.exitCode) && !ran.isStdoutTruncated ? ran.stdout : null
+    return await $.process.run(argv, { cwd, timeoutMs: CHANGES_TIMEOUT_MS, ...(env === undefined ? {} : { env }) })
   } catch {
     return null
   }
 }
 
+// The stdout of such a call: null unless it ended with one of `exits` and was not cut, or when it threw.
+async function gitOut(
+  $: EngineInterface, argv: string[], cwd: string, exits: number[], env?: Record<string, string>,
+): Promise<string | null> {
+  const ran = await gitRun($, argv, cwd, env)
+
+  return ran !== null && exits.includes(ran.exitCode) && !ran.isStdoutTruncated ? ran.stdout : null
+}
+
+// The status of the tree, as `git status --porcelain -z` prints it: `stdout` is its whole entries, and `isCut` says
+// that git's output was cut (a status that was cut ends inside an entry, and what follows its last NUL is no entry).
+// Null when there is no status to read: the call failed (as outside a git repository), or the reads of this root are
+// stopped, which two throws in a row do (statusThrows). `--ignore-submodules=dirty` keeps git from walking the work
+// tree of a submodule.
+async function gitStatus($: EngineInterface, root: string): Promise<{ stdout: string; isCut: boolean } | null> {
+  if (statusThrows?.root === root && statusThrows.count >= STATUS_THROWS_MAX) return null
+  const argv = [...GIT_READ, 'status', '--porcelain', '-z', '-uall', '--ignore-submodules=dirty']
+  const ran = await gitRun($, argv, root, GIT_READ_ENV)
+  const held = statusThrows?.root === root ? statusThrows.count : 0
+  statusThrows = { root, count: ran === null ? held + 1 : 0 }
+  if (ran === null || ran.exitCode !== 0) return null
+  const isCut = ran.isStdoutTruncated
+
+  return { stdout: isCut ? ran.stdout.slice(0, ran.stdout.lastIndexOf('\0') + 1) : ran.stdout, isCut }
+}
+
 // What differs from HEAD in the working tree: the files that changed, and the lines added and removed. Null when there
-// is nothing to show: outside a git repository, on a clean tree, or when the list of files cannot be had whole. The
-// lines are null when they cannot be had (an unborn HEAD has no HEAD to diff against).
+// is nothing to show: outside a git repository, on a clean tree, or when there is no status to read (gitStatus). A
+// status that was cut gives the files it listed whole as a lower bound (`hasMoreFiles`) and no lines. The lines are
+// null when they cannot be had (an unborn HEAD has no HEAD to diff against); `hasMoreAdded` says that `added` is a
+// lower bound.
 async function gitChanges($: EngineInterface, root: string): Promise<Changes> {
-  const status = await gitOut($, [...GIT_READ, 'status', '--porcelain', '-z', '-uall'], root, [0], GIT_READ_ENV)
+  const status = await gitStatus($, root)
   if (status === null) return null
-  const { files, newFiles } = parseStatus(status)
+  const { files, newFiles } = parseStatus(status.stdout)
   if (files === 0) return null
+  // The files that were cut off the status are in no count, so a diff against HEAD would give the lines of more files
+  // than `files` says: none are worked out.
+  if (status.isCut) return { files, hasMoreFiles: true, lines: null }
   // The tracked files, net against HEAD, over the whole repository: `-c diff.relative=false` overrides the person's
   // `diff.relative`, which would cut the lines to the folder of the session. Older git ignores the key (the option
   // --no-relative came with git 2.28, so it is no use there). --no-textconv and --no-ext-diff count the files
-  // themselves: no textconv or external diff program runs. The person's own filters may (clean and process filters,
-  // Git LFS among them), as in any `git status`. The `--` after HEAD makes it a revision: a file or folder named HEAD
-  // in the root would make it ambiguous, and git would refuse.
+  // themselves: no textconv or external diff program runs, and --ignore-submodules=dirty keeps git from walking the
+  // work tree of a submodule. The person's own filters may run on a tracked file that git has to read (clean and
+  // process filters, Git LFS among them), as in any `git status`: that is why the tree is read only from the first turn
+  // on (hasMainTurn). The `--` after HEAD makes it a revision: a file or folder named HEAD in the root would make it
+  // ambiguous, and git would refuse.
   const diffArgv = [
-    ...GIT_READ, '-c', 'diff.relative=false', 'diff', '--numstat', '--no-textconv', '--no-ext-diff', 'HEAD', '--',
+    ...GIT_READ, '-c', 'diff.relative=false', 'diff', '--numstat', '--no-textconv', '--no-ext-diff',
+    '--ignore-submodules=dirty', 'HEAD', '--',
   ]
   const diff = await gitOut($, diffArgv, root, [0], GIT_READ_ENV)
   if (diff === null) return { files, lines: null }
   let { added, removed } = sumNumstat(diff)
+  // The new files past NEW_FILES_MAX are not counted, and nor are those that follow a count that failed.
+  let hasMoreAdded = newFiles.length > NEW_FILES_MAX
   if (newFiles.length > 0) {
     // The paths of the status are relative to the top of the repository, which may not be the session root. Finding it
     // reads no object, so that call runs without GIT_READ_ENV.
@@ -272,32 +341,42 @@ async function gitChanges($: EngineInterface, root: string): Promise<Changes> {
     if (toplevel === null) return { files, lines: null }
     const top = toplevel.trim()
     // A new file is in no diff against HEAD, so it is diffed against nothing, one file at a time. --no-index exits 1
-    // when the sides differ, an empty new file included, and 0 when they do not; any other end adds nothing.
+    // when the sides differ, an empty new file included, and 0 when they do not. Any other end, a cut output or a throw
+    // is a failure, and the loop stops at the first: a timeout on each of 50 files would add up to a read of minutes.
+    // The lines counted so far stand, as a lower bound.
     for (const path of newFiles.slice(0, NEW_FILES_MAX)) {
       const argv = [
         ...GIT_READ, 'diff', '--no-index', '--numstat', '--no-textconv', '--no-ext-diff', '--', '/dev/null', path,
       ]
-      const counted = await gitOut($, argv, top, [0, 1], GIT_READ_ENV)
-      if (counted !== null) {
-        const lines = sumNumstat(counted)
-        added += lines.added
-        removed += lines.removed
+      const counted = await gitOut($, argv, top, [0, 1], NO_INDEX_ENV)
+      if (counted === null) {
+        hasMoreAdded = true
+        break
       }
+      const lines = sumNumstat(counted)
+      added += lines.added
+      removed += lines.removed
     }
   }
 
-  return { files, lines: { added, removed } }
+  return { files, lines: { added, removed, ...(hasMoreAdded ? { hasMoreAdded: true } : {}) } }
 }
 
-// Reads the project: the name (the folder of the session root), its branch, then the changes of its working tree. The
-// changes can take long to read, so it writes twice: the name and the branch as soon as git has said it, with the
-// changes held, or none when the name changed (a count of another folder is never shown under the new name), and then
-// the changes.
+// Reads the project: the name (the folder of the session root, without its format characters: a U+202E would reorder
+// what the pane shows), its branch, then the changes of its working tree. The changes can take long to read, so it
+// writes twice: the name and the branch as soon as git has said it, with the changes held, or none when the name
+// changed (a count of another folder is never shown under the new name), and then the changes. Before the first turn of
+// the main agent (hasMainTurn) there is no second step: the tree is not read, and the changes are none.
 async function refreshProject($: EngineInterface): Promise<void> {
   const root = await $.session.root()
-  const name = root.replace(/^.*[\\/]/, '')
+  const name = stripFormat(root.replace(/^.*[\\/]/, ''))
   const branch = await gitBranch($, root)
-  await update($, projectAtom, held => ({ name, branch, changes: held.name === name ? held.changes : null }))
+  // Read once: a turn that starts meanwhile has asked for a read of its own, which comes after this one.
+  const isTreeOpen = hasMainTurn
+  await update($, projectAtom, held => ({
+    name, branch, changes: isTreeOpen && held.name === name ? held.changes : null,
+  }))
+  if (!isTreeOpen) return
   const changes = await gitChanges($, root)
   await update($, projectAtom, held => ({ ...held, changes }))
 }
@@ -427,7 +506,12 @@ export const register: Register = on => {
       ticks += 1
       $.ui.invalidate('ui.render')
       syncAgents($).catch(() => undefined)
-      if (ticks % 2 === 0) refreshUsage($).catch(() => undefined)
+      if (ticks % 2 === 0) {
+        refreshUsage($).catch(() => undefined)
+        // A file that changed outside Claude's tools (an editor, a terminal, a background command that ended after its
+        // call returned) shows without a new turn. The gap rule keeps git to a quarter of the time.
+        $.clock.now().then(now => requestProjectLater($, now)).catch(() => undefined)
+      }
     })
     if ((await $.session.surfaces()).includes('desktop')) await $.ui.open({ id: PANE, title: 'Session' })
 
@@ -486,6 +570,12 @@ export const register: Register = on => {
 
   on('turn.start', async ($, e, next) => {
     const started = await next(e)
+    // The first turn of the main agent opens the tree to the reads (hasMainTurn), and asks for one. The types give this
+    // event no agentId (a subagent's run raises no turn.start), so one that had it is not a main turn.
+    if (!hasMainTurn && (!('agentId' in e) || e.agentId === undefined)) {
+      hasMainTurn = true
+      inBackground($, () => requestProject($))
+    }
     const now = await $.clock.now()
     const { cost } = await $.session.usage()
     await update($, turnAtom, () => ({
@@ -495,7 +585,7 @@ export const register: Register = on => {
     // with no text (a continuation) is no line of the log.
     if (e.text.trim() !== '') {
       const tag = /^<([^\s>/]+)/.exec(e.text)?.[1]
-      await addLog($, now, tag === undefined ? 'you' : 'engine', tag ?? shorten(redact(e.text), 70), 'info')
+      await addLog($, now, tag === undefined ? 'you' : 'engine', shorten(tag ?? redact(e.text), 70), 'info')
     }
 
     return started
@@ -540,6 +630,10 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     const t0 = await $.clock.now()
     const ran = await next(e)
+    // A call that came back as an error while its signal had aborted was abandoned: the person interrupted it, or a
+    // stop did. That is no fault of the tool, so the line is no error. The signal is read at once, before any other
+    // wait.
+    const isAbandoned = ran.isError === true && next.signal.aborted
     const t1 = await $.clock.now()
     // A call that may have changed a file asks for a read of the project, whatever its outcome (a command that failed
     // may have changed some first); a denied one never ran. A call that core ran read-only (a Bash `ls`) changed no
@@ -562,10 +656,13 @@ export const register: Register = on => {
       SPAWN_TOOLS.includes(e.tool) || e.tool === HANDBACK_TOOL ||
       (e.tool === 'SendMessage' && typeof e.to === 'string' && Object.hasOwn(await read($, agentsAtom), e.to))
     if (isFailed || !isAgentCall) {
-      // How it went is the outcome, a column of its own: the time it took behind a mark, or `denied`.
-      const outcome = ran.deny !== undefined ? 'denied' : `${isFailed ? '✗' : '✓'} ${fmtDuration(t1 - t0)}`
+      // How it went is the outcome, a column of its own: the time it took behind a mark, or `denied`. An abandoned call
+      // has the time alone, as a stopped subagent has, and is news, not a fault.
+      const took = fmtDuration(t1 - t0)
+      const outcome = ran.deny !== undefined ? 'denied' : isAbandoned ? took : `${isFailed ? '✗' : '✓'} ${took}`
+      const kind: LogKind = isAbandoned ? 'info' : isFailed ? 'error' : 'ok'
       const label = shorten(redact(toolLabel(e.tool, e, await $.session.root())), 64)
-      await addLog($, t1, await whoIs($, e.agentId), label, isFailed ? 'error' : 'ok', outcome)
+      await addLog($, t1, await whoIs($, e.agentId), label, kind, outcome)
     }
 
     return ran
@@ -618,13 +715,17 @@ export const register: Register = on => {
     if (spawned.agentId !== undefined) {
       const { agentId } = spawned
       const now = await $.clock.now()
-      const type = e.subagentType ?? e.name ?? 'agent'
+      // The Subagents list draws the description and the type as the row keeps them, so their format characters go
+      // here (a U+202E would reorder what the list shows). No other step writes a row from what the engine gave: a
+      // sync, a resume and the end of a run only change a row that is there.
+      const type = stripFormat(e.subagentType ?? e.name ?? 'agent')
+      const description = stripFormat(e.description)
       const row: AgentRow = {
-        id: agentId, description: e.description, type, model: spawned.model, status: 'running', startedAt: now,
-        endedAt: null, costUsd: null,
+        id: agentId, description, type, model: spawned.model, status: 'running', startedAt: now, endedAt: null,
+        costUsd: null,
       }
       await update($, agentsAtom, rows => ({ ...rows, [agentId]: row }))
-      await addLog($, now, 'main', shorten(redact(`spawned · ${type}: ${e.description}`), 70), 'info')
+      await addLog($, now, 'main', shorten(redact(`spawned · ${type}: ${description}`), 70), 'info')
     }
 
     return spawned

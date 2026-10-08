@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock, Plugin } from 'claude-code/testing'
-import type { On, PluginState, RenderSurface, SessionMessage, UiPane } from 'claude-code'
+import type { On, PluginState, RenderPropsOf, RenderSurface, SessionMessage, UiPane } from 'claude-code'
 
 import type { AgentRow, LogEntry, TurnAcc, TurnStats } from './stats'
 
@@ -30,26 +30,34 @@ const PANE_UP: UiPane = { id: 'session-panel', title: 'Session', isShown: true, 
 // by a diff (it takes index.lock and writes .git/index). Its options carry GIT_NO_LAZY_FETCH, so that a partial clone
 // does not fetch from its remote; the call of rev-parse reads no object, so it carries none. The diff against HEAD
 // has a pair of its own after GIT_READ, which overrides the person's `diff.relative`: it would cut the counts to the
-// folder of the session.
+// folder of the session. The status and that diff keep a submodule's work tree from being walked
+// (`--ignore-submodules=dirty`). A --no-index call has GIT_ATTR_SOURCE too: git's empty tree, so that no .gitattributes
+// selects a filter that would run on the new file. The branch is read with no GIT_READ and no options: it runs no
+// filters, so it is read before the tree is open (the first turn of the main agent opens it).
 const PROJECT_DELAY_MS = 1000
 const PROJECT_GAP_FACTOR = 4
 const GIT_READ = [
   'git', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'diff.autoRefreshIndex=false',
 ]
 const NO_LAZY_FETCH = { GIT_NO_LAZY_FETCH: '1' }
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+const NO_INDEX_ENV = { ...NO_LAZY_FETCH, GIT_ATTR_SOURCE: EMPTY_TREE }
 const BRANCH_RUN = { argv: ['git', 'branch', '--show-current'], init: { cwd: ROOT, timeoutMs: 5000 } }
 const STATUS_RUN = {
-  argv: [...GIT_READ, 'status', '--porcelain', '-z', '-uall'],
+  argv: [...GIT_READ, 'status', '--porcelain', '-z', '-uall', '--ignore-submodules=dirty'],
   init: { cwd: ROOT, timeoutMs: 10_000, env: NO_LAZY_FETCH },
 }
 const DIFF_RUN = {
-  argv: [...GIT_READ, '-c', 'diff.relative=false', 'diff', '--numstat', '--no-textconv', '--no-ext-diff', 'HEAD', '--'],
+  argv: [
+    ...GIT_READ, '-c', 'diff.relative=false', 'diff', '--numstat', '--no-textconv', '--no-ext-diff',
+    '--ignore-submodules=dirty', 'HEAD', '--',
+  ],
   init: { cwd: ROOT, timeoutMs: 10_000, env: NO_LAZY_FETCH },
 }
 const TOPLEVEL_RUN = { argv: ['git', 'rev-parse', '--show-toplevel'], init: { cwd: ROOT, timeoutMs: 10_000 } }
 const noIndexRun = (path: string, cwd: string) => ({
   argv: [...GIT_READ, 'diff', '--no-index', '--numstat', '--no-textconv', '--no-ext-diff', '--', '/dev/null', path],
-  init: { cwd, timeoutMs: 10_000, env: NO_LAZY_FETCH },
+  init: { cwd, timeoutMs: 10_000, env: NO_INDEX_ENV },
 })
 
 // A test's own `$` has no `state` noun, so a second plugin reads the session-panel values back through a command.
@@ -110,6 +118,41 @@ const WITH_REFUSER = { plugins: [READER, REFUSER] }
 const SLOW_READER = { plugins: [READER], timeoutMs: 30_000 }
 const TICKING_READER = { plugins: [READER, TICKER], timeoutMs: 30_000 }
 
+// A plugin above the mod's that settles a call before the chain beneath it has ended, as a hook above may: for a Bash
+// whose command says `abandon` it lets the chain run on, unawaited, and answers at once with an error of its own. The
+// dispatch beneath is then abandoned, and `next.signal` aborts in the mod's hook, which goes on until the call ends.
+// Like any plugin of a test it closes over nothing of this file.
+const ABANDONER: Plugin = {
+  name: 'abandoner',
+  tier: 'prepend',
+  register(on) {
+    on('tool.call', (_$, e, next) => {
+      if (e.tool !== 'Bash' || !e.command.includes('abandon')) return next(e)
+      next(e).catch(() => undefined)
+
+      return { isError: true as const, result: 'cut', text: 'cut' }
+    })
+  },
+}
+// A second plugin plays another session: it writes the map of folds into the store behind the pane's back (the map is
+// the text of the command's arguments, in JSON), and reads the store back.
+const OTHER_SESSION: Plugin = {
+  name: 'other-session',
+  register(on) {
+    on('command.run', { command: 'write-store' }, async ($, e) => {
+      await $.store.set('collapsed', JSON.parse(e.args))
+
+      return { text: 'written' }
+    })
+    on('command.run', { command: 'read-store' }, async $ => ({ text: JSON.stringify(await $.store.get('collapsed')) }))
+  },
+}
+const WITH_ABANDONER = { plugins: [READER, ABANDONER], timeoutMs: 30_000 }
+const WITH_STORE = { plugins: [READER, OTHER_SESSION], timeoutMs: 30_000 }
+const PANE_PROPS: RenderPropsOf['Pane'] = {
+  title: 'Session', isFocused: false, bodyColumns: 40, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {},
+}
+
 const readState = async ($: Engine): Promise<State> => {
   const ran = await $.command.run({ ...RUN, command: 'read-state' })
 
@@ -118,6 +161,16 @@ const readState = async ($: Engine): Promise<State> => {
 
 const agentsVersion = async ($: Engine): Promise<number> =>
   Number((await $.command.run({ ...RUN, command: 'read-agents-version' })).text)
+
+// The map of folds in the store as the second plugin reads it back, a write of it as another session would make it, and
+// the pane mounted on the desktop, where a press of a header can be made.
+const readStore = async ($: Engine): Promise<unknown> =>
+  JSON.parse((await $.command.run({ ...RUN, command: 'read-store' })).text ?? 'null')
+const writeStore = ($: Engine, value: unknown) =>
+  $.command.run({ ...RUN, command: 'write-store', args: JSON.stringify(value) })
+const mountPane = ($: Engine) => $.ui.mount({
+  plugin: 'session-panel', surface: 'desktop', component: 'Pane', requestId: 'session-panel', props: PANE_PROPS,
+})
 
 // claude-code/testing has no toBeCloseTo, so a tolerance is checked by hand.
 function expectNear(actual: number | null | undefined, expected: number, eps = 1e-9): void {
@@ -159,6 +212,7 @@ type World = {
   branch: string // what `git branch --show-current` prints
   gitExit: number // when it is not 0, the exit of every git call
   gitThrows: boolean // git cannot be started
+  statusThrows: boolean // `git status` alone cannot be run to its end (it times out): its call rejects
   status: GitAnswer // `git status --porcelain -z -uall`; a clean tree prints nothing
   diff: GitAnswer // `git diff --numstat HEAD`
   toplevel: GitAnswer // `git rev-parse --show-toplevel`
@@ -176,6 +230,7 @@ type World = {
   breakdowns: number // how many usage() calls asked for the context breakdown
   usageLag: number // how long usage() takes, in mock ms
   usageFails: boolean // usage() rejects
+  isStoreUnreadable: boolean // a read of the store rejects (only where `bottom` was given a store that can break)
   toolFailMs: number // how long a failing tool call takes, in mock ms
   tokens: number | undefined // context.tokens of usage(): none before the first response of the window
   rawMaxTokens: number | undefined // the window the breakdown measures against; undefined: no breakdown in usage()
@@ -189,10 +244,13 @@ type World = {
   runs: { argv: readonly string[]; init: unknown }[]
 }
 
+// The command of a git call: the first word that is no option and no value of `-c`.
+const gitCommand = (argv: readonly string[]): string | undefined =>
+  argv.slice(1).find((arg, i, all) => !arg.startsWith('-') && all[i - 1] !== '-c')
+
 // What git answers to a call, by the command it is: the short commit is the answer to any rev-parse but the top.
 const gitAnswer = (w: World, argv: readonly string[]): GitAnswer => {
-  // The command is the first word that is no option and no value of `-c`.
-  const command = argv.slice(1).find((arg, i, all) => !arg.startsWith('-') && all[i - 1] !== '-c')
+  const command = gitCommand(argv)
   if (command === 'branch') return ok(w.branch)
   if (command === 'status') return w.status
   if (command === 'diff') return argv.includes('--no-index') ? w.noIndex(argv.at(-1) ?? '') : w.diff
@@ -200,8 +258,10 @@ const gitAnswer = (w: World, argv: readonly string[]): GitAnswer => {
   return argv.includes('--show-toplevel') ? w.toplevel : ok('abc1234\n')
 }
 
-// The bottom of every chain: what the engine itself would answer, and what it was asked.
-const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): World => {
+// The bottom of every chain: what the engine itself would answer, and what it was asked. With `isStoreBreakable` the
+// store is one in memory that answers reads and writes, and rejects every read while `isStoreUnreadable` is set: a
+// store that fails as the engine's may, which `mock.store` never does.
+const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isStoreBreakable = false): World => {
   const w: World = {
     usd: 10,
     stepCost: 0,
@@ -211,6 +271,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
     branch: 'master\n',
     gitExit: 0,
     gitThrows: false,
+    statusThrows: false,
     status: ok(''),
     diff: ok(''),
     toplevel: ok('/repo\n'),
@@ -228,6 +289,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
     breakdowns: 0,
     usageLag: 0,
     usageFails: false,
+    isStoreUnreadable: false,
     toolFailMs: 0,
     tokens: undefined,
     rawMaxTokens: 1_000_000,
@@ -240,7 +302,21 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
     invalidated: [],
     runs: [],
   }
-  mock.store(on, store)
+  if (isStoreBreakable) {
+    const kept: Record<string, unknown> = { ...store }
+    on('store.get', (_$, e) => {
+      if (w.isStoreUnreadable) throw new Error('the store cannot be read')
+
+      return { value: kept[e.key] }
+    })
+    on('store.set', (_$, e) => {
+      kept[e.key] = JSON.parse(JSON.stringify(e.value))
+
+      return { value: undefined }
+    })
+  } else {
+    mock.store(on, store)
+  }
   on('session.start', () => ({ cwd: ROOT }))
   on('session.attach', (_$, e) => ({ clientId: e.clientId }))
   on('session.measure', (_$, e) => ({ changed: e.changed }))
@@ -336,7 +412,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
     w.maxGitInFlight = Math.max(w.maxGitInFlight, w.gitInFlight)
     if (w.gitLag > 0) await clock.sleep(w.gitLag)
     w.gitInFlight -= 1
-    if (w.gitThrows) throw new Error('spawn git ENOENT')
+    if (w.gitThrows || (w.statusThrows && gitCommand(e.argv) === 'status')) throw new Error('spawn git ENOENT')
     const answer = gitAnswer(w, e.argv)
 
     return {
@@ -385,6 +461,18 @@ const drive = async <T>(clock: MockClock, work: Promise<T>): Promise<T> => {
 
 // How many reads of the project git has served: each one starts with the call that names the branch.
 const reads = (w: World): number => w.runs.filter(run => run.argv.includes('--show-current')).length
+
+// A turn of the main agent starts. The first one opens the tree to the reads (the status, the diff and the lines of the
+// new files) and asks for a read of the project. It has no text, so it is no line of the log.
+const startTurn = ($: Engine, turnId = 't0') => $.turn.start({ text: '', turnId })
+
+// The session has started and its read, the branch alone while the tree is shut, is over: the first turn starts, and
+// the read that it asks for runs. `w.runs` is emptied first, so that it holds the calls of this read only.
+const openTree = async ($: Engine, clock: MockClock, w: World): Promise<void> => {
+  w.runs.length = 0
+  await startTurn($)
+  await clock.advance(1)
+}
 
 // The calls of tools that may change a file; the bottom ends each in 300 mock ms. An Edit whose new text starts with
 // `deny` is denied.
@@ -518,6 +606,99 @@ for (const [what, stored] of NOT_A_FOLDED_MAP) {
     })
 }
 
+// A press of a header folds a section and keeps the map in the store. The store holds what the last press of any
+// session left, so a press builds on it: what another session folded stays, and this section is set to the opposite of
+// what this pane shows now. The sections the pane draws here are `turn`, `mcp` and `sources`.
+test('a press keeps the folds that another session left in the store, and flips this section alone', WITH_STORE,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    bottom(on, clock, { collapsed: { mcp: true } })
+    await $.session.start(START)
+    await clock.advance(1)
+    const ui = await mountPane($)
+    expect((await readState($)).collapsed).toEqual({ mcp: true }) // what the pane loaded at the start
+
+    // Another session folds two more sections; this pane has not read that.
+    await writeStore($, { mcp: true, log: true, sources: true })
+    await ui.press({ key: 'toggle:turn' }) // the pane shows Turn stats open: it folds
+    const merged = { mcp: true, log: true, sources: true, turn: true }
+    expect(await readStore($)).toEqual(merged)
+    expect((await readState($)).collapsed).toEqual(merged) // the pane shows it now too
+
+    // A second press unfolds it, and the others stay.
+    await ui.press({ key: 'toggle:turn' })
+    expect(await readStore($)).toEqual({ ...merged, turn: false })
+    expect((await readState($)).collapsed).toEqual({ ...merged, turn: false })
+    await ui.unmount()
+  })
+
+test('the section that a press flips is the one the pane shows, whatever the store says of it', WITH_STORE,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    bottom(on, clock, { collapsed: { mcp: true } })
+    await $.session.start(START)
+    await clock.advance(1)
+    const ui = await mountPane($)
+
+    // The store says the MCP list is open (another session unfolded it), the pane shows it folded: a press unfolds
+    // what the person sees folded, and the store then says it is open.
+    await writeStore($, { mcp: false, log: true })
+    await ui.press({ key: 'toggle:mcp' })
+    expect(await readStore($)).toEqual({ mcp: false, log: true })
+    expect((await readState($)).collapsed).toEqual({ mcp: false, log: true })
+    await ui.unmount()
+  })
+
+test('a press before the map was loaded from the store at the start does not start from an empty map', WITH_STORE,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    bottom(on, clock, { collapsed: { mcp: true, sources: true } })
+    // No session.start: the pane was opened by an attach, and the start-up load has not run (or this session did not
+    // see it). The pane shows nothing folded.
+    const ui = await mountPane($)
+    expect((await readState($)).collapsed).toBeUndefined()
+
+    await ui.press({ key: 'toggle:turn' })
+    expect(await readStore($)).toEqual({ mcp: true, sources: true, turn: true })
+    expect((await readState($)).collapsed).toEqual({ mcp: true, sources: true, turn: true })
+    await ui.unmount()
+  })
+
+// A store that has no map to give: it holds none, or what it holds is no map of booleans. The press takes the pane's
+// own map, as it did before the store was read at all.
+for (const [what, stored] of [['no map', undefined], ...NOT_A_FOLDED_MAP] as Array<[string, unknown]>) {
+  test(`a press when the store holds ${what} builds on the map of the pane`, WITH_STORE, async ($, on) => {
+    const clock = mock.clock(on)
+    bottom(on, clock, { collapsed: { mcp: true } })
+    await $.session.start(START)
+    await clock.advance(1)
+    const ui = await mountPane($)
+    if (stored !== undefined) await writeStore($, stored)
+
+    await ui.press({ key: 'toggle:turn' })
+    expect(await readStore($)).toEqual({ mcp: true, turn: true })
+    expect((await readState($)).collapsed).toEqual({ mcp: true, turn: true })
+    await ui.unmount()
+  })
+}
+
+test('a press when the store cannot be read builds on the map of the pane, and is a press all the same', WITH_STORE,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock, { collapsed: { mcp: true } }, true)
+    await $.session.start(START)
+    await clock.advance(1)
+    const ui = await mountPane($)
+    await writeStore($, { mcp: true, log: true }) // what the store holds, if it could be read
+    w.isStoreUnreadable = true
+
+    await ui.press({ key: 'toggle:turn' })
+    expect((await readState($)).collapsed).toEqual({ mcp: true, turn: true }) // the pane's map, not the store's
+    w.isStoreUnreadable = false
+    expect(await readStore($)).toEqual({ mcp: true, turn: true }) // and the write went through
+    await ui.unmount()
+  })
+
 test('the command opens the pane, closes it when it is shown, and says why when it is not placed', async ($, on) => {
   const w = bottom(on, mock.clock(on))
   const run = async (): Promise<string | undefined> => (await $.command.run({ ...RUN, command: 'session-panel' })).text
@@ -558,9 +739,88 @@ test('start-up reads project, branch, skills and MCP servers in the background',
   expect(state.mcp).toEqual({ servers: [{ name: 'codebase-memory' }, { name: 'issue-hub' }] })
   expect(state.usage.skills).toBe(52)
   expect(w.breakdowns).toBe(1)
-  // The branch, then the changes: a clean tree stops at the status.
-  expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN])
+  // The branch alone: the tree waits for the first turn of the main agent.
+  expect(w.runs).toEqual([BRANCH_RUN])
 })
+
+// Everything that asks for a read of the project: the call of a tool that may change a file, a change of the folder,
+// the end of a main turn and the timer of the session, which asks every second tick. While the tree is shut each one
+// reads the branch and nothing else.
+test('before the first turn of the main agent the tree is not read: no status, no diff, no new file counted',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0?? n.ts\0')
+    w.diff = ok('3\t1\ta.ts\n')
+
+    await $.session.start(START)
+    await clock.advance(1)
+    await drive(clock, $.tool.call(edit()))
+    await $.classic.CwdChanged({ old_cwd: ROOT, new_cwd: ROOT })
+    await $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, turnId: 't0', reason: 'answer' })
+    await clock.advance(5 * 60_000)
+
+    // Several reads were asked for, so this is no empty check; none of them ran git on the tree.
+    expect(reads(w)).toBeGreaterThanOrEqual(4)
+    expect(w.runs.map(run => gitCommand(run.argv))).not.toContain('status')
+    expect(w.runs.map(run => gitCommand(run.argv))).not.toContain('diff')
+    expect(w.runs.every(run => run.argv.includes('--show-current'))).toBe(true)
+    expect((await readState($)).project).toEqual({ name: 'online_shop', branch: 'master', changes: null })
+  })
+
+test('the first turn of the main agent opens the tree and asks for a read: the status and the diff run right after it',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0')
+    w.diff = ok('3\t1\ta.ts\n')
+    await $.session.start(START)
+    await clock.advance(1)
+    expect((await readState($)).project.changes).toBeNull()
+    w.runs.length = 0
+
+    expect(await $.turn.start({ text: 'fix it', turnId: 't1' })).toEqual({ turnId: 't1' })
+    // The hook asks for the read and returns, so git has not run yet.
+    expect(w.runs).toEqual([])
+    await clock.advance(1)
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, DIFF_RUN])
+    expect((await readState($)).project.changes).toEqual({ files: 1, lines: { added: 3, removed: 1 } })
+
+    // Open for good: the next read has the tree too.
+    w.runs.length = 0
+    await $.classic.CwdChanged({ old_cwd: ROOT, new_cwd: ROOT })
+    await clock.advance(1)
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, DIFF_RUN])
+  })
+
+test('a turn that carries an agent id is no turn of the main agent: it does not open the tree, and asks for no read',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0')
+    w.diff = ok('3\t1\ta.ts\n')
+    await $.session.start(START)
+    await clock.advance(1)
+    w.runs.length = 0
+
+    // The engine's types give turn.start no agentId (a subagent's run raises none), so the input is cast.
+    await $.turn.start({ text: 'sub', turnId: 't1', agentId: 'a1' } as never)
+    await clock.advance(1)
+    expect(w.runs).toEqual([])
+
+    // A read that comes later is the branch alone still.
+    await $.classic.CwdChanged({ old_cwd: ROOT, new_cwd: ROOT })
+    await clock.advance(1)
+    expect(w.runs).toEqual([BRANCH_RUN])
+    expect((await readState($)).project.changes).toBeNull()
+
+    // The first turn of the main agent opens it.
+    w.runs.length = 0
+    await $.turn.start({ text: 'go', turnId: 't2' })
+    await clock.advance(1)
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, DIFF_RUN])
+    expect((await readState($)).project.changes).toEqual({ files: 1, lines: { added: 3, removed: 1 } })
+  })
 
 // The names of the MCP servers the panel lists after start-up, for a breakdown that holds a tool of each of `servers`.
 const listedAfterStart = async ($: Engine, on: On, servers: string[]): Promise<string[]> => {
@@ -598,10 +858,10 @@ test('a detached HEAD shows the short commit; a git that fails or cannot start l
     await $.session.start(START)
     await clock.advance(1)
     expect((await readState($)).project.branch).toBe('abc1234')
+    // The branch alone: the tree is shut until the first turn of the main agent.
     expect(w.runs.map(run => run.argv)).toEqual([
       ['git', 'branch', '--show-current'],
       ['git', 'rev-parse', '--short', 'HEAD'],
-      STATUS_RUN.argv,
     ])
     expect(w.runs[1]?.init).toEqual({ cwd: ROOT, timeoutMs: 5000 })
 
@@ -634,6 +894,7 @@ test('the project has the changes: a modified file and a new file, counted by th
 
     await $.session.start(START)
     await clock.advance(1)
+    await openTree($, clock, w)
 
     expect((await readState($)).project).toEqual({
       name: 'online_shop', branch: 'master', changes: { files: 2, lines: { added: 8, removed: 1 } },
@@ -642,12 +903,48 @@ test('the project has the changes: a modified file and a new file, counted by th
     expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, DIFF_RUN, TOPLEVEL_RUN, noIndexRun('n.ts', '/repo')])
   })
 
+// The argv and the environment of every call, spelled out: a mistake in the shared constants above is caught here.
+test('the status and the diff against HEAD ignore dirty submodules; each --no-index call has the empty tree as the '
+  + 'source of attributes', WITH_READER, async ($, on) => {
+  const clock = mock.clock(on)
+  const w = bottom(on, clock)
+  w.status = ok(' M a.ts\0?? n.ts\0?? m.ts\0')
+  w.diff = ok('3\t1\ta.ts\n')
+  await $.session.start(START)
+  await clock.advance(1)
+  await openTree($, clock, w)
+
+  const prefix = ['git', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'diff.autoRefreshIndex=false']
+  expect(w.runs.map(run => run.argv)).toEqual([
+    ['git', 'branch', '--show-current'],
+    [...prefix, 'status', '--porcelain', '-z', '-uall', '--ignore-submodules=dirty'],
+    [
+      ...prefix, '-c', 'diff.relative=false', 'diff', '--numstat', '--no-textconv', '--no-ext-diff',
+      '--ignore-submodules=dirty', 'HEAD', '--',
+    ],
+    ['git', 'rev-parse', '--show-toplevel'],
+    [...prefix, 'diff', '--no-index', '--numstat', '--no-textconv', '--no-ext-diff', '--', '/dev/null', 'n.ts'],
+    [...prefix, 'diff', '--no-index', '--numstat', '--no-textconv', '--no-ext-diff', '--', '/dev/null', 'm.ts'],
+  ])
+  const tree = { GIT_NO_LAZY_FETCH: '1' }
+  const noIndex = { ...tree, GIT_ATTR_SOURCE: '4b825dc642cb6eb9a060e54bf8d69288fbee4904' }
+  expect(w.runs.map(run => run.init)).toEqual([
+    { cwd: ROOT, timeoutMs: 5000 },
+    { cwd: ROOT, timeoutMs: 10_000, env: tree },
+    { cwd: ROOT, timeoutMs: 10_000, env: tree },
+    { cwd: ROOT, timeoutMs: 10_000 },
+    { cwd: '/repo', timeoutMs: 10_000, env: noIndex },
+    { cwd: '/repo', timeoutMs: 10_000, env: noIndex },
+  ])
+})
+
 test('a clean tree has no changes, and no diff is run', WITH_READER, async ($, on) => {
   const clock = mock.clock(on)
   const w = bottom(on, clock)
 
   await $.session.start(START)
   await clock.advance(1)
+  await openTree($, clock, w)
 
   expect((await readState($)).project.changes).toBeNull()
   expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN])
@@ -662,22 +959,71 @@ test('outside a git repository, where every git call exits 128, there is no bran
 
     await $.session.start(START)
     await clock.advance(1)
+    await openTree($, clock, w)
 
     expect((await readState($)).project).toEqual({ name: 'online_shop', branch: null, changes: null })
     expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN])
   })
 
-test('a status that is cut short gives no changes: a cut list cannot give an exact count', WITH_READER,
-  async ($, on) => {
+// What a status that git cut short gives: the files in its whole entries, as a lower bound (`hasMoreFiles`), and no
+// lines, so no diff runs and no new file is counted. What follows the last NUL is the beginning of an entry, which is
+// no entry.
+const CUT_STATUSES: Array<[what: string, stdout: string, files: number]> = [
+  ['an entry cut in its path', ' M a.ts\0?? n.ts\0 M b', 2],
+  ['an entry cut in its status letters', ' M a.ts\0?? n.ts\0 ', 2],
+  ['a cut that falls on a NUL', ' M a.ts\0?? n.ts\0', 2],
+  ['a rename cut in the path it came from', 'R  new.ts\0old.ts\0 M c.ts\0R  new2.ts\0ol', 3],
+  ['one whole entry and the beginning of the next', ' M a.ts\0 M b.t', 1],
+]
+for (const [what, stdout, files] of CUT_STATUSES) {
+  test(`a status cut at ${what} gives ${files} file${files === 1 ? '' : 's'} as a lower bound and no lines`,
+    WITH_READER, async ($, on) => {
+      const clock = mock.clock(on)
+      const w = bottom(on, clock)
+      w.status = { exitCode: 0, stdout, isStdoutTruncated: true }
+
+      await $.session.start(START)
+      await clock.advance(1)
+      await openTree($, clock, w)
+
+      expect((await readState($)).project).toEqual({
+        name: 'online_shop', branch: 'master', changes: { files, hasMoreFiles: true, lines: null },
+      })
+      expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN]) // no diff, no top of the repository, no new file
+    })
+}
+
+// A count of 0 is nothing to show: a status that was cut before its first whole entry, as one with no entry.
+for (const stdout of ['', ' M a.t', '??']) {
+  test(`a status cut to ${JSON.stringify(stdout)} has no whole entry: no changes`, WITH_READER, async ($, on) => {
     const clock = mock.clock(on)
     const w = bottom(on, clock)
-    w.status = { ...ok(' M a.ts\0'), isStdoutTruncated: true }
+    w.status = { exitCode: 0, stdout, isStdoutTruncated: true }
 
     await $.session.start(START)
     await clock.advance(1)
+    await openTree($, clock, w)
 
     expect((await readState($)).project).toEqual({ name: 'online_shop', branch: 'master', changes: null })
     expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN])
+  })
+}
+
+test('a status that is whole and has files carries no mark of a lower bound: its exact counts have neither key',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0?? n.ts\0')
+    w.diff = ok('3\t1\ta.ts\n')
+
+    await $.session.start(START)
+    await clock.advance(1)
+    await openTree($, clock, w)
+
+    const { changes } = (await readState($)).project
+    expect(changes).toEqual({ files: 2, lines: { added: 4, removed: 1 } })
+    expect(Object.keys(changes ?? {})).toEqual(['files', 'lines'])
+    expect(Object.keys(changes?.lines ?? {})).toEqual(['added', 'removed'])
   })
 
 // Reads where the files are counted and the lines are not: what git answers, and the calls made before the lines are
@@ -707,14 +1053,19 @@ for (const [what, answers, runs] of LINES_UNKNOWN) {
 
       await $.session.start(START)
       await clock.advance(1)
+      await openTree($, clock, w)
 
       expect((await readState($)).project.changes).toEqual({ files: 2, lines: null })
       expect(w.runs).toEqual(runs)
     })
 }
 
-test('only the first 50 new files are counted, one git call each, in the order of the status', WITH_READER,
-  async ($, on) => {
+// The paths that the --no-index calls were made for, in the order of the calls.
+const countedPaths = (w: World): unknown[] =>
+  w.runs.filter(run => run.argv.includes('--no-index')).map(run => run.argv.at(-1))
+
+test('only the first 50 new files are counted, one git call each, in order; past them the plus is a lower bound',
+  WITH_READER, async ($, on) => {
     const clock = mock.clock(on)
     const w = bottom(on, clock)
     w.status = ok(Array.from({ length: 51 }, (_, i) => `?? n${i}.ts\0`).join(''))
@@ -722,37 +1073,84 @@ test('only the first 50 new files are counted, one git call each, in the order o
 
     await $.session.start(START)
     await clock.advance(1000)
+    await openTree($, clock, w)
+    await clock.advance(1000)
 
-    const counted = w.runs.filter(run => run.argv.includes('--no-index')).map(run => run.argv.at(-1))
-    expect(counted).toEqual(Array.from({ length: 50 }, (_, i) => `n${i}.ts`))
+    expect(countedPaths(w)).toEqual(Array.from({ length: 50 }, (_, i) => `n${i}.ts`))
     // The 51st is a changed file all the same; each of the 50 has one line, so the plus is a lower bound.
-    expect((await readState($)).project.changes).toEqual({ files: 51, lines: { added: 50, removed: 0 } })
+    expect((await readState($)).project.changes).toEqual({
+      files: 51, lines: { added: 50, removed: 0, hasMoreAdded: true },
+    })
     expect(w.maxGitInFlight).toBe(1) // one after another
   })
 
-test('a new file whose diff fails adds no lines, and the others still count', WITH_READER, async ($, on) => {
+test('exactly 50 new files are all counted, and the plus is exact', WITH_READER, async ($, on) => {
   const clock = mock.clock(on)
   const w = bottom(on, clock)
-  w.status = ok(['a', 'b', 'c', 'd', 'e', 'f', 'g'].map(name => `?? ${name}.ts\0`).join(''))
-  const answers: Record<string, GitAnswer> = {
-    'a.ts': { exitCode: 1, stdout: '5\t0\t/dev/null => a.ts\n' }, // the normal answer: exit 1, the files differ
-    'b.ts': { exitCode: 128, stdout: '9\t0\t/dev/null => b.ts\n' }, // a call that failed: what it printed is no count
-    'c.ts': { exitCode: 1, stdout: '0\t0\t/dev/null => c.ts\n' }, // an empty file, as git answers it: no lines
-    'd.ts': { exitCode: 1, stdout: '8\t0\t/dev/null => d.ts\n', isStdoutTruncated: true }, // a cut output is no count
-    'e.ts': ok('2\t0\t/dev/null => e.ts\n'), // exit 0 counts as well
-    'g.ts': { exitCode: 1, stdout: '' }, // a file that is gone: git says so on stderr, exits 1 and prints nothing
-  }
-  w.noIndex = path => {
-    if (path === 'f.ts') throw new Error('spawn git ENOENT') // a call that cannot be made
-    return answers[path] ?? ok('')
-  }
+  w.status = ok(Array.from({ length: 50 }, (_, i) => `?? n${i}.ts\0`).join(''))
 
   await $.session.start(START)
   await clock.advance(1)
+  await openTree($, clock, w)
 
-  expect((await readState($)).project.changes).toEqual({ files: 7, lines: { added: 7, removed: 0 } })
-  expect(w.runs.filter(run => run.argv.includes('--no-index'))).toHaveLength(7) // each one was tried
+  expect(countedPaths(w)).toHaveLength(50)
+  const { changes } = (await readState($)).project
+  expect(changes).toEqual({ files: 50, lines: { added: 50, removed: 0 } })
+  expect('hasMoreAdded' in (changes?.lines ?? {})).toBe(false)
 })
+
+// The new files that git could not count whole: the call rejects (a timeout, or git that cannot be started), exits
+// with something but 0 or 1, or has its stdout cut.
+const FAILED_COUNTS: Array<[what: string, answer: (path: string) => GitAnswer]> = [
+  ['rejects', () => {
+    throw new Error('spawn git ENOENT')
+  }],
+  ['exits 128', () => ({ exitCode: 128, stdout: '9\t0\t/dev/null => c.ts\n' })], // what it printed is no count
+  ['has its stdout cut', () => ({ exitCode: 1, stdout: '9\t0\t/dev/null => c.ts\n', isStdoutTruncated: true })],
+]
+for (const [what, answer] of FAILED_COUNTS) {
+  test(`the loop over the new files stops at the first call that ${what}: the lines so far stand as a lower bound`,
+    WITH_READER, async ($, on) => {
+      const clock = mock.clock(on)
+      const w = bottom(on, clock)
+      w.status = ok(['a', 'b', 'c', 'd', 'e'].map(name => `?? ${name}.ts\0`).join(''))
+      // a and b have 5 lines each; c fails; d and e would have 5 each, and are never tried.
+      w.noIndex = path => (path === 'c.ts' ? answer(path) : { exitCode: 1, stdout: `5\t0\t/dev/null => ${path}\n` })
+
+      await $.session.start(START)
+      await clock.advance(1)
+      await openTree($, clock, w)
+
+      expect(countedPaths(w)).toEqual(['a.ts', 'b.ts', 'c.ts'])
+      expect((await readState($)).project.changes).toEqual({
+        files: 5, lines: { added: 10, removed: 0, hasMoreAdded: true },
+      })
+    })
+}
+
+test('a new file that is empty, gone or counted by an exit of 0 is no failure: every one is tried, the plus is exact',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(['a', 'c', 'e', 'g', 'h'].map(name => `?? ${name}.ts\0`).join(''))
+    const answers: Record<string, GitAnswer> = {
+      'a.ts': { exitCode: 1, stdout: '5\t0\t/dev/null => a.ts\n' }, // the normal answer: exit 1, the files differ
+      'c.ts': { exitCode: 1, stdout: '0\t0\t/dev/null => c.ts\n' }, // an empty file, as git answers it: no lines
+      'e.ts': ok('2\t0\t/dev/null => e.ts\n'), // exit 0 counts as well
+      'g.ts': { exitCode: 1, stdout: '' }, // a file that is gone: git says so on stderr, exits 1 and prints nothing
+      'h.ts': { exitCode: 1, stdout: '-\t-\t/dev/null => h.ts\n' }, // a binary file: no lines
+    }
+    w.noIndex = path => answers[path] ?? ok('')
+
+    await $.session.start(START)
+    await clock.advance(1)
+    await openTree($, clock, w)
+
+    const { changes } = (await readState($)).project
+    expect(changes).toEqual({ files: 5, lines: { added: 7, removed: 0 } })
+    expect('hasMoreAdded' in (changes?.lines ?? {})).toBe(false)
+    expect(countedPaths(w)).toHaveLength(5) // each one was tried
+  })
 
 test('a nested repository is a changed file with no lines: no git call counts it', WITH_READER, async ($, on) => {
   const clock = mock.clock(on)
@@ -761,10 +1159,162 @@ test('a nested repository is a changed file with no lines: no git call counts it
 
   await $.session.start(START)
   await clock.advance(1)
+  await openTree($, clock, w)
 
   expect((await readState($)).project.changes).toEqual({ files: 1, lines: { added: 0, removed: 0 } })
   expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, DIFF_RUN])
 })
+
+// The calls of git that read the tree, by the command they run.
+const statusRuns = (w: World): number => w.runs.filter(run => gitCommand(run.argv) === 'status').length
+
+// A read of the project asked for by a change of the folder, over by the time the clock has moved on 1 ms.
+const askRead = async ($: Engine, clock: MockClock): Promise<void> => {
+  await $.classic.CwdChanged({ old_cwd: ROOT, new_cwd: ROOT })
+  await clock.advance(1)
+}
+
+// Two `git status` calls in a row that throw, for one root, stop the reads of its changes: a huge tree (a dotfiles
+// repository in $HOME) would spend the whole timeout on each read. The branch is still read.
+test('two status calls in a row that throw stop the changes reads for that root, for as long as the module lives',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0')
+    w.diff = ok('3\t1\ta.ts\n')
+    await $.session.start(START)
+    await clock.advance(1)
+    w.statusThrows = true // the status times out, as in a tree that git cannot walk in 10 s
+    await openTree($, clock, w)
+    expect(statusRuns(w)).toBe(1)
+    await askRead($, clock)
+    expect(statusRuns(w)).toBe(2) // two throws in a row
+
+    // The third read reads the branch, and runs no status, though the status would be fine now.
+    w.statusThrows = false
+    w.runs.length = 0
+    await askRead($, clock)
+    expect(w.runs).toEqual([BRANCH_RUN])
+    expect((await readState($)).project).toEqual({ name: 'online_shop', branch: 'master', changes: null })
+    // And so on, whatever asks: a call of a tool, the end of a turn, the timer of the session, a later turn.
+    w.runs.length = 0
+    await drive(clock, $.tool.call(edit()))
+    await $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, turnId: 't0', reason: 'answer' })
+    await startTurn($, 't2')
+    await clock.advance(5 * 60_000)
+    expect(reads(w)).toBeGreaterThanOrEqual(3)
+    expect(statusRuns(w)).toBe(0)
+    expect((await readState($)).project.changes).toBeNull()
+  })
+
+test('a throw, a status that works and a throw again do not stop the reads: only a second throw in a row does',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0')
+    w.diff = ok('3\t1\ta.ts\n')
+    await $.session.start(START)
+    await clock.advance(1)
+    w.statusThrows = true
+    await openTree($, clock, w) // throw
+    w.statusThrows = false
+    await askRead($, clock) // a status that works: the count starts over
+    expect((await readState($)).project.changes).toEqual({ files: 1, lines: { added: 3, removed: 1 } })
+    w.statusThrows = true
+    await askRead($, clock) // throw
+    w.statusThrows = false
+    await askRead($, clock) // it is read, and works
+    w.statusThrows = true
+    await askRead($, clock) // throw
+    expect(statusRuns(w)).toBe(5)
+
+    w.statusThrows = false
+    await askRead($, clock) // one throw in a row so far: still read
+    expect(statusRuns(w)).toBe(6)
+    expect((await readState($)).project.changes).toEqual({ files: 1, lines: { added: 3, removed: 1 } })
+  })
+
+test('a status that exits with an error is no throw: outside a repository the reads go on, and the count starts over',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    w.statusThrows = true
+    await openTree($, clock, w) // throw
+    w.statusThrows = false
+    w.gitExit = 128 // outside a git repository: every call exits 128
+    await askRead($, clock)
+    await askRead($, clock)
+    await askRead($, clock)
+    expect(statusRuns(w)).toBe(4) // all of them ran: an exit is no throw, and each one cleared the count
+
+    w.statusThrows = true
+    w.gitExit = 0
+    await askRead($, clock)
+    w.statusThrows = false
+    w.status = ok(' M a.ts\0')
+    w.diff = ok('3\t1\ta.ts\n')
+    await askRead($, clock)
+    expect(statusRuns(w)).toBe(6) // one throw, then read again
+    expect((await readState($)).project.changes).toEqual({ files: 1, lines: { added: 3, removed: 1 } })
+  })
+
+test('the reads of another root go on, and the root that was stopped reads again once another has been read',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0')
+    w.diff = ok('3\t1\ta.ts\n')
+    await $.session.start(START)
+    await clock.advance(1)
+    w.statusThrows = true
+    await openTree($, clock, w)
+    await askRead($, clock)
+    expect(statusRuns(w)).toBe(2) // ROOT is stopped
+    w.statusThrows = false
+
+    // Another folder: its changes are read, and shown under its own name.
+    w.root = '/work/other_repo'
+    w.runs.length = 0
+    await askRead($, clock)
+    expect(w.runs.map(run => [gitCommand(run.argv), run.init])).toEqual([
+      ['branch', { cwd: '/work/other_repo', timeoutMs: 5000 }],
+      ['status', { cwd: '/work/other_repo', timeoutMs: 10_000, env: { GIT_NO_LAZY_FETCH: '1' } }],
+      ['diff', { cwd: '/work/other_repo', timeoutMs: 10_000, env: { GIT_NO_LAZY_FETCH: '1' } }],
+    ])
+    expect((await readState($)).project).toEqual({
+      name: 'other_repo', branch: 'master', changes: { files: 1, lines: { added: 3, removed: 1 } },
+    })
+
+    // Back to the first one: the read of the other has cleared the count, so the status runs again.
+    w.root = ROOT
+    w.runs.length = 0
+    await askRead($, clock)
+    expect(statusRuns(w)).toBe(1)
+    expect((await readState($)).project).toEqual({
+      name: 'online_shop', branch: 'master', changes: { files: 1, lines: { added: 3, removed: 1 } },
+    })
+  })
+
+test('throws for two roots in a row are no two for one root: the count is that of one root', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    w.statusThrows = true
+    await openTree($, clock, w) // ROOT: a throw
+    w.root = '/work/other_repo'
+    await askRead($, clock) // another root: a throw, for it the first
+    w.root = ROOT
+    await askRead($, clock) // ROOT again: the first throw in a row for it
+    expect(statusRuns(w)).toBe(3)
+    await askRead($, clock) // the second in a row: the last that runs
+    expect(statusRuns(w)).toBe(4)
+    await askRead($, clock)
+    expect(statusRuns(w)).toBe(4)
+  })
 
 test('a call that may change a file reads the project 1000 ms after it ends, and not before', WITH_READER,
   async ($, on) => {
@@ -772,6 +1322,7 @@ test('a call that may change a file reads the project 1000 ms after it ends, and
     const w = bottom(on, clock)
     await $.session.start(START)
     await clock.advance(1)
+    await openTree($, clock, w)
     w.runs.length = 0
     w.status = ok(' M a.ts\0')
     w.diff = ok('2\t1\ta.ts\n')
@@ -942,6 +1493,7 @@ test('a request while a read runs gives one more read after it, and the two neve
     const w = bottom(on, clock)
     await $.session.start(START)
     await clock.advance(1)
+    await openTree($, clock, w)
     w.runs.length = 0
     w.maxGitInFlight = 0
     w.gitLag = 300 // a read is two calls, so it takes 600 ms
@@ -979,6 +1531,7 @@ for (const [what, ask] of REQUESTS) {
       const w = bottom(on, clock)
       await $.session.start(START)
       await clock.advance(1)
+      await openTree($, clock, w)
       w.runs.length = 0
       w.maxGitInFlight = 0
       w.gitLag = 1000 // a read is two calls, so it takes 2 s
@@ -994,6 +1547,7 @@ for (const [what, ask] of REQUESTS) {
     })
 }
 
+// The tree is shut until the first turn, so each read here is the branch alone, a call of 300 ms.
 test('the read that the start of the session asks for goes through the runner too', WITH_READER, async ($, on) => {
   const clock = mock.clock(on)
   const w = bottom(on, clock)
@@ -1007,7 +1561,7 @@ test('the read that the start of the session asks for goes through the runner to
   expect(w.runs).toEqual([BRANCH_RUN])
 
   await clock.advance(5000)
-  expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, BRANCH_RUN, STATUS_RUN])
+  expect(w.runs).toEqual([BRANCH_RUN, BRANCH_RUN])
   expect(w.maxGitInFlight).toBe(1)
 })
 
@@ -1017,6 +1571,7 @@ test('a read that fails does not stop the next one: a request that came meanwhil
     const w = bottom(on, clock)
     await $.session.start(START)
     await clock.advance(1)
+    await openTree($, clock, w)
     w.runs.length = 0
     w.rootLag = 300
     w.rootFailures = 1 // the first read fails, after 300 ms
@@ -1079,7 +1634,9 @@ for (const [lag, delay] of READ_DELAYS) {
       const w = bottom(on, clock)
       w.gitLag = lag
       await $.session.start(START)
-      await clock.advance(1 + 2 * lag) // the read of the start of the session is over
+      await clock.advance(1 + lag) // the read of the start of the session is over: the branch alone, the tree is shut
+      await startTurn($)
+      await clock.advance(1 + 2 * lag) // the read that the first turn asked for is over: the branch and the status
       w.runs.length = 0
       expect(delay).toBe(Math.max(PROJECT_DELAY_MS, PROJECT_GAP_FACTOR * 2 * lag))
 
@@ -1117,7 +1674,9 @@ test('a read whose git calls are refused after 600 ms makes the next delayed rea
     w.gitThrows = true // each call is refused after its lag
     w.gitLag = 300
     await $.session.start(START)
-    await clock.advance(1 + 2 * 300)
+    await clock.advance(1 + 300) // the branch alone: the tree is shut
+    await startTurn($)
+    await clock.advance(1 + 2 * 300) // the branch, then the status: two calls
     w.runs.length = 0
 
     await $.tool.call(instant())
@@ -1141,7 +1700,9 @@ for (const [gap, isRead] of SCALED_WAITS) {
     const w = bottom(on, clock)
     w.gitLag = 300
     await $.session.start(START)
-    await clock.advance(1 + 2 * 300)
+    await clock.advance(1 + 300) // the branch alone: the tree is shut
+    await startTurn($)
+    await clock.advance(1 + 2 * 300) // the branch, then the status: two calls
     w.runs.length = 0
 
     await $.tool.call(instant()) // asks, with a delay of 2400 ms; the timer is refused
@@ -1154,17 +1715,20 @@ for (const [gap, isRead] of SCALED_WAITS) {
 
 // A read that spans a suspend or a clock jump takes hours by the clock, and a delayed read then waits four times that.
 // The wait it set must not outlive the fast reads that come after it: a wait counts for twice the shorter of its own
-// delay and the delay a new call would get. Here the read of the start takes an hour, so the first call asks for four
-// hours; the end of a turn reads at once, in 600 ms, so a new call would get 2400 ms, and the window is 4800 ms from
-// the call that asked. A call inside it adds nothing, one at its edge asks again: the read comes 7200 ms after the
+// delay and the delay a new call would get. Here the read of the first turn takes an hour, so the first call asks for
+// four hours; the end of a turn reads at once, in 600 ms, so a new call would get 2400 ms, and the window is 4800 ms
+// from the call that asked. A call inside it adds nothing, one at its edge asks again: the read comes 7200 ms after the
 // first call, not four hours.
-test('a wait set after a read of an hour does not outlive the fast read that follows it', WITH_READER,
+test('a wait set after a read of an hour does not outlive the fast read that follows it', TICKING_READER,
   async ($, on) => {
     const HOUR = 3_600_000
     const clock = mock.clock(on)
     const w = bottom(on, clock)
-    w.rootLag = HOUR // the read of the start of the session takes an hour: a suspend in the middle of it
-    await $.session.start(START)
+    // The session does not start: its timer would ask for a read every minute of that hour, and each ask would mark the
+    // read under way stale. The attach arms the timer of TICKER, so that the clock moves fast.
+    await $.session.attach({ surface: 'terminal', clientId: 'terminal:default' })
+    w.rootLag = HOUR // the read that the first turn asks for takes an hour: a suspend in the middle of it
+    await startTurn($)
     await clock.advance(1 + HOUR)
     w.rootLag = 0
     w.runs.length = 0
@@ -1219,6 +1783,7 @@ test('the read that a request during a slow read brings starts as that read ends
     const w = bottom(on, clock)
     await $.session.start(START)
     await clock.advance(1)
+    await openTree($, clock, w)
     w.runs.length = 0
     w.gitLag = 300 // a read is two calls, so it takes 600 ms, and a delayed read would wait 2400 ms after it
     const ask = () => $.classic.CwdChanged({ old_cwd: ROOT, new_cwd: ROOT })
@@ -1242,6 +1807,7 @@ test('the branch is in the project value before the changes are read, with the c
     w.diff = ok('3\t1\ta.ts\n')
     await $.session.start(START)
     await clock.advance(1)
+    await openTree($, clock, w)
     const first = { name: 'online_shop', branch: 'master', changes: { files: 1, lines: { added: 3, removed: 1 } } }
     expect((await readState($)).project).toEqual(first)
 
@@ -1269,6 +1835,7 @@ test('a count from another folder is never shown under the new name: the held ch
     w.diff = ok('3\t1\ta.ts\n')
     await $.session.start(START)
     await clock.advance(1)
+    await openTree($, clock, w)
     expect((await readState($)).project.changes).toEqual({ files: 1, lines: { added: 3, removed: 1 } })
 
     // The session root is another folder now; its status takes 300 ms, and says the same.
@@ -1470,7 +2037,7 @@ test('a main turn ends as lastTurn: step timing, tool time, cost and log; everyt
     const state = await readState($)
     expect(state.turn).toBeNull()
     expect(state.lastTurn).toMatchObject({
-      elapsedMs: 2000, modelMs: 1700, toolMs: 300, steps: 2, ttftMs: 250, tokensIn: 50, tokensOut: 800, cachePct: 90,
+      elapsedMs: 2000, modelMs: 1700, toolMs: 300, steps: 2, ttftMs: 250, tokensIn: 1000, tokensOut: 800, cachePct: 90,
       costUsd: 0.375,
     })
     expectNear(state.lastTurn?.wholeTurnRate, 140 / 1.7)
@@ -1531,6 +2098,123 @@ test('turn.start logs a prompt as you, redacted and cut to 70, and an engine tur
     expect(state.turn?.turnId).toBe('t5')
   })
 
+// U+202E, the right-to-left override, reorders what follows it; U+200B is a zero-width space. They are spelled as
+// escapes, so that this file shows what it says.
+const BIDI = '\u202E'
+const ZWSP = '\u200B'
+
+test('the format characters are taken out of the branch and the folder name: a U+202E reorders nothing', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.branch = `ma${BIDI}in${ZWSP}\n`
+    w.root = `/work/onli${BIDI}ne_shop`
+
+    await $.session.start(START)
+    await clock.advance(1)
+
+    expect((await readState($)).project).toEqual({ name: 'online_shop', branch: 'main', changes: null })
+  })
+
+test('a detached HEAD, and a branch of nothing but format characters, show the short commit', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.branch = `${BIDI}${ZWSP}\n`
+
+    await $.session.start(START)
+    await clock.advance(1)
+
+    expect((await readState($)).project.branch).toBe('abc1234')
+  })
+
+test('the format characters are taken out of every line of the log: prompt, tag, command, spawn and answer',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.turn.start({ text: `rename ${BIDI}txt.exe`, turnId: 't1' })
+    await $.turn.start({ text: `<${BIDI}task-notification>done</task-notification>`, turnId: 't2' })
+    await drive(clock, $.tool.call({ tool: 'Bash', command: `rm ${BIDI}txt.exe` }))
+    const edited = { tool: 'Edit', file_path: `${ROOT}/a${BIDI}.ts`, old_string: 'a', new_string: 'b' } as const
+    await drive(clock, $.tool.call(edited))
+    await $.agent.spawn({ ...SPAWN, description: `check ${BIDI}fdp.exe` })
+    expect(await chargedAfter($, clock, w, 'a1', 0.5)).toBe(0.5)
+    await finish($, 'a1', `found ${BIDI}fdp.exe`)
+
+    // Newest first.
+    const { log } = await readState($)
+    expect(log.map(entry => entry.text)).toEqual([
+      'done · $0.500 — found fdp.exe',
+      'spawned · engineer: check fdp.exe',
+      'Edit a.ts',
+      'Bash rm txt.exe',
+      'task-notification',
+      'rename txt.exe',
+    ])
+    expect(JSON.stringify(log)).not.toContain(BIDI)
+  })
+
+// The Subagents list draws the description and the type of a row as the row keeps them. The row is written when the
+// agent spawns; a resume, a sync and the end of a run only change it, so they keep what is there.
+test('the format characters are taken out of the description and the type of a spawned agent, and stay out',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    const isClean = async (): Promise<void> => {
+      const { agents, log } = await readState($)
+      for (const mark of [BIDI, ZWSP]) {
+        expect(JSON.stringify(agents)).not.toContain(mark)
+        expect(JSON.stringify(log)).not.toContain(mark)
+      }
+    }
+
+    // The type is the agent's own, or its name when it has none (the types say it always has one: that input is cast).
+    await $.agent.spawn({ ...SPAWN, description: `check ${BIDI}fdp.exe`, subagentType: `eng${BIDI}ineer` })
+    await $.agent.spawn({
+      ...SPAWN, description: `review ${ZWSP}it`, subagentType: undefined, name: `re${BIDI}viewer`,
+    } as never)
+    let { agents } = await readState($)
+    expect([agents.a1?.description, agents.a1?.type]).toEqual(['check fdp.exe', 'engineer'])
+    expect([agents.a2?.description, agents.a2?.type]).toEqual(['review it', 'reviewer'])
+    await isClean()
+
+    // A resume, and a sync with the engine's list, change the rows that are there: the clean strings stay.
+    await $.turn.complete({
+      answer: 'ok', durationMs: 5, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer',
+    })
+    await runStep($, clock, { turnId: 't1', index: 1, agentId: 'a1' })
+    await clock.advance(10)
+    w.listed = [{ id: 'a2', status: 'completed' }]
+    await clock.advance(30_000)
+    agents = (await readState($)).agents
+    expect([agents.a1?.status, agents.a2?.status]).toEqual(['running', 'done'])
+    expect([agents.a1?.description, agents.a1?.type]).toEqual(['check fdp.exe', 'engineer'])
+    expect([agents.a2?.description, agents.a2?.type]).toEqual(['review it', 'reviewer'])
+    await isClean()
+    expect((await readState($)).log.map(entry => entry.text)).toContain('resumed · engineer: check fdp.exe')
+  })
+
+test('a secret that has a format character in it is masked: the character does not keep its pattern from matching',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    bottom(on, clock)
+    await $.session.start(START)
+
+    const secret = `ghp_abc${ZWSP}defgh12345678`
+    await drive(clock, $.tool.call({ tool: 'Bash', command: `echo ${secret}` }))
+    await $.turn.start({ text: `token${ZWSP}=hunter22secret`, turnId: 't1' })
+
+    const { log } = await readState($)
+    expect(log.map(entry => entry.text)).toEqual(['token=•••', 'Bash echo •••'])
+    expect(JSON.stringify(log)).not.toContain('abcdefgh')
+    expect(JSON.stringify(log)).not.toContain('hunter22secret')
+  })
+
 test('a failed or denied tool call is logged as ✗ or denied, and a secret in the command is redacted', WITH_READER,
   async ($, on) => {
     bottom(on, mock.clock(on))
@@ -1560,6 +2244,41 @@ test('a failed call carries the time it took, as a successful one does', SLOW_RE
   ])
 })
 
+// An abandoned call (the person interrupted it, or a stop did) comes back as an error, and the signal of the hook has
+// aborted. That is no fault of the tool: the line is a note, with the time and no mark. ABANDONER makes a call
+// abandoned: its answer comes at once, and the chain beneath ends 300 ms later (the bottom fails a command that
+// starts with `fail`).
+test('an abandoned call that came back as an error is a note with no mark; a plain failure stays an error',
+  WITH_ABANDONER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    w.toolFailMs = 300
+    await $.session.start(START)
+    await clock.advance(1)
+    const lines = async (): Promise<unknown[][]> =>
+      (await readState($)).log.map(entry => [entry.text, entry.kind, entry.outcome])
+
+    expect(await $.tool.call({ tool: 'Bash', command: 'fail abandon it' })).toEqual({
+      isError: true, result: 'cut', text: 'cut',
+    })
+    await clock.advance(400) // the call beneath ends, and the mod's hook logs it
+    expect(await lines()).toEqual([['Bash fail abandon it', 'info', '0.3s']])
+
+    // An abandoned call that ended well is no error: it ran, and the line says so.
+    await $.tool.call({ tool: 'Bash', command: 'abandon it' })
+    await clock.advance(400)
+    // The same failure of the tool with no one abandoning it is an error; so is a denied call.
+    await drive(clock, $.tool.call({ tool: 'Bash', command: 'fail plainly' }))
+    await $.tool.call({ tool: 'Bash', command: 'deny it' })
+
+    expect(await lines()).toEqual([
+      ['Bash deny it', 'error', 'denied'],
+      ['Bash fail plainly', 'error', '✗ 0.3s'],
+      ['Bash abandon it', 'ok', '✓ 0.3s'],
+      ['Bash fail abandon it', 'info', '0.3s'],
+    ])
+  })
+
 test('a long command is cut to 64 characters, and its outcome stays whole', SLOW_READER, async ($, on) => {
   const clock = mock.clock(on)
   bottom(on, clock)
@@ -1578,8 +2297,8 @@ test('a long command is cut to 64 characters, and its outcome stays whole', SLOW
   expect(lines.map(([text]) => text.length)).toEqual([64, 64, 64])
 })
 
-test('a turn the mod did not see start leaves lastTurn alone; the project is read again when a turn ends', WITH_READER,
-  async ($, on) => {
+test('a turn the mod did not see start leaves lastTurn alone; the project is read again when a turn ends, the branch '
+  + 'alone', WITH_READER, async ($, on) => {
     const clock = mock.clock(on)
     const w = bottom(on, clock)
     await $.session.start(START)
@@ -1593,7 +2312,8 @@ test('a turn the mod did not see start leaves lastTurn alone; the project is rea
 
     expect(done).toEqual({ text: 'done' })
     expect((await readState($)).lastTurn).toBeUndefined()
-    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN])
+    // No turn started here, so the tree is shut still: only the first turn of the main agent opens it.
+    expect(w.runs).toEqual([BRANCH_RUN])
   })
 
 test('a turn that ends before any response leaves the last turn shown, and the next one replaces it', SLOW_READER,
@@ -1721,6 +2441,32 @@ test('the answer in the line of a subagent is masked and cut to 80 characters', 
   expect(log.slice(0, 2).map(entry => entry.text)).toEqual([`done — ${'x'.repeat(79)}…`, 'done — use token=•••'])
   expect(JSON.stringify(log)).not.toContain('hunter22secret')
 })
+
+test('the answer of a subagent loses its markdown marks, whether the engine gave it or the agent handed it back',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await spawnCharged($, clock, w, 4)
+    // a2 hands its report back and the engine's answer is empty. a3's is masked and cut after the marks are gone: they
+    // go before the masking, as `redact` takes the closing `**` of `**token=hunter22secret**` into the secret, which
+    // would leave the opening one alone. a4 names a file and two sums, which are no marks.
+    await drive(clock, $.tool.call(handBack({ message: '## Report\n**Verdict:** `ok`' }, 'a2')))
+
+    await finish($, 'a1', '**Verdict:** ok')
+    await finish($, 'a2')
+    await finish($, 'a3', `**token=hunter22secret** ${'x'.repeat(200)}`)
+    await finish($, 'a4', 'fixed `__init__.py`, x ** 2 and 2**10')
+
+    expect(await doneLines($)).toEqual([
+      'done · $0.500 — Verdict: ok',
+      'done · $0.500 — Report Verdict: ok',
+      `done · $0.500 — token=••• ${'x'.repeat(69)}…`,
+      'done · $0.500 — fixed __init__.py, x ** 2 and 2**10',
+    ])
+    expect(JSON.stringify((await readState($)).log)).not.toContain('hunter22secret')
+  })
 
 test('the end of a subagent has its outcome in a field of its own: a mark and the time, a stop with no mark',
   SLOW_READER, async ($, on) => {
@@ -2237,6 +2983,64 @@ test('every 30 s the pane is redrawn and statuses follow $.agent.list; usage ref
     await clock.advance(30_000)
     expect(w.invalidated).toEqual(['ui.render', 'ui.render'])
     expect(w.breakdowns).toBe(2)
+  })
+
+// The timer asks for a read on every second tick, so a minute apart, and the read comes the delay after the tick, as
+// the read after a call of a tool does. A file that changed outside Claude's tools shows without a new turn.
+test('every second tick of the timer asks for a read of the project, and the first does not', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await openTree($, clock, w)
+    w.runs.length = 0
+    w.status = ok(' M a.ts\0')
+    w.diff = ok('2\t1\ta.ts\n')
+    const start = 1_000_000
+
+    await clock.advance(start + 30_000 - clock.now()) // the first tick
+    expect(w.invalidated).toHaveLength(1)
+    await clock.advance(5 * PROJECT_DELAY_MS) // far past the delay of a read: none was asked for
+    expect(reads(w)).toBe(0)
+    expect((await readState($)).project.changes).toBeNull()
+
+    await clock.advance(start + 60_000 - 1 - clock.now())
+    expect(reads(w)).toBe(0)
+    await clock.advance(1) // the second tick asks for a read, which comes after the delay and not before
+    expect(w.invalidated).toHaveLength(2)
+    await clock.advance(PROJECT_DELAY_MS - 1)
+    expect(reads(w)).toBe(0)
+    await clock.advance(1)
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, DIFF_RUN])
+    expect((await readState($)).project.changes).toEqual({ files: 1, lines: { added: 2, removed: 1 } })
+
+    // The third tick asks for nothing, the fourth does: one read a minute.
+    await clock.advance(start + 90_000 + 5 * PROJECT_DELAY_MS - clock.now())
+    expect(w.invalidated).toHaveLength(3)
+    expect(reads(w)).toBe(1)
+    await clock.advance(start + 120_000 + PROJECT_DELAY_MS - clock.now())
+    expect(w.invalidated).toHaveLength(4)
+    expect(reads(w)).toBe(2)
+  })
+
+test('the read that a tick asks for waits four times as long as the last read took, when that is more than the delay',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    w.gitLag = 600 // a read is two calls, so it takes 1200 ms, and a delayed read waits 4800 ms after it
+    await startTurn($)
+    await clock.advance(1 + 2 * 600)
+    w.runs.length = 0
+
+    await clock.advance(1_000_000 + 60_000 - clock.now()) // the second tick
+    expect(w.invalidated).toHaveLength(2)
+    await clock.advance(4 * 2 * 600 - 1)
+    expect(reads(w)).toBe(0)
+    await clock.advance(1)
+    expect(reads(w)).toBe(1)
   })
 
 test('the engine list closes subagents that are still running and never rewrites an outcome', WITH_READER,

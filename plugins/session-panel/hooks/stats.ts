@@ -34,6 +34,7 @@ export type TurnStats = {
   ttftMs: number | null
   wholeTurnRate: number | null
   responseRate: number | null
+  // All the input the turn sent: what was not cached, what was read from the cache and what was written to it.
   tokensIn: number
   tokensOut: number
   cachePct: number | null
@@ -83,12 +84,16 @@ export function sumUsage(usages: Usage[]): Usage {
   return total
 }
 
+// All the input that was sent: the tokens that were not cached, those read from the cache and those written to it.
+function inputTokens(u: Usage): number {
+  return (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
+}
+
 // Share of the input served from the cache, in percent; null when there was no input at all.
 // Cache formula after OpenChamber (MIT, © 2025 Bohdan Triapitsyn).
 export function cacheHitPct(u: Usage): number | null {
-  const read = u.cache_read_input_tokens ?? 0
-  const input = (u.input_tokens ?? 0) + read + (u.cache_creation_input_tokens ?? 0)
-  return input > 0 ? (read / input) * 100 : null
+  const input = inputTokens(u)
+  return input > 0 ? ((u.cache_read_input_tokens ?? 0) / input) * 100 : null
 }
 
 // Tokens per second over the window; null for an empty window or an implausible rate.
@@ -124,7 +129,7 @@ export function computeTurnStats(
       last !== undefined && !last.hasTool && last.hasText
         ? rate(last.usage.output_tokens ?? 0, last.tEnd - last.tStart)
         : null,
-    tokensIn: total.input_tokens ?? 0,
+    tokensIn: inputTokens(total),
     tokensOut: total.output_tokens ?? 0,
     cachePct: cacheHitPct(total),
     costUsd: costNow !== null && acc.costAtStart !== null ? costNow - acc.costAtStart : null,
@@ -184,13 +189,31 @@ const SECRETS: [RegExp, string][] = [
   [/(\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s@]+@/gi, '$1•••@'],
 ]
 
-export function redact(s: string): string {
-  return SECRETS.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), s)
+// Takes out the Unicode format characters (category Cf): the bidi controls (U+202A to U+202E, U+2066 to U+2069), the
+// zero-width spaces and joiners, the byte order mark. They draw nothing, so a U+202E in a branch or a file name would
+// reorder what the pane shows after it, and the name would read as another.
+export function stripFormat(s: string): string {
+  return s.replace(/\p{Cf}/gu, '')
 }
 
-// Collapses whitespace runs and cuts to `max` characters, the last one being an ellipsis.
+// The format characters go first, as shorten takes them out too: one inside a secret would keep a pattern from
+// matching, and the secret would show once shorten had closed the gap.
+export function redact(s: string): string {
+  return SECRETS.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), stripFormat(s))
+}
+
+// Takes the markdown marks out of a text that the pane shows as it is: a pair of `**` around text on one line, which is
+// kept (its first and last characters are no spaces); backticks (code); and the `#` marks of a heading at the start of
+// a line, with the space after them. A `**` that stands alone or has a space beside it stays (`x ** 2`, `2**10`), and
+// so does `__`: `__init__.py` is a file, not bold.
+export function plainText(s: string): string {
+  return s.replace(/\*\*(\S(?:.*?\S)?)\*\*/g, '$1').replace(/`/g, '').replace(/^#+ /gm, '')
+}
+
+// Takes out the format characters (stripFormat), collapses whitespace runs and cuts to `max` characters, the last one
+// being an ellipsis.
 export function shorten(s: string, max: number): string {
-  const flat = s.replace(/\s+/g, ' ').trim()
+  const flat = stripFormat(s).replace(/\s+/g, ' ').trim()
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
 }
 
