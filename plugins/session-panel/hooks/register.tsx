@@ -33,9 +33,18 @@ const LISTED_STATUS: Record<string, AgentStatus> = { completed: 'done', failed: 
 // The tools that start a subagent (`Task` is the name of `Agent` in older builds).
 const SPAWN_TOOLS: string[] = ['Agent', 'Task']
 
+// The tool that a subagent reports through in auto mode; its turn then ends with an empty answer. A `string`, not the
+// literal: the engine's types do not list it, and comparing `e.tool` with a literal they lack is an error.
+const HANDBACK_TOOL: string = 'SubagentHandback'
+
 // The cost.usd reading that the next request is charged against. It is null until a reading sets it: the first one
 // after the module loads (the start of the session), and the first one after a /clear.
 let lastUsd: number | null = null
+
+// The messages that subagents handed back through HANDBACK_TOOL, by agent id, until the turn.complete of the agent
+// reads its own. The input of that tool is not in the engine types: `{ message: string }` is the shape seen in every
+// hand-back so far, so a different shape only leaves the answer out. It is emptied with the ledger.
+const handbacks = new Map<string, string>()
 
 // The model's context window that the last session.measure brought. It is null until a measure sets it: the first one
 // after the module loads only stores it, since session.start has read the breakdown already.
@@ -268,10 +277,12 @@ export const register: Register = on => {
 
   on('session.end', async ($, e, next) => {
     // A /clear or a resume starts the conversation over, and a resume puts another conversation in place of this one.
-    // The module, its timers and the pane carry on; the ledger starts over, and the context reads empty until the
-    // next response (the window, the cost and the limits are the session's still).
+    // The module, its timers and the pane carry on; the ledger starts over and the hand-backs not read are dropped,
+    // and the context reads empty until the next response (the window, the cost and the limits are the session's
+    // still).
     if (e.reason === 'clear' || e.reason === 'resume') {
       lastUsd = null
+      handbacks.clear()
       await update($, turnAtom, () => turnAtom.initial)
       await update($, lastTurnAtom, () => lastTurnAtom.initial)
       await update($, agentsAtom, () => agentsAtom.initial)
@@ -369,10 +380,16 @@ export const register: Register = on => {
       await update($, turnAtom, acc => acc && { ...acc, toolIntervals: [...acc.toolIntervals, interval] })
     }
     const isFailed = ran.deny !== undefined || ran.isError === true
-    // A call that started a subagent or woke one has its lines in the log already (`spawned · …`, `resumed · …`, the
-    // agent's own): only a call that failed or was denied is logged here.
+    // A subagent that reports through the hand-back tool (auto mode) says it in its `done` line: the message is kept
+    // for it. The input is not typed, so only a string counts.
+    if (e.tool === HANDBACK_TOOL && e.agentId !== undefined && !isFailed) {
+      const message = 'message' in e ? e.message : undefined
+      if (typeof message === 'string') handbacks.set(e.agentId, message)
+    }
+    // A call that started a subagent, woke one or handed a report back has its lines in the log already (`spawned · …`,
+    // `resumed · …`, the agent's own `done`): only a call that failed or was denied is logged here.
     const isAgentCall =
-      SPAWN_TOOLS.includes(e.tool) ||
+      SPAWN_TOOLS.includes(e.tool) || e.tool === HANDBACK_TOOL ||
       (e.tool === 'SendMessage' && typeof e.to === 'string' && Object.hasOwn(await read($, agentsAtom), e.to))
     if (isFailed || !isAgentCall) {
       // How it went is the outcome, a column of its own: the time it took behind a mark, or `denied`.
@@ -401,6 +418,10 @@ export const register: Register = on => {
       return done
     }
     const { agentId } = e
+    // The answer is the engine's, or the message that the agent handed back when the engine has none; the message
+    // serves once, whatever the outcome.
+    const answer = e.answer !== '' ? e.answer : (handbacks.get(agentId) ?? '')
+    handbacks.delete(agentId)
     const now = await $.clock.now()
     // The agent's last request may not be charged yet: a reading in line with the others settles that before the row
     // is read. A reading that fails leaves the row as it is: the outcome is logged all the same.
@@ -413,7 +434,7 @@ export const register: Register = on => {
     })
     const row = rows[agentId]
     if (row !== undefined) {
-      const { text, outcome } = agentOutcome(status, row, e.durationMs, e.answer)
+      const { text, outcome } = agentOutcome(status, row, e.durationMs, answer)
       // A subagent that failed is an error in the log; one that was stopped is news, not a fault.
       const kind: LogKind = status === 'done' ? 'ok' : status === 'stopped' ? 'info' : 'error'
       await addLog($, now, shortType(row.type), text, kind, outcome)

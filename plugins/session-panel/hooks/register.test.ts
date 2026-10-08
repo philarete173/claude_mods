@@ -16,6 +16,7 @@ const mirrorsStats: [
 ] = [true, true, true, true]
 
 const ROOT = '/work/online_shop'
+const HANDBACK_TOOL: string = 'SubagentHandback' // the tool a subagent reports through in auto mode: not in the types
 const START = { cwd: ROOT, surface: 'desktop', isInteractive: true } as const
 const RUN = { args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } } as const
 // The engine refuses a compaction with no messages, in the input and in the result.
@@ -184,11 +185,12 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
   })
   on('tool.call', async (_$, e) => {
     // What a call says decides how it ends: the command of a Bash, the description of an Agent, the message of a
-    // SendMessage. One that starts with `deny` is denied, one that starts with `fail` fails.
+    // SendMessage or of a SubagentHandback. One that starts with `deny` is denied, one that starts with `fail` fails.
     let says = ''
     if (e.tool === 'Bash') says = e.command
     if (e.tool === 'Agent') says = e.description
     if (e.tool === 'SendMessage') says = e.message
+    if (e.tool === HANDBACK_TOOL) says = String('message' in e ? e.message : '')
     if (says.startsWith('deny')) return { deny: 'no' }
     if (says.startsWith('fail')) {
       if (w.toolFailMs > 0) await clock.sleep(w.toolFailMs)
@@ -321,6 +323,9 @@ const SPAWN = {
 const agentCall = (description: string) =>
   ({ tool: 'Agent', description, prompt: 'p', subagent_type: 'engineer' }) as const
 const sendTo = (to: unknown, message = 'go on') => ({ tool: 'SendMessage', to, message }) as const
+// A subagent's report through the hand-back tool, in the shape seen in the engine's transcripts: `{ message }`.
+const handBack = (input: Record<string, unknown>, agentId = 'a1') =>
+  ({ tool: HANDBACK_TOOL, agentId, ...input }) as never
 
 test('session.start registers the command and opens the pane when a desktop is attached', async ($, on) => {
   const w = bottom(on, mock.clock(on, { now: 1_000_000 }))
@@ -987,6 +992,100 @@ test('a line that reports no action has no outcome key: a prompt, an engine turn
     ])
   })
 
+// The agents `a1`, `a2` ... of a test, each with a request charged, so that its `done` line has a cost: `$0.500`.
+const spawnCharged = async ($: Engine, clock: MockClock, w: World, count: number): Promise<void> => {
+  for (let i = 1; i <= count; i += 1) {
+    await $.agent.spawn(SPAWN)
+    expect(await chargedAfter($, clock, w, `a${i}`, 0.5)).toBe(0.5)
+  }
+}
+const finish = ($: Engine, agentId: string, answer = '') =>
+  $.turn.complete({ answer, durationMs: 5000, isAborted: false, turnId: 't1', agentId, reason: 'answer' })
+// The text of each `done` line of the log, oldest first.
+const doneLines = async ($: Engine): Promise<string[]> =>
+  (await readState($)).log.map(entry => entry.text).filter(text => text.startsWith('done')).reverse()
+
+test('the message a subagent handed back is the answer of its done line when the engine has none', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    const secret = `ghp_${'a'.repeat(36)}`
+    // What the agent hands back (undefined: nothing), the answer the engine ends it with, and the line that shows.
+    const cases: [handed: Record<string, unknown> | undefined, answer: string, shown: string][] = [
+      [{ message: 'first finding, then more' }, '', 'done · $0.500 — first finding, then more'],
+      [{ message: 'not this one' }, 'the engine answer', 'done · $0.500 — the engine answer'],
+      [undefined, '', 'done · $0.500'],
+      // A message that is not a string is ignored: a number, nothing at all, null, an object.
+      [{ message: 42 }, '', 'done · $0.500'],
+      [{}, '', 'done · $0.500'],
+      [{ message: null }, '', 'done · $0.500'],
+      [{ message: { text: 'first finding' } }, '', 'done · $0.500'],
+      // Masked and cut as any answer is: a secret, the line breaks of a report, and 200 characters.
+      [{ message: `use ${secret}` }, '', 'done · $0.500 — use •••'],
+      [{ message: 'first line\n\nsecond line' }, '', 'done · $0.500 — first line second line'],
+      [{ message: 'x'.repeat(200) }, '', `done · $0.500 — ${'x'.repeat(79)}…`],
+    ]
+    await spawnCharged($, clock, w, cases.length)
+    for (const [i, [handed]] of cases.entries()) {
+      if (handed !== undefined) await drive(clock, $.tool.call(handBack(handed, `a${i + 1}`)))
+    }
+    for (const [i, [, answer]] of cases.entries()) await finish($, `a${i + 1}`, answer)
+
+    expect(await doneLines($)).toEqual(cases.map(([, , shown]) => shown))
+    const { log } = await readState($)
+    expect(JSON.stringify(log)).not.toContain(secret)
+    // The hand-backs are no lines of the log.
+    expect(log.some(entry => entry.text === 'SubagentHandback')).toBe(false)
+  })
+
+test('a message handed back serves once: a later end of the same agent does not repeat it', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await spawnCharged($, clock, w, 2)
+    // a1 ends on its message, a2 ends on the engine's answer, which wins: neither message may serve a second time.
+    await drive(clock, $.tool.call(handBack({ message: 'first finding' }, 'a1')))
+    await drive(clock, $.tool.call(handBack({ message: 'not this one' }, 'a2')))
+    await finish($, 'a1')
+    await finish($, 'a2', 'the engine answer')
+    expect(await doneLines($)).toEqual(['done · $0.500 — first finding', 'done · $0.500 — the engine answer'])
+
+    // A message wakes each of them, and each ends again with nothing handed back this time.
+    w.stepCost = 0
+    for (const agentId of ['a1', 'a2']) {
+      await runStep($, clock, { turnId: 't1', index: 1, agentId })
+      await clock.advance(10)
+      await finish($, agentId)
+    }
+    expect((await doneLines($)).slice(2)).toEqual(['done · $0.500', 'done · $0.500'])
+
+    // A new hand-back is a new message: it serves, once.
+    await runStep($, clock, { turnId: 't1', index: 1, agentId: 'a1' })
+    await clock.advance(10)
+    await drive(clock, $.tool.call(handBack({ message: 'second finding' }, 'a1')))
+    await finish($, 'a1')
+    expect((await doneLines($)).slice(4)).toEqual(['done · $0.500 — second finding'])
+  })
+
+test('a failed or denied hand-back keeps no message', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  await spawnCharged($, clock, w, 2)
+
+  await $.tool.call(handBack({ message: 'fail it' }, 'a1'))
+  await $.tool.call(handBack({ message: 'deny it' }, 'a2'))
+  await finish($, 'a1')
+  await finish($, 'a2')
+
+  expect(await doneLines($)).toEqual(['done · $0.500', 'done · $0.500'])
+})
+
 test('a subagent that ends while the cost cannot be read is still logged and closed', WITH_READER, async ($, on) => {
   const w = bottom(on, mock.clock(on, { now: 1_000_000 }))
   await $.session.start(START)
@@ -1281,6 +1380,30 @@ test('a SendMessage to a subagent adds no line, any other one does, and a failed
     ])
   })
 
+test('a successful SubagentHandback adds no line to the log, a failed or denied one does', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.agent.spawn(SPAWN)
+    const lines = async (): Promise<unknown[][]> =>
+      (await readState($)).log.map(entry => [entry.who, entry.text, entry.kind, entry.outcome])
+    const spawned = [['main', 'spawned · engineer: Fix cart total qty', 'info', undefined]]
+
+    // In auto mode a subagent reports through this tool, and its `done` line says it: the call is no line of its own.
+    await drive(clock, $.tool.call(handBack({ message: 'first finding' })))
+    expect(await lines()).toEqual(spawned)
+
+    // A hand-back that failed or was denied says so, under the type of the agent.
+    await $.tool.call(handBack({ message: 'fail it' }))
+    await $.tool.call(handBack({ message: 'deny it' }))
+    expect((await lines()).slice(0, 2)).toEqual([
+      ['engineer', 'SubagentHandback', 'error', 'denied'],
+      ['engineer', 'SubagentHandback', 'error', '✗ 0.0s'],
+    ])
+  })
+
 test('Tool time counts an Agent call and a SendMessage call of the main loop, though neither is logged', SLOW_READER,
   async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })
@@ -1453,3 +1576,23 @@ test('a /clear starts the panel over, and the next cost reading is a baseline', 
 
 test('a resume starts the panel over as a /clear does: another conversation takes the place of this one', SLOW_READER,
   ($, on) => checkStartsOver($, on, 'resume'))
+
+test('a /clear or a resume drops a message handed back and not read yet; any other end of the session keeps it',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    for (const [reason, shown] of [['other', 'done — first finding'], ['clear', 'done'], ['resume', 'done']] as const) {
+      // The engine numbers the agents of a conversation from the first: `a1` is back in the next one.
+      w.spawns = 0
+      await $.agent.spawn(SPAWN)
+      await drive(clock, $.tool.call(handBack({ message: 'first finding' })))
+      await $.session.end({ reason, sessionId: 's1', resume: { id: 's1' } })
+      w.spawns = 0
+      await $.agent.spawn(SPAWN)
+      await finish($, 'a1')
+
+      expect((await readState($)).log[0]?.text, reason).toBe(shown)
+    }
+  })
