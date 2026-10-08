@@ -238,7 +238,8 @@ export function toolLabel(tool: string, input: Record<string, unknown>, root: st
 export function fmtUsd(x: number): string {
   if (x === 0) return '$0'
   if (x < 0.001) return '<$0.001'
-  return x >= 1 ? `$${x.toFixed(2)}` : `$${x.toFixed(3)}`
+  // The branch follows the rounding: 0.9996 is $1.000 at three decimals, so it takes two.
+  return Number(x.toFixed(3)) >= 1 ? `$${x.toFixed(2)}` : `$${x.toFixed(3)}`
 }
 
 export function fmtPct(x: number, digits: 0 | 1): string {

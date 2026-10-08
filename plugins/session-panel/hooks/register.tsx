@@ -37,6 +37,10 @@ const SPAWN_TOOLS: string[] = ['Agent', 'Task']
 // after the module loads (the start of the session), and the first one after a /clear.
 let lastUsd: number | null = null
 
+// The model's context window that the last session.measure brought. It is null until a measure sets it: the first one
+// after the module loads only stores it, since session.start has read the breakdown already.
+let lastModelWindow: number | null = null
+
 // The cost readings run one after another, each against the one before it: none overtakes another.
 let costQueue: Promise<void> = Promise.resolve()
 
@@ -76,6 +80,12 @@ const agentOutcome = (status: AgentStatus, row: AgentRow, durationMs: number, an
 
   return said === '' ? took : `${took} — ${said}`
 }
+
+// Whether a value of the store is a map of booleans, the shape of the folded sections: an object that is neither null
+// nor an array, with booleans only in it.
+const isFoldedMap = (value: unknown): value is Record<string, boolean> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value) &&
+  Object.values(value).every(held => typeof held === 'boolean')
 
 // Runs the job in a dispatch of its own, so that the hook that asked for it returns at once; a failure is dropped.
 function inBackground($: EngineInterface, job: () => Promise<void>): void {
@@ -169,6 +179,9 @@ async function syncAgents($: EngineInterface): Promise<void> {
 
 // A subagent that SendMessage has resumed keeps its id, and runs again: its row says so, and the log says it once.
 async function reviveAgent($: EngineInterface, agentId: string): Promise<void> {
+  // A step of a row that is missing or runs already is the usual one, and it writes nothing.
+  const held = (await read($, agentsAtom))[agentId]
+  if (held === undefined || held.status === 'running') return
   let revived = null as AgentRow | null // the cast stops TypeScript narrowing it to `null`: the update callback sets it
   await update($, agentsAtom, rows => {
     const row = rows[agentId]
@@ -178,7 +191,8 @@ async function reviveAgent($: EngineInterface, agentId: string): Promise<void> {
     return revived === null ? rows : { ...rows, [agentId]: revived }
   })
   if (revived !== null) {
-    await addLog($, await $.clock.now(), 'main', `resumed · ${revived.type}: ${revived.description}`, 'info')
+    const line = `resumed · ${revived.type}: ${revived.description}`
+    await addLog($, await $.clock.now(), 'main', shorten(redact(line), 70), 'info')
   }
 }
 
@@ -211,12 +225,16 @@ async function readAndCharge($: EngineInterface, agentId: string | undefined): P
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    await $.command.register({ name: 'session-panel', description: 'Open or close the session stats pane' })
+    // The command only touches panes, so it may run while a turn is in flight.
+    await $.command.register({
+      name: 'session-panel', description: 'Open or close the session stats pane', immediate: true,
+    })
     // The baseline, and the first Total. A reading that fails must not stop the timer or the opening of the pane.
     await chargeCost($, undefined).catch(() => undefined)
-    // The store holds the map this mod wrote itself.
+    // The store holds the map this mod wrote itself, but a file can be edited: what is not a map of booleans is
+    // ignored.
     const saved = await $.store.get('collapsed')
-    if (saved !== undefined) await update($, collapsedAtom, () => saved as Record<string, boolean>)
+    if (isFoldedMap(saved)) await update($, collapsedAtom, () => saved)
     inBackground($, () => refreshUsage($))
     inBackground($, () => refreshProject($))
     let ticks = 0
@@ -239,9 +257,10 @@ export const register: Register = on => {
   })
 
   on('session.end', async ($, e, next) => {
-    // A /clear starts the conversation over. The module, its timers and the pane carry on; the ledger starts over, and
-    // the context reads empty until the next response (the window, the cost and the limits are the session's still).
-    if (e.reason === 'clear') {
+    // A /clear or a resume starts the conversation over, and a resume puts another conversation in place of this one.
+    // The module, its timers and the pane carry on; the ledger starts over, and the context reads empty until the
+    // next response (the window, the cost and the limits are the session's still).
+    if (e.reason === 'clear' || e.reason === 'resume') {
       lastUsd = null
       await update($, turnAtom, () => turnAtom.initial)
       await update($, lastTurnAtom, () => lastTurnAtom.initial)
@@ -269,6 +288,11 @@ export const register: Register = on => {
     const measured = await next(e)
     // A measure brings the model's window only: it stands in when none is held, and never replaces the breakdown's.
     await update($, usageAtom, held => ({ ...held, ...usageFields(e, held.contextWindow ?? e.context.window) }))
+    // Another window than the last measure's is another model: the breakdown has the window that counts for it.
+    if (e.context.window !== lastModelWindow) {
+      if (lastModelWindow !== null) inBackground($, () => refreshUsage($))
+      lastModelWindow = e.context.window
+    }
 
     return measured
   })
@@ -354,8 +378,11 @@ export const register: Register = on => {
     if (e.agentId === undefined) {
       const acc = await read($, turnAtom)
       if (acc !== null) {
-        const { cost } = await $.session.usage()
-        await update($, lastTurnAtom, () => computeTurnStats(acc, e.durationMs, e.usage, cost?.usd ?? null))
+        // A turn stopped before any response leaves the previous one shown: the spec shows the last completed turn.
+        if (acc.steps.length > 0) {
+          const { cost } = await $.session.usage()
+          await update($, lastTurnAtom, () => computeTurnStats(acc, e.durationMs, e.usage, cost?.usd ?? null))
+        }
         await update($, turnAtom, () => null)
       }
       inBackground($, () => refreshProject($))
@@ -395,7 +422,7 @@ export const register: Register = on => {
         endedAt: null, costUsd: null,
       }
       await update($, agentsAtom, rows => ({ ...rows, [agentId]: row }))
-      await addLog($, now, 'main', `spawned · ${type}: ${e.description}`, 'info')
+      await addLog($, now, 'main', shorten(redact(`spawned · ${type}: ${e.description}`), 70), 'info')
     }
 
     return spawned

@@ -251,6 +251,8 @@ test('toolLabel', () => {
 test('fmtUsd', () => {
   const cases: Array<[number, string]> = [
     [5.4867, '$5.49'], [0.152, '$0.152'], [0.0049, '$0.005'], [0.0004, '<$0.001'], [0, '$0'],
+    // The branch follows the rounding to three decimals: 0.9996 comes to $1.000, so it takes two.
+    [0.9996, '$1.00'], [0.9994, '$0.999'],
   ]
   for (const [x, want] of cases) expect(fmtUsd(x), `fmtUsd(${x})`).toBe(want)
 })

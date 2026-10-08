@@ -47,7 +47,9 @@ type Draw = {
 }
 
 // Layout is in cells, the unit of Box numbers. On the desktop a cell is CELL_PX wide, measured on the live pane (§2.1).
-const CELL_PX = 8 // used only to turn `bodyColumns` into the px of the meters; confirm it once on a screenshot (§11)
+// It is used only to turn `bodyColumns` into the px of the meters; confirmed on the live pane on 2026-10-07 (§11,
+// check 1).
+const CELL_PX = 8
 const ICON_PX = 14 // every icon, in CSS px
 const ICON_CELLS = 2 // the slot an icon sits in: the text after it starts 3 cells in
 const PCT_CELLS = 6 // `100.0%`

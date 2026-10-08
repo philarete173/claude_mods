@@ -40,6 +40,10 @@ const READER: Plugin = {
 
       return { text: JSON.stringify(state) }
     })
+    // The version of a value goes up by one with each write that lands: a test reads it to see whether a hook wrote.
+    on('command.run', { command: 'read-agents-version' }, async $ => ({
+      text: String((await $.state.get({ plugin: 'session-panel', key: 'agents' } as const)).version),
+    }))
   },
 }
 // The mock clock takes about a second of real time per advance() while no plugin has a recurring timer armed (the
@@ -64,6 +68,9 @@ const readState = async ($: Engine): Promise<State> => {
 
   return JSON.parse(ran.text ?? '{}') as State
 }
+
+const agentsVersion = async ($: Engine): Promise<number> =>
+  Number((await $.command.run({ ...RUN, command: 'read-agents-version' })).text)
 
 // claude-code/testing has no toBeCloseTo, so a tolerance is checked by hand.
 function expectNear(actual: number | null | undefined, expected: number, eps = 1e-9): void {
@@ -313,7 +320,10 @@ test('session.start registers the command and opens the pane when a desktop is a
   const w = bottom(on, mock.clock(on, { now: 1_000_000 }))
 
   expect(await $.session.start(START)).toEqual({ cwd: ROOT })
-  expect(w.registered).toEqual([{ name: 'session-panel', description: 'Open or close the session stats pane' }])
+  // The command only touches panes, so it may run while a turn is in flight.
+  expect(w.registered).toEqual([
+    { name: 'session-panel', description: 'Open or close the session stats pane', immediate: true },
+  ])
   expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session' }])
 })
 
@@ -354,6 +364,32 @@ test('the collapsed map is loaded from the store on start', WITH_READER, async (
 
   expect((await readState($)).collapsed).toEqual({ log: true })
 })
+
+test('a stored map of booleans is applied, the false ones too', WITH_READER, async ($, on) => {
+  bottom(on, mock.clock(on), { collapsed: { log: true, turn: false } })
+
+  await $.session.start(START)
+
+  expect((await readState($)).collapsed).toEqual({ log: true, turn: false })
+})
+
+// What the store may hold under `collapsed` after an edit by hand: nothing the pane can fold by.
+const NOT_A_FOLDED_MAP: Array<[what: string, stored: unknown]> = [
+  ['a string', 'x'], ['a number', 42], ['null', null], ['an array', [true]],
+  ['a map with a string in it', { turn: 'yes' }],
+  ['a map with a string among its booleans', { log: true, turn: 'yes' }],
+]
+for (const [what, stored] of NOT_A_FOLDED_MAP) {
+  test(`a stored folded map that is ${what} is ignored: no section is folded and the start-up goes on`, WITH_READER,
+    async ($, on) => {
+      const w = bottom(on, mock.clock(on), { collapsed: stored })
+
+      await $.session.start(START)
+
+      expect((await readState($)).collapsed).toBeUndefined() // nothing was written
+      expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session' }])
+    })
+}
 
 test('the command opens the pane, closes it when it is shown, and says why when it is not placed', async ($, on) => {
   const w = bottom(on, mock.clock(on))
@@ -565,6 +601,42 @@ test('a window of 0 gives no percent: the context is unread, never NaN or Infini
   expect((await shown()).contextPct).toBeUndefined()
 })
 
+test('a measure with another window than the last one reads the breakdown again; with the same one it does not',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    const shown = async () => (await readState($)).usage
+    w.tokens = 100_000
+    const measure = (window: number) => $.session.measure({
+      context: { window, tokens: 100_000, percent: 10 }, rateLimits: [], changed: ['context'],
+    })
+
+    await $.session.start(START)
+    await clock.advance(1)
+    expect(w.breakdowns).toBe(1) // the start-up read
+    expect(await shown()).toMatchObject({ contextWindow: 1_000_000, contextPct: 10 })
+
+    // The first measure only stores its window, since the start-up has read the breakdown; the same window again
+    // brings nothing new.
+    await measure(1_000_000)
+    await measure(1_000_000)
+    await clock.advance(1)
+    expect(w.breakdowns).toBe(1)
+
+    // Another model, another window. A measure never replaces the held window, so the breakdown is read again, and the
+    // window it measures against takes its place.
+    w.rawMaxTokens = 200_000
+    await measure(200_000)
+    expect((await shown()).contextWindow).toBe(1_000_000) // until that read has run
+    await clock.advance(1)
+    expect(w.breakdowns).toBe(2)
+    expect(await shown()).toMatchObject({ contextWindow: 200_000, contextPct: 50 })
+
+    await measure(200_000)
+    await clock.advance(1)
+    expect(w.breakdowns).toBe(2)
+  })
+
 test('a main turn ends as lastTurn: step timing, tool time, cost and log; everything passes through', SLOW_READER,
   async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })
@@ -718,6 +790,33 @@ test('a turn the mod did not see start leaves lastTurn alone; the branch is read
     expect(done).toEqual({ text: 'done' })
     expect((await readState($)).lastTurn).toBeUndefined()
     expect(w.runs).toEqual([{ argv: ['git', 'branch', '--show-current'], init: { cwd: ROOT, timeoutMs: 5000 } }])
+  })
+
+test('a turn that ends before any response leaves the last turn shown, and the next one replaces it', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.turn.start({ text: 'first', turnId: 't1' })
+    await runStep($, clock, { turnId: 't1', index: 1 })
+    await $.turn.complete({ answer: 'done', durationMs: 700, isAborted: false, turnId: 't1', reason: 'answer' })
+    const earlier = (await readState($)).lastTurn
+    expect(earlier).toMatchObject({ steps: 1, elapsedMs: 700 })
+
+    // The person stops the next turn before the model has answered: it has no step, and its end brings no usage.
+    await $.turn.start({ text: 'second', turnId: 't2' })
+    expect((await readState($)).turn?.turnId).toBe('t2')
+    await $.turn.complete({ answer: '', durationMs: 40, isAborted: true, turnId: 't2', reason: 'aborted' })
+    const stopped = await readState($)
+    expect(stopped.lastTurn).toEqual(earlier)
+    expect(stopped.turn).toBeNull() // the turn itself is over all the same
+
+    // A turn that has a response is the last one again.
+    await $.turn.start({ text: 'third', turnId: 't3' })
+    await runStep($, clock, { turnId: 't3', index: 1 })
+    await $.turn.complete({ answer: 'done', durationMs: 900, isAborted: false, turnId: 't3', reason: 'answer' })
+    expect((await readState($)).lastTurn).toMatchObject({ steps: 1, elapsedMs: 900 })
   })
 
 test('a subagent: its row, the cost of each step by the cost.usd delta, its outcome', SLOW_READER, async ($, on) => {
@@ -975,6 +1074,66 @@ test('a step revives only the closed row of its own agent: a running agent, an u
     }
   })
 
+test('a step of a running agent, or of an unknown one, writes nothing to the agents value', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await $.agent.spawn(SPAWN)
+    const stepOf = async (agentId: string): Promise<void> => {
+      await runStep($, clock, { turnId: 't1', index: 1, agentId })
+      await clock.advance(10)
+    }
+
+    // a1 runs, and a9 is no row: their steps leave the version of the value where it was.
+    const spawned = await agentsVersion($)
+    await stepOf('a1')
+    await stepOf('a9')
+    expect(await agentsVersion($)).toBe(spawned)
+
+    // Control: the version does move when a write lands. A closed row is written once when its agent steps again, and
+    // not again while it runs.
+    await $.turn.complete({
+      answer: 'ok', durationMs: 5, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer',
+    })
+    const closed = await agentsVersion($)
+    expect(closed).toBeGreaterThan(spawned)
+    await stepOf('a1')
+    expect(await agentsVersion($)).toBe(closed + 1)
+    await stepOf('a1')
+    expect(await agentsVersion($)).toBe(closed + 1)
+  })
+
+test('the spawn and resume lines are masked and cut to 70, as a prompt is', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  const secret = `ghp_${'a'.repeat(36)}`
+  const long = 'x'.repeat(200)
+  await $.agent.spawn({ ...SPAWN, description: `use ${secret}` })
+  await $.agent.spawn({ ...SPAWN, description: long })
+  for (const agentId of ['a1', 'a2']) {
+    await $.turn.complete({ answer: 'ok', durationMs: 5, isAborted: false, turnId: 't1', agentId, reason: 'answer' })
+  }
+  // A message wakes each of them.
+  for (const agentId of ['a1', 'a2']) {
+    await runStep($, clock, { turnId: 't1', index: 1, agentId })
+    await clock.advance(10)
+  }
+
+  const { log } = await readState($)
+  const lines = log.map(entry => entry.text).filter(text => /^(spawned|resumed) /.test(text))
+  const cut = (verb: string): string => `${`${verb} · engineer: ${long}`.slice(0, 69)}…`
+  // Newest first: the two resumes, then the two spawns. The secret is masked in both, the long text is cut to 70.
+  expect(lines).toEqual([cut('resumed'), 'resumed · engineer: use •••', cut('spawned'), 'spawned · engineer: use •••'])
+  expect([lines[0]?.length, lines[2]?.length]).toEqual([70, 70])
+  expect(JSON.stringify(log)).not.toContain(secret)
+})
+
 test('a subagent that the main loop spawns has one line in the log: its spawn, not the Agent call as well', SLOW_READER,
   async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })
@@ -1045,6 +1204,7 @@ test('Tool time counts an Agent call and a SendMessage call of the main loop, th
     await clock.advance(1)
     await $.turn.start({ text: 'go', turnId: 't1' })
     await $.agent.spawn(SPAWN)
+    await runStep($, clock, { turnId: 't1', index: 1 }) // a turn with no response is not the last turn
 
     const agentStart = clock.now()
     await drive(clock, $.tool.call(agentCall('Fix cart total qty')))
@@ -1158,7 +1318,9 @@ test('the first cost reading, and one under the last, only set the baseline', TI
   expect(await chargedAfter($, clock, w, 'a1', 0.5)).toBe(0.75)
 })
 
-test('a /clear starts the panel over, and the next cost reading is a baseline', SLOW_READER, async ($, on) => {
+// The end of a session after which the conversation starts over (a /clear, a resume): the panel is emptied of what
+// belonged to the old one, and the next cost reading is a baseline.
+const checkStartsOver = async ($: Engine, on: On, reason: 'clear' | 'resume'): Promise<void> => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = bottom(on, clock)
   w.tokens = 90_000 // a response has filled the window: 9% of the 1M window
@@ -1182,7 +1344,7 @@ test('a /clear starts the panel over, and the next cost reading is a baseline', 
   expect(await $.session.end({ reason: 'other', sessionId: 's1', resume: { id: 's1' } })).toEqual({ sessionId: 's1' })
   expect(await readState($)).toEqual(before)
 
-  expect(await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })).toEqual({ sessionId: 's1' })
+  expect(await $.session.end({ reason, sessionId: 's1', resume: { id: 's1' } })).toEqual({ sessionId: 's1' })
   const after = await readState($)
   expect([after.turn, after.lastTurn, after.agents, after.log]).toEqual([null, null, {}, []])
   expect(after.project).toEqual(before.project)
@@ -1199,4 +1361,10 @@ test('a /clear starts the panel over, and the next cost reading is a baseline', 
   await $.agent.spawn(SPAWN)
   expect(await chargedAfter($, clock, w, 'a2', 0.5)).toBeNull()
   expect(await chargedAfter($, clock, w, 'a2', 0.25)).toBe(0.25)
-})
+}
+
+test('a /clear starts the panel over, and the next cost reading is a baseline', SLOW_READER,
+  ($, on) => checkStartsOver($, on, 'clear'))
+
+test('a resume starts the panel over as a /clear does: another conversation takes the place of this one', SLOW_READER,
+  ($, on) => checkStartsOver($, on, 'resume'))
