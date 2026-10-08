@@ -977,7 +977,7 @@ Checks on the first live render, before the tests are frozen:
 4. **Empty alt.** If the transcript says a `ui.render` tree was refused and names `alt`, give each decorative icon the label of its row and the rule `alt="rule"`.
 5. **Chevron.** It is dim at rest and full strength under the pointer. A click folds the section and the header keeps its summary.
 6. **Lines separator.** On the desktop the changes row reads `+8 / −1`, with the spaces around the slash, not `+8/−1` (the no-break spaces of `LINES_SEP`, §6.3).
-7. **Changes refresh.** The changes row updates about a second after an edit or a command by any agent.
+7. **Changes refresh.** The changes row updates about a second after an edit or a command by any agent. A read-only command such as `ls` does not trigger it. In a big repository it comes later: four times the last read.
 
 Results of the live renders (2026-10-07 and 2026-10-08):
 

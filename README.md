@@ -11,9 +11,9 @@ is remembered.
   Session / Subagents split once subagents have run. The window is the one auto-compaction uses, so a custom
   `autoCompactWindow` is honoured.
 - **Project**: the project folder, its git branch, and the working tree's changes against HEAD: `12 files changed`
-  and `+2061 / −111`. New files count too, with their lines counted for the first 50. It is read again a second
-  after any agent edits a file or runs a command. Outside a repository only the folder shows; a clean tree has no
-  changes row.
+  and `+2061 / −111`. New files count too, with their lines counted for the first 50. It is read again about a second
+  after an agent edits a file or runs a command that is not read-only; after a slow read it waits four times as long
+  as that read took. Outside a repository only the folder shows; a clean tree has no changes row.
 - **Usage**: the plan limits (5-hour, Weekly, Spend) as meters with a countdown to each reset. Hidden when the engine
   reports no plan limits, for example with an API key or a third-party provider.
 - **Turn stats**: the last finished turn of the main agent (a turn stopped before any response leaves the previous
@@ -45,7 +45,9 @@ the top is the engine's Total; Subagents is the sum of what the subagents were c
 - No disk writes except `$.store`, where it keeps which sections are folded.
 - Its hooks only observe: prompts, tool calls and their results pass through unchanged.
 - Read-only git commands only: `branch`, `rev-parse`, `status` and `diff`.
-- They never take git's index lock, use no fsmonitor, and run no textconv or external diff program.
+- They never take git's index lock or rewrite the index, use no fsmonitor, run no textconv or external diff program,
+  and fetch nothing in a partial clone (git 2.44 or later).
+- Git still runs the filters you configured, such as Git LFS, as it does for any `git status`.
 - The mod reads no file itself: git counts the lines.
 
 ## Install
