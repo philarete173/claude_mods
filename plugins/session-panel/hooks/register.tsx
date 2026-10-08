@@ -52,7 +52,8 @@ const WRITE_TOOLS: string[] = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Ba
 const PROJECT_DELAY_MS = 1000
 
 // A delayed read of the project waits at least four times as long as the last read took. So git takes at most about a
-// fifth of the time, even in a big repository, and a read that ran into its timeouts is not retried at once.
+// quarter of the time, for the reads after tool calls, even in a big repository (the timer starts at the call, which
+// may come during the read before), and a read that ran into its timeouts is not retried at once.
 const PROJECT_GAP_FACTOR = 4
 
 // How long each git call that reads the changes may run, in ms.
@@ -97,8 +98,8 @@ let isProjectStale = false
 
 // The read of the project that waits on a timer: the time at which it was asked for and how long it waits, in ms; null
 // when none waits. A call of WRITE_TOOLS that comes meanwhile adds nothing: that read sees the tree as it is when it
-// runs. A timer that a hook refused never runs, so a wait older than twice its own delay is taken as lost, and the next
-// call asks again.
+// runs. A timer that a hook refused never runs, so a wait older than twice the shorter of its own delay and the one a
+// new call would get is taken as lost, and the next call asks again.
 let projectWait: { askedAt: number; delayMs: number } | null = null
 
 // How long the last read of the project took, in ms, whether it succeeded or failed; 0 until the first one ends. The
@@ -252,12 +253,15 @@ async function gitChanges($: EngineInterface, root: string): Promise<Changes> {
   if (status === null) return null
   const { files, newFiles } = parseStatus(status)
   if (files === 0) return null
-  // The tracked files, net against HEAD, over the whole repository whatever the person's `diff.relative` says
-  // (--no-relative). --no-textconv and --no-ext-diff count the files themselves: no textconv or external diff program
-  // runs. The person's own filters may (clean and process filters, Git LFS among them), as in any `git status`. The
-  // `--` after HEAD makes it a revision: a file or folder named HEAD in the root would make it ambiguous, and git would
-  // refuse.
-  const diffArgv = [...GIT_READ, 'diff', '--numstat', '--no-relative', '--no-textconv', '--no-ext-diff', 'HEAD', '--']
+  // The tracked files, net against HEAD, over the whole repository: `-c diff.relative=false` overrides the person's
+  // `diff.relative`, which would cut the lines to the folder of the session. Older git ignores the key (the option
+  // --no-relative came with git 2.28, so it is no use there). --no-textconv and --no-ext-diff count the files
+  // themselves: no textconv or external diff program runs. The person's own filters may (clean and process filters,
+  // Git LFS among them), as in any `git status`. The `--` after HEAD makes it a revision: a file or folder named HEAD
+  // in the root would make it ambiguous, and git would refuse.
+  const diffArgv = [
+    ...GIT_READ, '-c', 'diff.relative=false', 'diff', '--numstat', '--no-textconv', '--no-ext-diff', 'HEAD', '--',
+  ]
   const diff = await gitOut($, diffArgv, root, [0], GIT_READ_ENV)
   if (diff === null) return { files, lines: null }
   let { added, removed } = sumNumstat(diff)
@@ -327,11 +331,13 @@ async function requestProject($: EngineInterface): Promise<void> {
 
 // Asks for a read of the project some time after `now`, which the call of a tool that may have changed a file does: the
 // delay is PROJECT_DELAY_MS, or PROJECT_GAP_FACTOR times as long as the last read took when that is more. One timer
-// waits at most: a call that comes while it waits adds nothing. A wait counts for twice its own delay, as a timer that
-// a hook refused never runs; a late timer that still fires only adds a read, which the runner coalesces.
+// waits at most: a call that comes while it waits adds nothing. A wait counts for twice the shorter of its own delay
+// and the delay a new one would get, so a wait set after a slow read does not outlive a fast one; a timer that a hook
+// refused never runs, so past that a wait is taken as lost, and the call asks again. A late timer that still fires
+// only adds a read, which the runner coalesces.
 function requestProjectLater($: EngineInterface, now: number): void {
-  if (projectWait !== null && now - projectWait.askedAt < 2 * projectWait.delayMs) return
   const delayMs = Math.max(PROJECT_DELAY_MS, PROJECT_GAP_FACTOR * lastReadMs)
+  if (projectWait !== null && now - projectWait.askedAt < 2 * Math.min(projectWait.delayMs, delayMs)) return
   projectWait = { askedAt: now, delayMs }
   $.clock.after(delayMs, () => {
     projectWait = null

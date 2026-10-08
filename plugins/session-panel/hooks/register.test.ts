@@ -28,7 +28,9 @@ const PANE_UP: UiPane = { id: 'session-panel', title: 'Session', isShown: true, 
 // as the last read took a delayed read waits at least. A call that reads the tree starts with GIT_READ: no optional
 // locks, no fsmonitor (a program or a daemon of the person's, which a read must not start) and no refresh of the index
 // by a diff (it takes index.lock and writes .git/index). Its options carry GIT_NO_LAZY_FETCH, so that a partial clone
-// does not fetch from its remote; the call of rev-parse reads no object, so it carries none.
+// does not fetch from its remote; the call of rev-parse reads no object, so it carries none. The diff against HEAD
+// has a pair of its own after GIT_READ, which overrides the person's `diff.relative`: it would cut the counts to the
+// folder of the session.
 const PROJECT_DELAY_MS = 1000
 const PROJECT_GAP_FACTOR = 4
 const GIT_READ = [
@@ -41,7 +43,7 @@ const STATUS_RUN = {
   init: { cwd: ROOT, timeoutMs: 10_000, env: NO_LAZY_FETCH },
 }
 const DIFF_RUN = {
-  argv: [...GIT_READ, 'diff', '--numstat', '--no-relative', '--no-textconv', '--no-ext-diff', 'HEAD', '--'],
+  argv: [...GIT_READ, '-c', 'diff.relative=false', 'diff', '--numstat', '--no-textconv', '--no-ext-diff', 'HEAD', '--'],
   init: { cwd: ROOT, timeoutMs: 10_000, env: NO_LAZY_FETCH },
 }
 const TOPLEVEL_RUN = { argv: ['git', 'rev-parse', '--show-toplevel'], init: { cwd: ROOT, timeoutMs: 10_000 } }
@@ -1147,6 +1149,65 @@ for (const [gap, isRead] of SCALED_WAITS) {
     await $.tool.call(instant())
     await clock.advance(10 * PROJECT_DELAY_MS)
     expect(reads(w)).toBe(isRead ? 1 : 0)
+  })
+}
+
+// A read that spans a suspend or a clock jump takes hours by the clock, and a delayed read then waits four times that.
+// The wait it set must not outlive the fast reads that come after it: a wait counts for twice the shorter of its own
+// delay and the delay a new call would get. Here the read of the start takes an hour, so the first call asks for four
+// hours; the end of a turn reads at once, in 600 ms, so a new call would get 2400 ms, and the window is 4800 ms from
+// the call that asked. A call inside it adds nothing, one at its edge asks again: the read comes 7200 ms after the
+// first call, not four hours.
+test('a wait set after a read of an hour does not outlive the fast read that follows it', WITH_READER,
+  async ($, on) => {
+    const HOUR = 3_600_000
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.rootLag = HOUR // the read of the start of the session takes an hour: a suspend in the middle of it
+    await $.session.start(START)
+    await clock.advance(1 + HOUR)
+    w.rootLag = 0
+    w.runs.length = 0
+
+    await $.tool.call(instant()) // asks, with a delay of four hours
+    w.gitLag = 300 // the next read takes 600 ms
+    await $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, turnId: 't0', reason: 'answer' })
+    await clock.advance(1 + 600)
+    expect(reads(w)).toBe(1) // the read of the end of the turn
+
+    await clock.advance(4800 - 1 - (1 + 600))
+    await $.tool.call(instant()) // 4799 ms after the call that asked: inside the window, it adds nothing
+    await clock.advance(1)
+    await $.tool.call(instant()) // 4800 ms: the wait counts as lost, and this call asks again, with 2400 ms
+    await clock.advance(2400 - 1)
+    expect(reads(w)).toBe(1)
+    await clock.advance(1)
+    expect(reads(w)).toBe(2) // 7200 ms after the first call
+  })
+
+// The other side of the shorter: a wait counts for twice its own delay when a new call would get a longer one, as a
+// slower read makes it. Here the wait asks for 1000 ms and a read of 600 ms follows it, so that a new call would get
+// 2400 ms, and the window stays 2000 ms.
+const OWN_DELAY_WAITS: Array<[gap: number, isRead: boolean]> = [
+  [2 * PROJECT_DELAY_MS - 1, false],
+  [2 * PROJECT_DELAY_MS, true],
+]
+for (const [gap, isRead] of OWN_DELAY_WAITS) {
+  test(`a wait of 1000 ms still counts for 2000 ms after a slower read: a call ${gap} ms later ${
+    isRead ? 'asks again, and is read' : 'adds nothing'}`, WITH_REFUSER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+
+    await $.tool.call(instant()) // asks, with a delay of 1000 ms; the timer is refused
+    w.runs.length = 0
+    w.gitLag = 300 // the next read takes 600 ms
+    await $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, turnId: 't0', reason: 'answer' })
+    await clock.advance(gap)
+    await $.tool.call(instant())
+    await clock.advance(10 * PROJECT_DELAY_MS)
+    expect(reads(w)).toBe(isRead ? 2 : 1) // the read of the end of the turn, and the one that the call asked for
   })
 }
 
