@@ -324,6 +324,10 @@ const logRoles = (row: Node): string[] =>
 
     return isTimeCell(cell) ? 'time' : 'who'
   })
+// The text of a log row, in whichever layout the row is: the cell that grows.
+const rowText = (row: Node): string => textsOf(childrenOf(row)[logRoles(row).indexOf('text')])[0] ?? ''
+// The Boxes of the pane that hold log rows, in order: a head and a tail, or the one Box of a body of unknown height.
+const logBoxes = (tree: Node): Node[] => childrenOf(tree).filter(child => logRows(child).length > 0)
 // How a Text is drawn: its colour, whether it is dim, and how it is cut.
 const styleOf = (el: Node): unknown[] => [el.props?.color, el.props?.dimColor, el.props?.wrap]
 
@@ -340,8 +344,11 @@ const plain = (type: string) => (props: Record<string, unknown>): Node => {
 }
 const PLAIN_ELEMENTS = { Box: plain('Box'), Text: plain('Text'), Button: plain('Button'), Svg: plain('Svg') } as never
 
-const draw = (data: PaneData, bodyColumns = 45): Node =>
-  renderPane(PLAIN_ELEMENTS, data, { bodyColumns }, { onToggle: () => undefined }) as unknown as Node
+// The body is `bodyColumns` across and `bodyRows` down: the fixture's 20 rows unless a test says otherwise.
+const draw = (data: PaneData, bodyColumns = 45, bodyRows = PANE_PROPS.scroll.bodyRows): Node =>
+  renderPane(
+    PLAIN_ELEMENTS, data, { bodyColumns, scroll: { bodyRows } }, { onToggle: () => undefined },
+  ) as unknown as Node
 const onSurface = (data: PaneData, surface: Surface): PaneData => ({ ...data, surface })
 
 const EMPTY: PaneData = {
@@ -383,6 +390,15 @@ const LOG: LogEntry[] = Array.from({ length: 16 }, (_, i): LogEntry => {
     ...(outcome === undefined ? {} : { outcome }),
   }
 })
+// `count` log lines, the newest first, each with a text of its own (`line 1`, `line 2`, ...) to tell its row by.
+// `patch` gives the fields a line has besides, by its place: the newest is 0.
+const logLines = (count: number, patch: (i: number) => Partial<LogEntry> = () => ({})): LogEntry[] =>
+  Array.from({ length: count }, (_, i): LogEntry => (
+    { at: NOW - i * 1000, who: 'you', text: `line ${i + 1}`, kind: 'info', ...patch(i) }
+  ))
+// The texts of the lines from the `from`th to the `to`th.
+const named = (from: number, to: number): string[] =>
+  Array.from({ length: to - from + 1 }, (_, i) => `line ${from + i}`)
 // A pane with something in every block, and things too long for any pane: names, texts, a ninth agent.
 const FULL: PaneData = {
   usage: {
@@ -899,7 +915,7 @@ test('a subagent shows its status as a shape and a colour: ✗ for failed, dimme
     }
   })
 
-test('the log shows 15 lines, newest first, an error in red, and a long text cut to one line', SLOW, async ($, on) => {
+test('the log shows 20 lines, newest first, an error in red, and a long text cut to one line', SLOW, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   bottom(on, clock)
   await $.session.start(START)
@@ -910,40 +926,77 @@ test('the log shows 15 lines, newest first, an error in red, and a long text cut
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
     const log = await texts(ui)
-    // 'failed' (the subagent), then prompt 19 down to prompt 6: 15 lines in all.
+    // 'failed' (the subagent), then prompt 19 down to prompt 1: 20 lines in all, a row of the body's 20 for each.
     expect(log.filter(text => /^(prompt \d+|failed)$/.test(text)), surface).toEqual([
-      'failed', ...Array.from({ length: 14 }, (_, i) => `prompt ${19 - i}`),
+      'failed', ...Array.from({ length: 19 }, (_, i) => `prompt ${19 - i}`),
     ])
     // The `who` of the failed line is red, the others are dim: the text carries the row.
     const whos = await ui.findAll({ type: 'Text', text: /^(engineer|you)$/ })
     expect(whos.map(el => [el.text, el.props.color, el.props.dimColor])).toEqual([
-      ['engineer', 'error', undefined], ...Array.from({ length: 14 }, () => ['you', undefined, true]),
+      ['engineer', 'error', undefined], ...Array.from({ length: 19 }, () => ['you', undefined, true]),
     ])
     const clocks = await ui.findAll({ type: 'Text', text: /^\d\d:\d\d:\d\d$/ })
-    expect(clocks).toHaveLength(15)
+    expect(clocks).toHaveLength(20)
     expect(clocks.every(el => el.props.dimColor === true)).toBe(true)
+    // The 20 rows are the head's 8 and the tail's 12.
+    expect(logBoxes(await ui.drawn()).map(box => logRows(box).length), surface).toEqual([8, 12])
     // Time and `who` are columns of fixed width, the same on every row. The desktop's `who` has a width of its own; the
-    // terminal's is as wide as the longest of the 15 (`engineer`). Either way the texts line up.
+    // terminal's is as wide as the longest of the 20 (`engineer`). Either way the texts line up.
     const columns = logColumns(await ui.drawn())
-    expect(columns, surface).toHaveLength(15)
-    expect(columns.map(column => column.timeCells), surface).toEqual(Array(15).fill(8))
-    expect(columns.map(column => column.whoCells), surface).toEqual(Array(15).fill(surface === 'desktop' ? 13 : 8))
+    expect(columns, surface).toHaveLength(20)
+    expect(columns.map(column => column.timeCells), surface).toEqual(Array(20).fill(8))
+    expect(columns.map(column => column.whoCells), surface).toEqual(Array(20).fill(surface === 'desktop' ? 13 : 8))
     // The failed line has an outcome, in red like its `who`. The column is as wide as that outcome (`✗ 0.0s`, a cell
-    // more on the desktop), and the 14 prompts have the cell empty, of the same width. At the 40 columns of the mount
+    // more on the desktop), and the 19 prompts have the cell empty, of the same width. At the 40 columns of the mount
     // the desktop's text keeps 9 cells, one over the least a row needs, so the row has all its cells.
     expect(columns.map(column => column.outcomeCell?.props?.width), surface).toEqual(
-      Array(15).fill(surface === 'desktop' ? 7 : 6),
+      Array(20).fill(surface === 'desktop' ? 7 : 6),
     )
     const outcomes = await ui.findAll({ type: 'Text', text: /^✗ / })
     expect(outcomes.map(el => [el.text, el.props.color, el.props.dimColor]), surface).toEqual([
       ['✗ 0.0s', 'error', undefined],
     ])
-    expect(columns.map(column => textsOf(column.outcomeCell)), surface).toEqual([['✗ 0.0s'], ...Array(14).fill([])])
+    expect(columns.map(column => textsOf(column.outcomeCell)), surface).toEqual([['✗ 0.0s'], ...Array(19).fill([])])
     // The text is cut to one line, in a cell that gives way.
     expect((await ui.find({ type: 'Text', text: 'prompt 19' }))?.props.wrap).toBe('truncate')
     await ui.unmount()
   }
 })
+
+test('the mounted pane splits its Log into a head and a tail by the rows of its body, and again when it changes', SLOW,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: NOW })
+    bottom(on, clock)
+    await $.session.start(START)
+    for (let i = 0; i < 30; i += 1) await $.turn.start({ text: `prompt ${i}`, turnId: `t${i}` })
+
+    // [the rows of the body, the lines of the head, the lines of the tail]: the Log draws as many lines as the body has
+    // rows, 8 at least, and the log holds 30.
+    const cases = [[20, 8, 12], [12, 8, 4], [9, 8, 1], [8, 8, 0], [5, 8, 0], [40, 8, 22]] as const
+    for (const surface of SURFACES) {
+      const ui = await mountPane($, surface)
+      for (const [bodyRows, head, tail] of cases) {
+        const where = `${surface} ${bodyRows} rows`
+        // The engine hands the pane its next props when the body changes, and the root follows the body.
+        await ui.redraw({ ...PANE_PROPS, scroll: { offset: 0, bodyRows } })
+        const tree: Node = await ui.drawn()
+        expect(tree.props?.minHeight, where).toBe(bodyRows)
+        const boxes = logBoxes(tree)
+        expect(boxes.map(box => logRows(box).length), where).toEqual(tail > 0 ? [head, tail] : [head])
+        expect(boxes[0]?.props, where).toStrictEqual({ flexDirection: 'column', flexShrink: 0 })
+        if (tail > 0) {
+          expect(boxes[1]?.props, where).toStrictEqual({
+            flexDirection: 'column', height: 0, flexGrow: 1, flexShrink: 1, overflow: 'hidden',
+          })
+        }
+        // The newest first, the head's lines and then the tail's.
+        expect(logRows(tree).map(rowText), where).toEqual(
+          Array.from({ length: head + tail }, (_, i) => `prompt ${29 - i}`),
+        )
+      }
+      await ui.unmount()
+    }
+  })
 
 test('a window of 0 draws a dash for the context, never NaN or Infinity', SLOW, async ($, on) => {
   bottom(on, mock.clock(on, { now: NOW }))
@@ -1026,6 +1079,12 @@ const agentRows = (tree: unknown): Node[] =>
 const isRuleNode = (node: Node): boolean =>
   (node.type === 'Svg' && node.props?.width === 1600) || (node.type === 'Text' && /^─+$/.test(textsOf(node)[0] ?? ''))
 const ruleCount = (tree: unknown): number => flat(tree).filter(({ node }) => isRuleNode(node)).length
+// The rules of a terminal body with no columns: a dim Text cut to the pane, with no `─` in it.
+const emptyRules = (tree: unknown): Node[] =>
+  flat(tree).map(({ node }) => node).filter(node => (
+    node.type === 'Text' && node.props?.dimColor === true && node.props.wrap === 'truncate' &&
+    textsOf(node).join('') === ''
+  ))
 // The Project block: the child of the pane whose header, the row after its rule, has the bold `Project`. Its children
 // are the rule, the header, then the branch row and the changes row where they are drawn.
 const projectOf = (tree: Node): Node | undefined =>
@@ -1361,17 +1420,17 @@ test('the outcome of a log line is a fixed column at the right edge: one width, 
 })
 
 test('with no outcome among the lines drawn the log has no outcome column: the three cells of a row, as before', () => {
-  // The 16th line has an outcome, but only 15 are drawn: it makes no column.
+  // The 21st line has an outcome, but only 20 are drawn, a row of the body's 20 each: it makes no column.
   const lines: LogEntry[] = [
-    ...Array.from({ length: 15 }, (_, i): LogEntry => (
+    ...Array.from({ length: 20 }, (_, i): LogEntry => (
       { at: NOW - i * 1000, who: 'you', text: `prompt ${i}`, kind: 'info' }
     )),
-    { at: NOW - 15_000, who: 'main', text: 'Read a.py', kind: 'ok', outcome: '✓ 0.3s' },
+    { at: NOW - 20_000, who: 'main', text: 'Read a.py', kind: 'ok', outcome: '✓ 0.3s' },
   ]
 
   for (const surface of SURFACES) {
     const rows = logColumns(draw(onSurface({ ...EMPTY, log: lines }, surface)))
-    expect(rows.map(row => row.cells), surface).toEqual(Array(15).fill(3))
+    expect(rows.map(row => row.cells), surface).toEqual(Array(20).fill(3))
     expect(rows.every(row => row.outcomeCell === undefined), surface).toBe(true)
   }
 })
@@ -1555,6 +1614,207 @@ test('the log rows outgrow no pane, with and without outcomes, at the narrowest 
   }
 })
 
+// ---- The height of the Log ----
+
+// The kit has no layout engine, so the fill itself was seen on the live desktop: the root as tall as the body at the
+// least, the head's 8 lines kept, the tail growing into the rows that are free, the pane scrolling when the content is
+// taller. What is pinned here is the tree that was seen there.
+
+test('the Log is a rule, a header, a head of 8 lines and a tail, children of a root as tall as the body', () => {
+  for (const surface of SURFACES) {
+    const tree = draw(onSurface({ ...FULL, log: logLines(60) }, surface), 45, 40)
+    // The root is at least as tall as the body, and has no height of its own.
+    expect(tree.props, surface).toStrictEqual({ flexDirection: 'column', minHeight: 40 })
+    // The Log's four parts are the last children of the root: no Box wraps them.
+    expect(childrenOf(tree), surface).toHaveLength(1 + 1 + 5 + 4)
+    const [rule, header, head, tail] = childrenOf(tree).slice(-4)
+    expect(ruleCount(rule), surface).toBe(1)
+    expect(headerRows(header).map(row => [row.id, row.label, row.title]), surface).toEqual([['log', '▾', 'Log']])
+    // The head holds its size, and its 8 lines show whatever the room.
+    expect(head?.props, surface).toStrictEqual({ flexDirection: 'column', flexShrink: 0 })
+    expect(logRows(head).map(rowText), surface).toEqual(named(1, 8))
+    // The tail has no height of its own: it grows into the rows the root leaves free and cuts what does not fit at its
+    // bottom, so the oldest go. A body of 40 rows draws lines 9 to 40 in it.
+    expect(tail?.props, surface).toStrictEqual({
+      flexDirection: 'column', height: 0, flexGrow: 1, flexShrink: 1, overflow: 'hidden',
+    })
+    expect(logRows(tail).map(rowText), surface).toEqual(named(9, 40))
+    expect(logRows(tree), surface).toHaveLength(40)
+  }
+})
+
+test('a body too short for the head keeps the 8 lines and has no tail: the pane scrolls', () => {
+  for (const surface of SURFACES) {
+    for (const bodyRows of [1, 5]) {
+      const where = `${surface} ${bodyRows} rows`
+      const tree = draw(onSurface({ ...FULL, log: logLines(60) }, surface), 45, bodyRows)
+      // The root is as tall as the body at the least, and grows to its content: the engine scrolls it.
+      expect(tree.props, where).toStrictEqual({ flexDirection: 'column', minHeight: bodyRows })
+      // The head is the last child, with its 8 lines. No line past it is in the tree, and no tail.
+      const [rule, header, head] = childrenOf(tree).slice(-3)
+      expect(ruleCount(rule), where).toBe(1)
+      expect(headerRows(header).map(row => row.id), where).toEqual(['log'])
+      expect(head?.props, where).toStrictEqual({ flexDirection: 'column', flexShrink: 0 })
+      expect(logRows(head).map(rowText), where).toEqual(named(1, 8))
+      expect(logRows(tree), where).toHaveLength(8)
+      expect(flat(tree).some(({ node }) => node.props?.height === 0), where).toBe(false)
+    }
+  }
+})
+
+test('the Log draws as many lines as the body has rows, 8 at least, and the tail starts at the 9th line', () => {
+  // [the rows of the body, the lines drawn]: never fewer than the head's 8, never more than the log has (60).
+  const cases = [[1, 8], [5, 8], [8, 8], [9, 9], [12, 12], [40, 40], [60, 60], [100, 60]] as const
+  for (const surface of SURFACES) {
+    for (const [bodyRows, drawn] of cases) {
+      const where = `${surface} ${bodyRows} rows`
+      const boxes = logBoxes(draw(onSurface({ ...FULL, log: logLines(60) }, surface), 45, bodyRows))
+      const [head, tail] = boxes
+      expect(boxes, where).toHaveLength(drawn > 8 ? 2 : 1)
+      expect(logRows(head).map(rowText), where).toEqual(named(1, Math.min(8, drawn)))
+      expect(logRows(tail).map(rowText), where).toEqual(drawn > 8 ? named(9, drawn) : [])
+    }
+  }
+})
+
+test('with no height known the Log is a rule, a header and 15 lines in one Box, and the root has no minimum', () => {
+  for (const surface of SURFACES) {
+    // A body whose rows are not a positive number: none, not a number, negative, endless.
+    for (const bodyRows of [0, Number.NaN, -3, Number.POSITIVE_INFINITY]) {
+      const where = `${surface} ${bodyRows} rows`
+      const tree = draw(onSurface({ ...FULL, log: logLines(60) }, surface), 45, bodyRows)
+      expect(tree.props?.flexDirection, where).toBe('column')
+      expect(tree.props?.minHeight, where).toBeUndefined()
+      expect(tree.props?.height, where).toBeUndefined()
+      // The 15 lines are in one Box at their natural height: a tail would have no room to grow into.
+      const [rule, header, lines] = childrenOf(tree).slice(-3)
+      expect(ruleCount(rule), where).toBe(1)
+      expect(headerRows(header).map(row => row.id), where).toEqual(['log'])
+      expect(lines?.props, where).toStrictEqual({ flexDirection: 'column' })
+      expect(logRows(lines).map(rowText), where).toEqual(named(1, 15))
+      expect(logRows(tree), where).toHaveLength(15)
+      expect(flat(tree).some(({ node }) => node.props?.height === 0), where).toBe(false)
+    }
+  }
+})
+
+test('with fewer lines than the head holds the Log is a head of them and has no tail', () => {
+  for (const surface of SURFACES) {
+    for (const count of [1, 3, 8]) {
+      const where = `${surface} ${count} lines`
+      const tree = draw(onSurface({ ...FULL, log: logLines(count) }, surface), 45, 40)
+      expect(tree.props?.minHeight, where).toBe(40)
+      const [rule, header, head] = childrenOf(tree).slice(-3)
+      expect(ruleCount(rule), where).toBe(1)
+      expect(headerRows(header).map(row => row.id), where).toEqual(['log'])
+      expect(head?.props, where).toStrictEqual({ flexDirection: 'column', flexShrink: 0 })
+      expect(logRows(head).map(rowText), where).toEqual(named(1, count))
+      expect(logBoxes(tree), where).toHaveLength(1)
+      expect(flat(tree).some(({ node }) => node.props?.height === 0), where).toBe(false)
+    }
+  }
+})
+
+test('a folded Log is its rule and its header, and a Log with no lines is nothing at all', () => {
+  for (const surface of SURFACES) {
+    const folded = draw(onSurface({ ...FULL, log: logLines(60), collapsed: { log: true } }, surface), 45, 40)
+    const [rule, header] = childrenOf(folded).slice(-2)
+    expect(ruleCount(rule), surface).toBe(1)
+    expect(headerRows(header).map(row => [row.id, row.label, row.title]), surface).toEqual([['log', '▸', 'Log']])
+    expect(logRows(folded), surface).toEqual([])
+    expect(flat(folded).some(({ node }) => node.props?.height === 0), surface).toBe(false)
+    expect(folded.props?.minHeight, surface).toBe(40)
+
+    // No lines, folded or not: no rule and no header either, and the pane ends with the Context sources.
+    for (const collapsed of [{}, { log: true }] as Array<Record<string, boolean>>) {
+      const empty = draw(onSurface({ ...FULL, log: [], collapsed }, surface), 45, 40)
+      expect(headerRows(empty).map(row => row.id), surface).toEqual(['usage', 'turn', 'agents', 'mcp', 'sources'])
+      expect(childrenOf(empty), surface).toHaveLength(1 + 1 + 5) // the top block, the Project block, five sections
+      expect(ruleCount(empty), surface).toBe(6)
+      expect(empty.props?.minHeight, surface).toBe(40)
+    }
+  }
+})
+
+test('the columns of the Log are worked out over every line drawn, the tail\'s as well as the head\'s', () => {
+  // Line 30 is the only one with the longest outcome and the longest `who`. It is drawn for a body of 40 rows, not 20.
+  const log = logLines(60, i => (i === 29 ? { who: 'minimal-change', outcome: '✗ 1m 12s' } : { outcome: '✓ 0.1s' }))
+  for (const surface of SURFACES) {
+    const isDesktop = surface === 'desktop'
+    // [the rows of the body, the cells of the outcome column, the cells of the `who` column]. The outcome column is as
+    // wide as the longest outcome drawn (`✗ 1m 12s` is 8, `✓ 0.1s` is 6), a cell more on the desktop. The `who` column
+    // is the longest name on the terminal, 13 cells on the desktop.
+    const cases = [[40, isDesktop ? 9 : 8, isDesktop ? 13 : 14], [20, isDesktop ? 7 : 6, isDesktop ? 13 : 3]] as const
+    for (const [bodyRows, outcomeCells, whoCells] of cases) {
+      const where = `${surface} ${bodyRows} rows`
+      // One layout for every row, the head's and the tail's alike.
+      const columns = logColumns(draw(onSurface({ ...FULL, log }, surface), 45, bodyRows))
+      expect(columns, where).toHaveLength(bodyRows)
+      expect(columns.map(column => column.outcomeCell?.props?.width), where).toEqual(Array(bodyRows).fill(outcomeCells))
+      expect(columns.map(column => column.whoCells), where).toEqual(Array(bodyRows).fill(whoCells))
+    }
+  }
+})
+
+test('the rows of the head and of the tail outgrow no pane, at the narrowest and the widest body used', () => {
+  for (const surface of SURFACES) {
+    for (const bodyColumns of [8, 120]) {
+      const where = `${surface} ${bodyColumns} columns`
+      // The 16 lines of FULL, with texts too long for any pane and outcomes of every kind: a head of 8, a tail of 8.
+      const tree = draw(onSurface(FULL, surface), bodyColumns, 40)
+      const [head, tail] = logBoxes(tree)
+      expect(logRows(head), where).toHaveLength(8)
+      expect(logRows(tail), where).toHaveLength(8)
+      expect(rowProblems(tree), where).toEqual([])
+      for (const part of [head, tail]) {
+        expect(rowProblems(part), where).toEqual([])
+        for (const row of logRows(part)) expect(rowProblems(row), where).toEqual([])
+      }
+    }
+    // The check sees the tail: with the width of an outcome cell taken off, the cut text has no sized cell to sit in.
+    const [, tail] = logBoxes(draw(onSurface(FULL, surface), 45, 40))
+    const [row] = logRows(tail)
+    expect(childrenOf(row), surface).toHaveLength(4)
+    const outcome = childrenOf(row)[3]
+    if (outcome !== undefined) outcome.props = { ...outcome.props, width: undefined }
+    const problems = rowProblems(row)
+    expect(problems, surface).toHaveLength(1)
+    expect(problems[0], surface).toContain('cut text')
+  }
+})
+
+// The header row of each section: the Box that holds its fold Button.
+const headerBoxes = (tree: unknown): Node[] =>
+  flat(tree).map(({ node }) => node).filter(node => (
+    childrenOf(node).some(cell => String(cell.props?.key).startsWith('toggle:'))
+  ))
+
+test('a section is a column Box of its rule, its header and its body, and folded of its rule and its header', () => {
+  const allFolded = Object.fromEntries(SECTIONS.map(id => [id, true]))
+  for (const surface of SURFACES) {
+    for (const collapsed of [{}, allFolded]) {
+      const isOpen = Object.keys(collapsed).length === 0
+      const tree = draw(onSurface({ ...FULL, collapsed }, surface))
+      // The five sections above the Log, after the top block and the Project block.
+      const sections = childrenOf(tree).slice(2, 7)
+      expect(sections, surface).toHaveLength(5)
+      sections.forEach((section, i) => {
+        const where = `${surface} ${SECTIONS[i]} ${isOpen ? 'open' : 'folded'}`
+        const [rule, header, body, ...rest] = childrenOf(section)
+        expect(section.props, where).toStrictEqual({ flexDirection: 'column' })
+        expect(ruleCount(rule), where).toBe(1)
+        expect(headerRows(header).map(row => row.id), where).toEqual([SECTIONS[i]])
+        expect(body?.props, where).toStrictEqual(isOpen ? { flexDirection: 'column' } : undefined)
+        expect(rest, where).toEqual([])
+      })
+      // Every header is one and the same row, the Log's too: it centres its cells, a cell apart.
+      expect(headerBoxes(tree).map(box => box.props), surface).toEqual(
+        Array(6).fill({ flexDirection: 'row', alignItems: 'center', columnGap: 1 }),
+      )
+    }
+  }
+})
+
 test('a header is an icon, a bold title, a dim chevron that folds, and a summary pushed to the right', () => {
   for (const surface of SURFACES) {
     const rows = headerRows(draw(onSurface(FULL, surface)))
@@ -1639,12 +1899,16 @@ test('every image on the desktop has a non-empty alt, so none of them is dropped
 
   // The top block: the ring says `Context` with a reading and without one; then the meter. The Project block has its
   // rule, then an icon for the branch and one for the changes, each saying what its row is.
-  const [top, project, ...sections] = childrenOf(draw(onSurface(FULL, 'desktop')))
+  const [top, project, ...rest] = childrenOf(draw(onSurface(FULL, 'desktop')))
   expect(alts(top)).toEqual(['Context', 'Context 88.2%'])
   expect(alts(project)).toEqual(['rule', 'Branch', 'Changes'])
   expect(alts(childrenOf(draw(onSurface(EMPTY, 'desktop')))[0])).toEqual(['Context'])
-  // Each section: its rule, then its icon, which says the title drawn in bold beside it.
-  expect(sections.map(section => alts(section).slice(0, 2))).toEqual(TITLES.map(title => ['rule', title]))
+  // Each section: its rule, then its icon, which says the title drawn in bold beside it. The Log's parts are children
+  // of the pane: its rule, its header with the icon, then its head and its tail, which have no image.
+  expect(rest.slice(0, 5).map(section => alts(section).slice(0, 2))).toEqual(
+    TITLES.slice(0, 5).map(title => ['rule', title]),
+  )
+  expect(rest.slice(5).map(alts)).toEqual([['rule'], ['Log'], [], []])
   expect(alts(draw(onSurface(EMPTY, 'desktop')))).toEqual(['Context', 'rule', 'Turn stats'])
   // A status icon says its status: it is the only place that does.
   const agents = childrenOf(draw(onSurface(statuses, 'desktop')))[4]
@@ -1682,14 +1946,11 @@ test('the divider is an image cut by its Box on the desktop and a text rule on t
 test('a body of 0 columns, or fewer, draws an empty rule on the terminal and does not throw', () => {
   for (const bodyColumns of [0, -1, -40]) {
     for (const data of [FULL, EMPTY]) {
-      const sections = childrenOf(draw(onSurface(data, 'terminal'), bodyColumns)).slice(1)
-      expect(sections.length, `${bodyColumns} columns`).toBeGreaterThan(0)
-      for (const section of sections) {
-        const rule = childrenOf(section)[0]
-        expect(rule?.type, `${bodyColumns} columns`).toBe('Text')
-        expect(textsOf(rule).join(''), `${bodyColumns} columns`).toBe('')
-        expect(rule?.props, `${bodyColumns} columns`).toMatchObject({ dimColor: true, wrap: 'truncate' })
-      }
+      const tree = draw(onSurface(data, 'terminal'), bodyColumns)
+      // Every block has its rule, empty: the Project block's and each section's, the Log's among them (a child of the
+      // pane, ahead of its header). The Turn stats section alone is the empty pane's.
+      expect(emptyRules(tree).length, `${bodyColumns} columns`).toBe(data === FULL ? 7 : 1)
+      expect(ruleCount(tree), `${bodyColumns} columns`).toBe(0)
     }
     // The desktop keeps the least width of its meters, so no image gets a negative or a zero width.
     const widths = flat(draw(onSurface(FULL, 'desktop'), bodyColumns))
@@ -1706,11 +1967,10 @@ test('the engine draws a terminal body of 0 columns, or fewer, with empty rules'
   for (const bodyColumns of [0, -3]) {
     // `drawn` rejects with the engine's refusal when its validation does not accept the tree.
     const ui = await mountPane($, 'terminal', { ...PANE_PROPS, bodyColumns })
-    // The Project block and the six sections.
-    const sections = childrenOf(await ui.drawn()).slice(1)
-    expect(sections, `${bodyColumns} columns`).toHaveLength(7)
-    const rules = sections.map(section => textsOf(childrenOf(section)[0]).join(''))
-    expect(rules, `${bodyColumns} columns`).toEqual(Array(7).fill(''))
+    // The Project block and the six sections, the Log's rule among them: seven rules, and none with a `─` in it.
+    const tree = await ui.drawn()
+    expect(emptyRules(tree), `${bodyColumns} columns`).toHaveLength(7)
+    expect(ruleCount(tree), `${bodyColumns} columns`).toBe(0)
     await ui.unmount()
   }
 })
@@ -1719,24 +1979,35 @@ test('the sections come in order, each beginning with its own rule, and a left-o
   for (const surface of SURFACES) {
     const tree = draw(onSurface(FULL, surface))
     // The top block comes first, with no rule above it and no Button to fold it; then the Project block, which has a
-    // rule of its own and no Button either; then the six sections.
-    const [top, project, ...sections] = childrenOf(tree)
+    // rule of its own and no Button either; then the five sections above the Log. The Log is no Box of its own: its
+    // rule, its header, its head and its tail come after them, children of the pane.
+    const [top, project, ...rest] = childrenOf(tree)
+    const sections = rest.slice(0, 5)
     expect(ruleCount(top), surface).toBe(0)
     expect(flat(top).some(({ node }) => node.type === 'Button'), surface).toBe(false)
     expect(project, surface).toBe(projectOf(tree))
     expect(ruleCount(project), surface).toBe(1)
     expect(flat(project).some(({ node }) => node.type === 'Button'), surface).toBe(false)
-    expect(sections, surface).toHaveLength(6)
+    expect(rest, surface).toHaveLength(5 + 4)
     // Each section is its rule, then its header, then its body.
     expect(sections.map(section => [ruleCount(childrenOf(section)[0]), childrenOf(section).length]), surface).toEqual(
-      Array(6).fill([1, 3]),
+      Array(5).fill([1, 3]),
     )
-    expect(headerRows(tree).map(row => row.section), surface).toEqual(sections)
+    expect(headerRows(tree).slice(0, 5).map(row => row.section), surface).toEqual(sections)
+    // The Log's header is a child of the pane, after the Log's rule.
+    expect(ruleCount(rest[5]), surface).toBe(1)
+    expect(headerRows(rest[6]).map(row => row.id), surface).toEqual(['log'])
+    expect(headerRows(tree).at(-1)?.section, surface).toBe(tree)
 
     // Fold two of them: the rule and the header stay, the body goes, the summary stays.
-    const folded = headerRows(draw(onSurface({ ...FULL, collapsed: { turn: true, log: true } }, surface)))
+    const foldedTree = draw(onSurface({ ...FULL, collapsed: { turn: true, log: true } }, surface))
+    const folded = headerRows(foldedTree)
     expect(folded.map(row => row.label), surface).toEqual(['▾', '▸', '▾', '▾', '▾', '▸'])
-    expect(folded.map(row => childrenOf(row.section).length), surface).toEqual([3, 2, 3, 3, 3, 2])
+    expect(folded.slice(0, 5).map(row => childrenOf(row.section).length), surface).toEqual([3, 2, 3, 3, 3])
+    // The Log folded is its rule and its header, the last two children of the pane, and no line.
+    expect(childrenOf(foldedTree), surface).toHaveLength(2 + 5 + 2)
+    expect(headerRows(childrenOf(foldedTree).at(-1)).map(row => row.id), surface).toEqual(['log'])
+    expect(logRows(foldedTree), surface).toEqual([])
     expect(folded.map(row => row.summary), surface).toEqual(headerRows(tree).map(row => row.summary))
 
     // A section with nothing to show is left out together with its rule: one rule for each header, always, and one for
@@ -1988,7 +2259,8 @@ test('what is missing is left out: no changes, no changes row; no branch, no bra
     // No name, though there is a branch and there are changes: no block, no rule of its own, nothing of it in the pane.
     const noName = draw(projectData({ name: '' }, surface))
     expect(projectOf(noName), surface).toBeUndefined()
-    expect(childrenOf(noName), surface).toHaveLength(7) // the top block and the six sections
+    // The top block, the five sections above the Log, and the Log's own four parts: its rule, header, head and tail.
+    expect(childrenOf(noName), surface).toHaveLength(1 + 5 + 4)
     expect(ruleCount(noName), surface).toBe(6)
     const shown = textsOf(noName)
     expect(shown.some(text => /(files? changed|^Project|main)$/.test(text)), surface).toBe(false)

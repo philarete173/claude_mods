@@ -24,7 +24,7 @@ export type PaneData = Pick<State, 'usage' | 'project' | 'mcp' | 'lastTurn' | 'a
 }
 
 // The part of the Pane props the drawing reads.
-export type PaneProps = { bodyColumns: number }
+export type PaneProps = { bodyColumns: number; scroll: { bodyRows: number } }
 
 // What a press on a header runs. It lives in register.tsx, where the writes to the state are, and waits for nothing.
 export type PaneHandlers = { onToggle: (id: SectionId) => void }
@@ -36,12 +36,14 @@ type Kit = {
   // Only on a surface that draws vectors. The table of the terminal holds an Svg too, but a stub: it draws nothing.
   Svg: ElementConstructor<SvgProps> | undefined
 }
-// `cols` is the body in cells; the two meter widths are worked out from it once, in px.
+// `cols` and `rows` are the body in cells, `rows` 0 where its height is not known; the two meter widths are worked out
+// from `cols` once, in px.
 type Draw = {
   ui: Kit
   data: PaneData
   handlers: PaneHandlers
   cols: number
+  rows: number
   contextMeterPx: number
   limitMeterPx: number
 }
@@ -67,6 +69,10 @@ const TYPE_CELLS_MAX = TYPE_MAX + 1 // terminal: the `@` and the longest type th
 const TEXT_METER_CELLS = 10
 const RULE_PX = 1600 // the divider image; the Box around it cuts it to the pane
 const MAX_AGENT_ROWS = 8
+// The Log keeps at least this many lines, and when they do not fit the pane scrolls (the user's decision, 2026-10-08),
+// as the Subagents list shows up to 8.
+const MIN_LOG_ROWS = 8
+// The lines the Log draws where the body's height is not known; where it is, the body's rows (MIN_LOG_ROWS at least).
 const MAX_LOG_ROWS = 15
 const MIN_LOG_TEXT_CELLS = 8 // the least text a log line keeps: below it `who` gives way, then the outcome column
 // In a narrow pane the identity column gives way first, as in the log: a subagent row leaves out its `@type`, on
@@ -310,31 +316,41 @@ function row(d: Draw, label: string, value: string, color?: string): RenderEleme
   )
 }
 
-// A section: a rule, then a header row (icon, bold title, a dim chevron that folds it, a dim summary at the right),
-// then the body unless folded. A folded section keeps its summary. The title is a Text because a Button label cannot be
-// bold; the chevron is a plain Button, dim at rest and full strength under the pointer or the focus (§5.4, §12.1).
-function section(d: Draw, id: SectionId, title: string, summary: string, body: RenderElement[]): RenderElement {
+const isFolded = (d: Draw, id: SectionId): boolean => d.data.collapsed[id] === true
+
+// The header row of a section: an icon, the bold title, a dim chevron that folds it, a dim summary at the right. The
+// title is a Text because a Button label cannot be bold; the chevron is a plain Button, dim at rest and full strength
+// under the pointer or the focus (§5.4, §12.1).
+function sectionHeader(d: Draw, id: SectionId, title: string, summary: string): RenderElement {
   const { Box, Text, Button } = d.ui
-  const isFolded = d.data.collapsed[id] === true
+
+  return (
+    <Box flexDirection="row" alignItems="center" columnGap={1}>
+      {iconSlot(d, ICON[id], title)}
+      <Box flexDirection="row" flexShrink={0}>
+        <Text bold>{title}</Text>
+      </Box>
+      <Button
+        plain
+        dimColor
+        key={`toggle:${id}`}
+        label={isFolded(d, id) ? '▸' : '▾'}
+        onPress={() => d.handlers.onToggle(id)}
+      />
+      {endText(d, summary, { dimColor: true })}
+    </Box>
+  )
+}
+
+// A section: a rule, then its header row, then the body unless folded. A folded section keeps its summary.
+function section(d: Draw, id: SectionId, title: string, summary: string, body: RenderElement[]): RenderElement {
+  const { Box } = d.ui
 
   return (
     <Box flexDirection="column">
       {divider(d)}
-      <Box flexDirection="row" alignItems="center" columnGap={1}>
-        {iconSlot(d, ICON[id], title)}
-        <Box flexDirection="row" flexShrink={0}>
-          <Text bold>{title}</Text>
-        </Box>
-        <Button
-          plain
-          dimColor
-          key={`toggle:${id}`}
-          label={isFolded ? '▸' : '▾'}
-          onPress={() => d.handlers.onToggle(id)}
-        />
-        {endText(d, summary, { dimColor: true })}
-      </Box>
-      {!isFolded && <Box flexDirection="column">{body}</Box>}
+      {sectionHeader(d, id, title, summary)}
+      {!isFolded(d, id) && <Box flexDirection="column">{body}</Box>}
     </Box>
   )
 }
@@ -641,6 +657,9 @@ function sourcesSection(d: Draw): RenderElement | null {
   return section(d, 'sources', 'Context sources', parts.join(' · '), rows)
 }
 
+// The Log, as the parts of the pane's root: its rule, its header and its lines, with no Box around them. That is the
+// layout the live desktop has verified, and it needs no chain of Boxes that grow. Folded, it is the rule and the
+// header; with no lines, nothing.
 // The newest log lines: time, who, what, and how it went. Time and `who` are dim fixed columns, so every text starts
 // at the same x; the text is cut to one line. On the desktop `who` has a width of its own, so the text column does not
 // jump with the longest `who`; on the terminal it is the longest one there is, up to the most shortType keeps. The
@@ -652,10 +671,19 @@ function sourcesSection(d: Draw): RenderElement | null {
 // outcome]; then `who` gives way, [time, text, outcome]; then [time, text], where a line shows its outcome in front of
 // its text, so that the cut at the end keeps it. That one is also the layout when nothing fits. With no outcome among
 // the lines drawn there is no outcome cell, and a line shows its text alone.
-function logSection(d: Draw): RenderElement | null {
+// The height: the lines drawn are the body's rows, MIN_LOG_ROWS at least, for a line past them could never show. The
+// first MIN_LOG_ROWS are the head, a Box that holds its height, so they always show. The rest are the tail, a Box with
+// no height of its own that grows into the rows the root leaves free (it is at least the body's height) and clips at
+// its bottom, so the oldest lines go first. When not even the head fits, the root grows to its content and the pane
+// scrolls, which the engine does. Where the body's height is not known the lines are MAX_LOG_ROWS, in one Box at their
+// natural height: a tail would have no room to grow into.
+function logParts(d: Draw): RenderElement[] {
   const { Box, Text, Svg } = d.ui
-  const lines = d.data.log.slice(0, MAX_LOG_ROWS)
-  if (lines.length === 0) return null
+  const lines = d.data.log.slice(0, d.rows > 0 ? Math.max(MIN_LOG_ROWS, d.rows) : MAX_LOG_ROWS)
+  if (lines.length === 0) return []
+  const rule = divider(d)
+  const header = sectionHeader(d, 'log', 'Log', '')
+  if (isFolded(d, 'log')) return [rule, header]
   const longestWho = Math.max(...lines.map(line => line.who.length))
   const whoCells = Svg === undefined ? Math.min(WHO_CELLS_MAX, longestWho) : WHO_CELLS
   const longestOutcome = Math.max(...lines.map(line => line.outcome?.length ?? 0))
@@ -699,27 +727,40 @@ function logSection(d: Draw): RenderElement | null {
       )}
     </Box>
   ))
+  if (d.rows === 0) return [rule, header, <Box flexDirection="column">{rows}</Box>]
+  const parts = [rule, header, <Box flexDirection="column" flexShrink={0}>{rows.slice(0, MIN_LOG_ROWS)}</Box>]
+  if (rows.length > MIN_LOG_ROWS) {
+    parts.push(
+      <Box flexDirection="column" height={0} flexGrow={1} flexShrink={1} overflow="hidden">
+        {rows.slice(MIN_LOG_ROWS)}
+      </Box>,
+    )
+  }
 
-  return section(d, 'log', 'Log', '', rows)
+  return parts
 }
 
 // The whole pane. `els` is the element table of the surface, `data` the state, `props` the Pane props, and `handlers`
-// what the presses run. Each section begins with its own rule, so a section that is left out leaves no double rule.
+// what the presses run. Each section begins with its own rule, so a section that is left out leaves no double rule. The
+// root is at least the body's height, and the Log, which comes last, takes the rest of it (logParts). A body whose rows
+// are not a positive number has no known height: the root has no minimum then.
 export function renderPane(els: ElementTable, data: PaneData, props: PaneProps, handlers: PaneHandlers): RenderElement {
   const { Box, Text, Button } = els
   const Svg = 'Svg' in els && data.surface !== 'terminal' ? els.Svg : undefined
   const cols = props.bodyColumns
+  const { bodyRows } = props.scroll
   const d: Draw = {
     ui: { Box, Text, Button, Svg },
     data,
     handlers,
     cols,
+    rows: Number.isFinite(bodyRows) && bodyRows > 0 ? bodyRows : 0,
     contextMeterPx: contextMeterWidth(cols),
     limitMeterPx: limitMeterWidth(cols),
   }
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" minHeight={d.rows > 0 ? d.rows : undefined}>
       {topBlock(d)}
       {projectBlock(d)}
       {usageSection(d)}
@@ -727,7 +768,7 @@ export function renderPane(els: ElementTable, data: PaneData, props: PaneProps, 
       {agentsSection(d)}
       {mcpSection(d)}
       {sourcesSection(d)}
-      {logSection(d)}
+      {logParts(d)}
     </Box>
   )
 }
