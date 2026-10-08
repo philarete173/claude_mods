@@ -68,6 +68,7 @@ const TEXT_METER_CELLS = 10
 const RULE_PX = 1600 // the divider image; the Box around it cuts it to the pane
 const MAX_AGENT_ROWS = 8
 const MAX_LOG_ROWS = 15
+const MIN_LOG_TEXT_CELLS = 8 // the least text a log line keeps before its outcome column gives way
 
 // The meter, the ring and the icons are images, so their colours are raw and the same in both themes.
 const BLUE = '#2f7de1'
@@ -578,16 +579,26 @@ function sourcesSection(d: Draw): RenderElement | null {
   return section(d, 'sources', 'Context sources', parts.join(' · '), rows)
 }
 
-// The newest log lines: time, who, what. Time and `who` are dim fixed columns, so every text starts at the same x; the
-// text is cut to one line, an error shows its `who` in red. On the desktop `who` has a width of its own, so the text
-// column does not jump with the longest `who`; on the terminal it is the longest one there is, up to the most
-// shortType keeps.
+// The newest log lines: time, who, what, and how it went. Time and `who` are dim fixed columns, so every text starts
+// at the same x; the text is cut to one line, an error shows its `who` in red. On the desktop `who` has a width of its
+// own, so the text column does not jump with the longest `who`; on the terminal it is the longest one there is, up to
+// the most shortType keeps. The outcome (the mark and the time of an action, or `denied`) is a fixed column at the
+// right edge, as wide as the longest one drawn, in red for an error. The desktop adds a cell: a ✓ or a ✗ varies by
+// font, and the margin keeps the mark whole. A line without an outcome has the cell empty, so every text is cut at
+// the same x. With no outcome among the lines drawn there is no column. Nor is there one while the text beside it
+// would keep fewer than MIN_LOG_TEXT_CELLS cells (the body less the time, `who`, the outcome and the three gaps of
+// the row): the row has three cells then, and the outcome of a line goes back to the end of its text, cut with it.
 function logSection(d: Draw): RenderElement | null {
   const { Box, Text, Svg } = d.ui
   const lines = d.data.log.slice(0, MAX_LOG_ROWS)
   if (lines.length === 0) return null
-  const longest = Math.max(...lines.map(line => line.who.length))
-  const whoCells = Svg === undefined ? Math.min(WHO_CELLS_MAX, longest) : WHO_CELLS
+  const longestWho = Math.max(...lines.map(line => line.who.length))
+  const whoCells = Svg === undefined ? Math.min(WHO_CELLS_MAX, longestWho) : WHO_CELLS
+  const longestOutcome = Math.max(...lines.map(line => line.outcome?.length ?? 0))
+  const outcomeCells = longestOutcome === 0 ? 0 : longestOutcome + (Svg === undefined ? 0 : 1)
+  // The cells the text keeps: the body less the time, `who` and outcome cells and the 3 gaps of a row of four.
+  const textCells = d.cols - TIME_CELLS - whoCells - outcomeCells - 3
+  const hasOutcomeColumn = outcomeCells > 0 && textCells >= MIN_LOG_TEXT_CELLS
   const rows = lines.map(line => (
     <Box flexDirection="row" columnGap={1}>
       <Box flexDirection="row" width={TIME_CELLS} flexShrink={0}>
@@ -601,8 +612,19 @@ function logSection(d: Draw): RenderElement | null {
         )}
       </Box>
       <Box flexDirection="row" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
-        <Text wrap="truncate">{line.text}</Text>
+        <Text wrap="truncate">
+          {hasOutcomeColumn || line.outcome === undefined ? line.text : `${line.text} ${line.outcome}`}
+        </Text>
       </Box>
+      {hasOutcomeColumn && (
+        <Box flexDirection="row" width={outcomeCells} flexShrink={0} overflow="hidden" justifyContent="flex-end">
+          {line.outcome !== undefined && (line.kind === 'error' ? (
+            <Text color={BAD} wrap="truncate">{line.outcome}</Text>
+          ) : (
+            <Text dimColor wrap="truncate">{line.outcome}</Text>
+          ))}
+        </Box>
+      )}
     </Box>
   ))
 

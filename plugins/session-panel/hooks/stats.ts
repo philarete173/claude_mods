@@ -51,7 +51,7 @@ export type AgentRow = {
   costUsd: number | null
 }
 export type LogKind = 'info' | 'ok' | 'error'
-export type LogEntry = { at: number; who: string; text: string; kind: LogKind }
+export type LogEntry = { at: number; who: string; text: string; kind: LogKind; outcome?: string }
 export type CostSplit = { total: number | null; session: number | null; subagents: number }
 
 const MAX_RATE = 5000 // tok/s; anything above is an artefact, not a measurement
@@ -206,7 +206,7 @@ function hostOf(url: string): string {
   }
 }
 
-// The log line of a tool call, before the ✓/✗ suffix.
+// The log line of a tool call: what it did. How it went is the outcome of the entry, a field of its own.
 export function toolLabel(tool: string, input: Record<string, unknown>, root: string): string {
   const mcp = /^mcp__(.+?)__(.+)$/.exec(tool)
   if (mcp) return `${mcp[1]}:${mcp[2]}`

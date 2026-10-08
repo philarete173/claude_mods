@@ -114,6 +114,7 @@ type World = {
   breakdowns: number // how many usage() calls asked for the context breakdown
   usageLag: number // how long usage() takes, in mock ms
   usageFails: boolean // usage() rejects
+  toolFailMs: number // how long a failing tool call takes, in mock ms
   tokens: number | undefined // context.tokens of usage(): none before the first response of the window
   rawMaxTokens: number | undefined // the window the breakdown measures against; undefined: no breakdown in usage()
   mcpServers: string[] // the server of each MCP tool the breakdown holds, so a server with two tools is listed twice
@@ -143,6 +144,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
     breakdowns: 0,
     usageLag: 0,
     usageFails: false,
+    toolFailMs: 0,
     tokens: undefined,
     rawMaxTokens: 1_000_000,
     mcpServers: ['codebase-memory', 'codebase-memory', 'issue-hub', 'ccd_session'],
@@ -188,7 +190,11 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
     if (e.tool === 'Agent') says = e.description
     if (e.tool === 'SendMessage') says = e.message
     if (says.startsWith('deny')) return { deny: 'no' }
-    if (says.startsWith('fail')) return { isError: true as const, result: 'boom', text: 'boom' }
+    if (says.startsWith('fail')) {
+      if (w.toolFailMs > 0) await clock.sleep(w.toolFailMs)
+
+      return { isError: true as const, result: 'boom', text: 'boom' }
+    }
     await clock.sleep(300)
 
     return { result: { stdout: 'ok' } as never, text: 'ok' }
@@ -685,9 +691,9 @@ test('a main turn ends as lastTurn: step timing, tool time, cost and log; everyt
     expectNear(state.lastTurn?.wholeTurnRate, 140 / 1.7)
     // The answer: 100 tokens over its whole request, 0.7 s (its text came 0.2 s in, which does not matter).
     expectNear(state.lastTurn?.responseRate, 100 / 0.7)
-    expect(state.log.map(entry => [entry.who, entry.text, entry.kind])).toEqual([
-      ['main', 'Bash ls -la ✓ 0.3s', 'ok'],
-      ['you', 'fix the stock order qty', 'info'],
+    expect(state.log.map(entry => [entry.who, entry.text, entry.kind, entry.outcome])).toEqual([
+      ['main', 'Bash ls -la', 'ok', '✓ 0.3s'],
+      ['you', 'fix the stock order qty', 'info', undefined],
     ])
   })
 
@@ -750,13 +756,26 @@ test('a failed or denied tool call is logged as ✗ or denied, and a secret in t
       isError: true, result: 'boom', text: 'boom',
     })
 
-    expect((await readState($)).log.map(entry => [entry.who, entry.text, entry.kind])).toEqual([
-      ['main', 'Bash fail --token=••• ✗', 'error'],
-      ['main', 'Bash deny it denied', 'error'],
+    expect((await readState($)).log.map(entry => [entry.who, entry.text, entry.kind, entry.outcome])).toEqual([
+      ['main', 'Bash fail --token=•••', 'error', '✗ 0.0s'],
+      ['main', 'Bash deny it', 'error', 'denied'],
     ])
   })
 
-test('a long command keeps its outcome: the label is cut short and the suffix is not', SLOW_READER, async ($, on) => {
+test('a failed call carries the time it took, as a successful one does', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  w.toolFailMs = 1200
+
+  await drive(clock, $.tool.call({ tool: 'Bash', command: 'fail it' }))
+
+  expect((await readState($)).log.map(entry => [entry.text, entry.kind, entry.outcome])).toEqual([
+    ['Bash fail it', 'error', '✗ 1.2s'],
+  ])
+})
+
+test('a long command is cut to 64 characters, and its outcome stays whole', SLOW_READER, async ($, on) => {
   const clock = mock.clock(on)
   bottom(on, clock)
   await $.session.start(START)
@@ -765,13 +784,13 @@ test('a long command keeps its outcome: the label is cut short and the suffix is
   await $.tool.call({ tool: 'Bash', command: `deny ${'y'.repeat(100)}` })
   await $.tool.call({ tool: 'Bash', command: `fail ${'z'.repeat(100)}` })
 
-  const lines = (await readState($)).log.map(entry => entry.text)
+  const lines = (await readState($)).log.map(entry => [entry.text, entry.outcome] as const)
   expect(lines).toEqual([
-    `${`Bash fail ${'z'.repeat(100)}`.slice(0, 61)}… ✗`,
-    `${`Bash deny ${'y'.repeat(100)}`.slice(0, 56)}… denied`,
-    `${`Bash ${'x'.repeat(100)}`.slice(0, 56)}… ✓ 0.3s`,
+    [`${`Bash fail ${'z'.repeat(100)}`.slice(0, 63)}…`, '✗ 0.0s'],
+    [`${`Bash deny ${'y'.repeat(100)}`.slice(0, 63)}…`, 'denied'],
+    [`${`Bash ${'x'.repeat(100)}`.slice(0, 63)}…`, '✓ 0.3s'],
   ])
-  expect(lines.map(line => line.length)).toEqual([64, 64, 64])
+  expect(lines.map(([text]) => text.length)).toEqual([64, 64, 64])
 })
 
 test('a turn the mod did not see start leaves lastTurn alone; the branch is read again when a turn ends', WITH_READER,
@@ -868,7 +887,7 @@ test('a subagent: its row, the cost of each step by the cost.usd delta, its outc
   expect(state.agents.a1?.costUsd).toBe(0.75)
   expect(state.turn?.steps).toHaveLength(1)
   expect(state.turn?.toolIntervals).toEqual([])
-  expect(state.log.find(entry => entry.who === 'engineer')?.text).toBe('Read src/a.py ✓ 0.3s')
+  expect(state.log.find(entry => entry.who === 'engineer')).toMatchObject({ text: 'Read src/a.py', outcome: '✓ 0.3s' })
 
   const completed = await $.turn.complete({
     answer: 'found the bug in qty', durationMs: 72_000, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer',
@@ -878,7 +897,7 @@ test('a subagent: its row, the cost of each step by the cost.usd delta, its outc
   state = await readState($)
   expect(state.agents.a1).toMatchObject({ status: 'done', endedAt: completedAt, costUsd: 0.75 })
   expect(state.log[0]).toEqual({
-    at: completedAt, who: 'engineer', text: 'done 1m 12s · $0.750 — found the bug in qty', kind: 'ok',
+    at: completedAt, who: 'engineer', text: 'done · $0.750 — found the bug in qty', kind: 'ok', outcome: '✓ 1m 12s',
   })
   expect(state.lastTurn).toBeUndefined()
   expect(state.turn?.turnId).toBe('t1')
@@ -896,11 +915,77 @@ test('a stopped subagent is a note in the log, a failed one is an error', WITH_R
   const state = await readState($)
   expect(state.agents.a1?.status).toBe('stopped')
   expect(state.agents.a2?.status).toBe('failed')
-  expect(state.log.slice(0, 2).map(entry => [entry.who, entry.text, entry.kind])).toEqual([
-    ['engineer', 'failed', 'error'],
-    ['engineer', 'stopped', 'info'], // somebody stopped it: that is news, not an error
+  expect(state.log.slice(0, 2).map(entry => [entry.who, entry.text, entry.kind, entry.outcome])).toEqual([
+    ['engineer', 'failed', 'error', '✗ 0.0s'],
+    ['engineer', 'stopped', 'info', '0.0s'], // somebody stopped it: that is news, not an error, so no mark
   ])
 })
+
+test('the answer in the line of a subagent is masked and cut to 80 characters', WITH_READER, async ($, on) => {
+  bottom(on, mock.clock(on))
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  await $.agent.spawn(SPAWN)
+
+  const answers: [string, string][] = [['a1', 'use token=hunter22secret'], ['a2', 'x'.repeat(200)]]
+  for (const [agentId, answer] of answers) {
+    await $.turn.complete({ answer, durationMs: 5, isAborted: false, turnId: 't1', agentId, reason: 'answer' })
+  }
+
+  const { log } = await readState($)
+  expect(log.slice(0, 2).map(entry => entry.text)).toEqual([`done — ${'x'.repeat(79)}…`, 'done — use token=•••'])
+  expect(JSON.stringify(log)).not.toContain('hunter22secret')
+})
+
+test('the end of a subagent has its outcome in a field of its own: a mark and the time, a stop with no mark',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    for (let i = 0; i < 4; i += 1) await $.agent.spawn(SPAWN)
+    expect(await chargedAfter($, clock, w, 'a1', 0.5)).toBe(0.5) // a1 has cost something, the others not
+    const end = (agentId: string, how: { answer?: string; durationMs: number; isAborted?: boolean; reason: string }) =>
+      $.turn.complete({ answer: '', isAborted: false, turnId: 't1', agentId, ...how } as never)
+
+    await end('a1', { answer: 'found it', durationMs: 72_000, reason: 'answer' })
+    await end('a2', { durationMs: 1500, reason: 'answer' })
+    await end('a3', { durationMs: 2000, reason: 'error' })
+    await end('a4', { durationMs: 3000, isAborted: true, reason: 'aborted' })
+
+    // Newest first. The cost part of the text only when the row has one, the answer part only when there is an answer.
+    const { log } = await readState($)
+    expect(log.slice(0, 4).map(entry => [entry.who, entry.text, entry.kind, entry.outcome])).toEqual([
+      ['engineer', 'stopped', 'info', '3.0s'],
+      ['engineer', 'failed', 'error', '✗ 2.0s'],
+      ['engineer', 'done', 'ok', '✓ 1.5s'],
+      ['engineer', 'done · $0.500 — found it', 'ok', '✓ 1m 12s'],
+    ])
+  })
+
+test('a line that reports no action has no outcome key: a prompt, an engine turn, a spawn, a resume, a compaction',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.turn.start({ text: 'fix it', turnId: 't1' })
+    await $.turn.start({ text: '<task-notification>done</task-notification>', turnId: 't2' })
+    await $.agent.spawn(SPAWN)
+    await $.turn.complete({
+      answer: 'ok', durationMs: 5, isAborted: false, turnId: 't2', agentId: 'a1', reason: 'answer',
+    })
+    await runStep($, clock, { turnId: 't2', index: 1, agentId: 'a1' }) // a message wakes it
+    await clock.advance(10)
+    await $.session.compact({ trigger: 'manual', messages: MESSAGES })
+    await clock.advance(1)
+
+    // Newest first. Only the end of the subagent, which is an action with a time, has an outcome.
+    expect((await readState($)).log.map(entry => [entry.text.split(' ')[0], 'outcome' in entry])).toEqual([
+      ['compacted', false], ['resumed', false], ['done', true], ['spawned', false], ['task-notification', false],
+      ['fix', false],
+    ])
+  })
 
 test('a subagent that ends while the cost cannot be read is still logged and closed', WITH_READER, async ($, on) => {
   const w = bottom(on, mock.clock(on, { now: 1_000_000 }))
@@ -915,7 +1000,7 @@ test('a subagent that ends while the cost cannot be read is still logged and clo
   expect(completed).toEqual({ text: 'ok' })
   const state = await readState($)
   expect(state.agents.a1?.status).toBe('done')
-  expect(state.log[0]).toMatchObject({ who: 'engineer', text: 'done 5.0s — ok', kind: 'ok' })
+  expect(state.log[0]).toMatchObject({ who: 'engineer', text: 'done — ok', kind: 'ok', outcome: '✓ 5.0s' })
 })
 
 test('a subagent that ends right after its last step is logged with that step charged', SLOW_READER, async ($, on) => {
@@ -934,7 +1019,7 @@ test('a subagent that ends right after its last step is logged with that step ch
   })
 
   const ended = await readState($)
-  expect(ended.log[0]?.text).toBe('done 5.0s · $0.750 — ok')
+  expect(ended.log[0]).toMatchObject({ text: 'done · $0.750 — ok', outcome: '✓ 5.0s' })
   expect(ended.agents.a1?.costUsd).toBe(0.75)
   await clock.advance(10)
   expect((await readState($)).agents.a1?.costUsd).toBe(0.75) // the late timer charges nothing twice
@@ -958,7 +1043,7 @@ test('cost readings are taken one at a time: a turn that ends while one is in fl
     }))
 
     expect(w.maxUsageInFlight).toBe(1)
-    expect((await readState($)).log[0]?.text).toBe('done 1.0s · $0.250 — ok')
+    expect((await readState($)).log[0]).toMatchObject({ text: 'done · $0.250 — ok', outcome: '✓ 1.0s' })
   })
 
 test('a subagent that a message resumes runs again, with one line in the log, until it ends again', SLOW_READER,
@@ -1008,7 +1093,7 @@ test('a subagent that a message resumes runs again, with one line in the log, un
     expect(endedAgainAt).toBeGreaterThan(endedAt)
     expect(again.agents.a1).toEqual({ ...ended.agents.a1, endedAt: endedAgainAt })
     expect(again.log[0]).toEqual({
-      at: endedAgainAt, who: 'code-reviewer', text: 'done 3.0s · $0.500 — and again', kind: 'ok',
+      at: endedAgainAt, who: 'code-reviewer', text: 'done · $0.500 — and again', kind: 'ok', outcome: '✓ 3.0s',
     })
   })
 
@@ -1162,9 +1247,9 @@ test('a denied or failed Agent call is logged as denied or ✗: no subagent star
     expect(await $.tool.call(agentCall('deny it'))).toEqual({ deny: 'no' })
     expect(await $.tool.call(agentCall('fail it'))).toEqual({ isError: true, result: 'boom', text: 'boom' })
 
-    expect((await readState($)).log.map(entry => [entry.who, entry.text, entry.kind])).toEqual([
-      ['main', 'Agent → engineer: fail it ✗', 'error'],
-      ['main', 'Agent → engineer: deny it denied', 'error'],
+    expect((await readState($)).log.map(entry => [entry.who, entry.text, entry.kind, entry.outcome])).toEqual([
+      ['main', 'Agent → engineer: fail it', 'error', '✗ 0.0s'],
+      ['main', 'Agent → engineer: deny it', 'error', 'denied'],
     ])
   })
 
@@ -1175,9 +1260,9 @@ test('a SendMessage to a subagent adds no line, any other one does, and a failed
     await $.session.start(START)
     await clock.advance(1)
     await $.agent.spawn(SPAWN)
-    const lines = async (): Promise<string[][]> =>
-      (await readState($)).log.map(entry => [entry.who, entry.text, entry.kind])
-    const spawned = [['main', 'spawned · engineer: Fix cart total qty', 'info']]
+    const lines = async (): Promise<unknown[][]> =>
+      (await readState($)).log.map(entry => [entry.who, entry.text, entry.kind, entry.outcome])
+    const spawned = [['main', 'spawned · engineer: Fix cart total qty', 'info', undefined]]
 
     // To a subagent the panel has a row for, by its id: its own lines say it.
     await drive(clock, $.tool.call(sendTo('a1')))
@@ -1185,14 +1270,14 @@ test('a SendMessage to a subagent adds no line, any other one does, and a failed
 
     // To anyone else: everybody, an id with no row, a name, a key that every object has, and not a name at all.
     for (const to of ['*', 'a9', 'researcher', 'constructor', 42]) await drive(clock, $.tool.call(sendTo(to)))
-    expect(await lines()).toEqual([...Array(5).fill(['main', 'SendMessage ✓ 0.3s', 'ok']), ...spawned])
+    expect(await lines()).toEqual([...Array(5).fill(['main', 'SendMessage', 'ok', '✓ 0.3s']), ...spawned])
 
     // A call to the subagent that failed or was denied says so.
     await $.tool.call(sendTo('a1', 'fail it'))
     await $.tool.call(sendTo('a1', 'deny it'))
     expect((await lines()).slice(0, 2)).toEqual([
-      ['main', 'SendMessage denied', 'error'],
-      ['main', 'SendMessage ✗', 'error'],
+      ['main', 'SendMessage', 'error', 'denied'],
+      ['main', 'SendMessage', 'error', '✗ 0.0s'],
     ])
   })
 

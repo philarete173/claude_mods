@@ -288,16 +288,26 @@ const markCells = async (ui: Pane): Promise<Array<[mark: string, cells: unknown]
     return isGlyph ? [[textsOf(first)[0] ?? '', node.props?.width]] : []
   })
 
-// The log rows as drawn: who, and how many cells wide the columns of the time and of `who` are.
+// The log rows as drawn: who, how many cells wide the columns of the time and of `who` are, how many cells the row
+// has, and its outcome cell, the fourth, when there is one.
 const isTimeCell = (cell: Node | undefined): boolean =>
   cell?.type === 'Box' && childrenOf(cell)[0]?.type === 'Text' && /^\d\d:\d\d:\d\d$/.test(textsOf(cell)[0] ?? '')
-const logColumns = (tree: unknown): Array<{ who: string; timeCells: unknown; whoCells: unknown }> =>
+type LogColumns = {
+  who: string; timeCells: unknown; whoCells: unknown; cells: number; outcomeCell: Node | undefined
+}
+const logColumns = (tree: unknown): LogColumns[] =>
   flat(tree).flatMap(({ node }) => {
-    const [time, who, text] = childrenOf(node)
+    const [time, who, text, outcome] = childrenOf(node)
     if (node.type !== 'Box' || !isTimeCell(time) || who === undefined || text === undefined) return []
 
-    return [{ who: textsOf(who)[0] ?? '', timeCells: time?.props?.width, whoCells: who.props?.width }]
+    return [{
+      who: textsOf(who)[0] ?? '', timeCells: time?.props?.width, whoCells: who.props?.width,
+      cells: childrenOf(node).length, outcomeCell: outcome,
+    }]
   })
+// The log rows as drawn: the Boxes whose first cell is a time.
+const logRows = (tree: unknown): Node[] =>
+  flat(tree).map(({ node }) => node).filter(node => node.type === 'Box' && isTimeCell(childrenOf(node)[0]))
 
 // ---- Drawing without the engine ----
 
@@ -341,10 +351,17 @@ const AGENTS = [
 ]
 const PROJECT = 'a_project_folder_with_a_long_name'
 const BRANCH = 'feature/a-branch-with-a-long-name'
-const LONG_TEXT = `Edit plugins/session-panel/hooks/view.tsx ${'and more '.repeat(10)}✓ 0.1s`
-const LOG: LogEntry[] = Array.from({ length: 16 }, (_, i): LogEntry => ({
-  at: NOW - i * 1000, who: i === 0 ? 'minimal-change' : 'you', text: LONG_TEXT, kind: i === 1 ? 'error' : 'ok',
-}))
+const LONG_TEXT = `Edit plugins/session-panel/hooks/view.tsx ${'and more '.repeat(10).trimEnd()}`
+// The outcomes of the lines, in turn: a short one, a long one, none, and a word.
+const OUTCOMES = ['✓ 0.1s', '✗ 1m 12s', undefined, 'denied']
+const LOG: LogEntry[] = Array.from({ length: 16 }, (_, i): LogEntry => {
+  const outcome = OUTCOMES[i % OUTCOMES.length]
+
+  return {
+    at: NOW - i * 1000, who: i === 0 ? 'minimal-change' : 'you', text: LONG_TEXT, kind: i === 1 ? 'error' : 'ok',
+    ...(outcome === undefined ? {} : { outcome }),
+  }
+})
 // A pane with something in every block, and things too long for any pane: names, texts, a ninth agent.
 const FULL: PaneData = {
   usage: {
@@ -502,9 +519,12 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
     const log = await texts(ui)
     const prompt = log.indexOf('fix the stock order qty')
     expect(prompt).toBeGreaterThan(-1)
-    expect(log.indexOf('Bash ls -la ✓ 0.3s')).toBeGreaterThan(-1)
-    expect(log.indexOf('Bash ls -la ✓ 0.3s')).toBeLessThan(prompt)
-    expect(log.indexOf('done 5.0s · $0.020 — found it')).toBeLessThan(log.indexOf('Bash ls -la ✓ 0.3s'))
+    expect(log.indexOf('Bash ls -la')).toBeGreaterThan(-1)
+    expect(log.indexOf('Bash ls -la')).toBeLessThan(prompt)
+    expect(log.indexOf('done · $0.020 — found it')).toBeLessThan(log.indexOf('Bash ls -la'))
+    // How each action went is a Text of its own, the last of its row: the mark and the time.
+    expect(log.indexOf('✓ 0.3s')).toBe(log.indexOf('Bash ls -la') + 1)
+    expect(log.indexOf('✓ 5.0s')).toBe(log.indexOf('done · $0.020 — found it') + 1)
     await ui.unmount()
   }
 })
@@ -762,9 +782,9 @@ test('a turn of one tool step hides Response and Steps; the cache is green from 
     expect(await ui.findAll({ type: 'Text', text: '~20 tok/s' }), surface).toHaveLength(2)
     expect(await ui.find({ type: 'Text', text: '900 ↑ · 20 ↓' }), surface).toBeDefined()
     // The log has the person's prompt only: the desktop's column of `who` is its own width, the terminal's is as wide
-    // as `you`.
+    // as `you`. The line reports no action, so the row has no column of outcome: its three cells.
     expect(logColumns(await ui.drawn()), surface).toEqual([
-      { who: 'you', timeCells: 8, whoCells: surface === 'desktop' ? 13 : 3 },
+      { who: 'you', timeCells: 8, whoCells: surface === 'desktop' ? 13 : 3, cells: 3, outcomeCell: undefined },
     ])
     await ui.unmount()
   }
@@ -885,6 +905,17 @@ test('the log shows 15 lines, newest first, an error in red, and a long text cut
     expect(columns, surface).toHaveLength(15)
     expect(columns.map(column => column.timeCells), surface).toEqual(Array(15).fill(8))
     expect(columns.map(column => column.whoCells), surface).toEqual(Array(15).fill(surface === 'desktop' ? 13 : 8))
+    // The failed line has an outcome, in red like its `who`. The column is as wide as that outcome (`✗ 0.0s`, a cell
+    // more on the desktop), and the 14 prompts have the cell empty, of the same width. At the 40 columns of the mount
+    // the desktop's text keeps 9 cells, one over the least that the column allows, so the column is drawn.
+    expect(columns.map(column => column.outcomeCell?.props?.width), surface).toEqual(
+      Array(15).fill(surface === 'desktop' ? 7 : 6),
+    )
+    const outcomes = await ui.findAll({ type: 'Text', text: /^✗ / })
+    expect(outcomes.map(el => [el.text, el.props.color, el.props.dimColor]), surface).toEqual([
+      ['✗ 0.0s', 'error', undefined],
+    ])
+    expect(columns.map(column => textsOf(column.outcomeCell)), surface).toEqual([['✗ 0.0s'], ...Array(14).fill([])])
     // The text is cut to one line, in a cell that gives way.
     expect((await ui.find({ type: 'Text', text: 'prompt 19' }))?.props.wrap).toBe('truncate')
     await ui.unmount()
@@ -1208,6 +1239,117 @@ test('the log keeps time and who in fixed columns, so every text starts at the s
       .map(({ node }) => [node.props?.color, node.props?.dimColor])
   expect(styles('error')).toEqual(Array(3).fill(['error', undefined]))
   expect(styles('ok')).toEqual(Array(3).fill([undefined, true]))
+})
+
+// Log lines with outcomes of three lengths (an error among them) and one with none: a prompt.
+const WITH_OUTCOMES: LogEntry[] = [
+  { at: NOW, who: 'main', text: 'Read a.py', kind: 'ok', outcome: '✓ 0.3s' },
+  { at: NOW - 1000, who: 'main', text: 'Bash x', kind: 'error', outcome: '✗ 1m 12s' },
+  { at: NOW - 2000, who: 'you', text: 'a prompt', kind: 'info' },
+  { at: NOW - 3000, who: 'main', text: 'Edit b.py', kind: 'error', outcome: 'denied' },
+]
+
+test('the outcome of a log line is a fixed column at the right edge: one width, empty where a line has none', () => {
+  for (const surface of SURFACES) {
+    const rows = logColumns(draw(onSurface({ ...EMPTY, log: WITH_OUTCOMES }, surface)))
+    expect(rows, surface).toHaveLength(4)
+    // Four cells on every row. The cell is as wide on every row as the longest outcome, `✗ 1m 12s`, of 8 characters;
+    // the desktop has a cell more. It holds its width, clips, and puts its text at the right edge.
+    expect(rows.map(row => row.cells), surface).toEqual([4, 4, 4, 4])
+    for (const row of rows) {
+      expect(row.outcomeCell?.props, surface).toMatchObject({
+        flexDirection: 'row', width: surface === 'desktop' ? 9 : 8, flexShrink: 0, overflow: 'hidden',
+        justifyContent: 'flex-end',
+      })
+    }
+    // The prompt has the cell too, and it is empty. The others have their outcome in a cut Text, in red for an error
+    // and dim for the rest, as their `who`.
+    expect(rows.map(row => textsOf(row.outcomeCell)), surface).toEqual([['✓ 0.3s'], ['✗ 1m 12s'], [], ['denied']])
+    const styleOf = (el: Node): unknown[] => [el.props?.color, el.props?.dimColor, el.props?.wrap]
+    expect(rows.map(row => childrenOf(row.outcomeCell).map(styleOf)), surface).toEqual([
+      [[undefined, true, 'truncate']], [['error', undefined, 'truncate']], [], [['error', undefined, 'truncate']],
+    ])
+  }
+})
+
+test('with no outcome among the lines drawn the log has no outcome column: the three cells of a row, as before', () => {
+  // The 16th line has an outcome, but only 15 are drawn: it makes no column.
+  const lines: LogEntry[] = [
+    ...Array.from({ length: 15 }, (_, i): LogEntry => (
+      { at: NOW - i * 1000, who: 'you', text: `prompt ${i}`, kind: 'info' }
+    )),
+    { at: NOW - 15_000, who: 'main', text: 'Read a.py', kind: 'ok', outcome: '✓ 0.3s' },
+  ]
+
+  for (const surface of SURFACES) {
+    const rows = logColumns(draw(onSurface({ ...EMPTY, log: lines }, surface)))
+    expect(rows.map(row => row.cells), surface).toEqual(Array(15).fill(3))
+    expect(rows.every(row => row.outcomeCell === undefined), surface).toBe(true)
+  }
+})
+
+// The narrowest body that draws the outcome column, by surface, `who` and longest outcome. The text keeps the body
+// less the time (8), `who`, the outcome and 3 gaps, and the column is drawn from 8 cells of text. The desktop's `who`
+// is 13 whatever the name, and its outcome has a cell more: `✗ 1m 12s` is 9 cells, `✓ 0.3s` is 7, so 8 + 13 + 9 + 3 +
+// 8 = 41 and 8 + 13 + 7 + 3 + 8 = 39. The terminal's `who` is the longest name and its outcome is as it is: 8 + 4 + 8
+// + 3 + 8 = 31 for `main`, 8 + 14 + 8 + 3 + 8 = 41 for `minimal-change`, and 8 + 4 + 6 + 3 + 8 = 29 with `✓ 0.3s`.
+const SHORT_OUTCOMES = WITH_OUTCOMES.filter(line => line.outcome !== '✗ 1m 12s')
+const COLUMN_FROM: [surface: Surface, lines: LogEntry[], who: string, outcomeCells: number, bodyColumns: number][] = [
+  ['desktop', WITH_OUTCOMES, 'main', 9, 41], ['desktop', WITH_OUTCOMES, 'minimal-change', 9, 41],
+  ['desktop', SHORT_OUTCOMES, 'main', 7, 39], ['terminal', WITH_OUTCOMES, 'main', 8, 31],
+  ['terminal', WITH_OUTCOMES, 'minimal-change', 8, 41], ['terminal', SHORT_OUTCOMES, 'main', 6, 29],
+]
+
+test('the outcome column is drawn while the text beside it keeps 8 cells; narrower, the outcome ends the text', () => {
+  for (const [surface, lines, who, outcomeCells, from] of COLUMN_FROM) {
+    const log = lines.map(line => ({ ...line, who }))
+    // The narrowest body the tests use, the one just short of the threshold, the threshold itself, and a wide one.
+    for (const bodyColumns of [8, from - 1, from, 120]) {
+      const where = `${surface} ${who} ${bodyColumns} columns, from ${from}`
+      const tree = draw(onSurface({ ...EMPTY, log }, surface), bodyColumns)
+      const rows = logColumns(tree)
+      const isColumn = bodyColumns >= from
+      expect(rowProblems(tree), where).toEqual([])
+      // Four cells with the column, three without it: the time and `who` are the same cells either way.
+      expect(rows.map(row => row.cells), where).toEqual(Array(log.length).fill(isColumn ? 4 : 3))
+      expect(rows.map(row => [row.timeCells, row.whoCells]), where)
+        .toEqual(Array(log.length).fill([8, surface === 'desktop' ? 13 : who.length]))
+      expect(rows.map(row => row.outcomeCell?.props?.width), where)
+        .toEqual(Array(log.length).fill(isColumn ? outcomeCells : undefined))
+      // Without the column a line ends in its outcome, ` ✓ 0.3s`, and one with none shows its text as it is.
+      const texts = logRows(tree).map(row => textsOf(childrenOf(row)[2]))
+      expect(texts, where).toEqual(log.map(line => [
+        isColumn || line.outcome === undefined ? line.text : `${line.text} ${line.outcome}`,
+      ]))
+      // The text is a cell that gives way and is cut, with the column and without it.
+      for (const row of logRows(tree)) {
+        const text = childrenOf(row)[2]
+        expect(text?.props, where).toMatchObject({ flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden' })
+        expect(childrenOf(text)[0]?.props?.wrap, where).toBe('truncate')
+      }
+    }
+  }
+})
+
+test('the log rows outgrow no pane, with and without outcomes, at the narrowest and the widest body used', () => {
+  for (const surface of SURFACES) {
+    for (const bodyColumns of [8, 120]) {
+      for (const log of [WITH_OUTCOMES, WITH_OUTCOMES.filter(line => line.outcome === undefined)]) {
+        const where = `${surface} ${bodyColumns} ${log.length} lines`
+        const tree = draw(onSurface({ ...EMPTY, log }, surface), bodyColumns)
+        expect(rowProblems(tree), where).toEqual([])
+        expect(logRows(tree), where).toHaveLength(log.length)
+        for (const row of logRows(tree)) expect(rowProblems(row), where).toEqual([])
+      }
+    }
+    // The check sees the outcome cell: with its width taken off, the cut text has no sized cell to sit in.
+    const [row] = logRows(draw(onSurface({ ...EMPTY, log: WITH_OUTCOMES }, surface)))
+    const outcome = childrenOf(row)[3]
+    if (outcome !== undefined) outcome.props = { ...outcome.props, width: undefined }
+    const problems = rowProblems(row)
+    expect(problems, surface).toHaveLength(1)
+    expect(problems[0], surface).toContain('cut text')
+  }
 })
 
 test('a header is an icon, a bold title, a dim chevron that folds, and a summary pushed to the right', () => {

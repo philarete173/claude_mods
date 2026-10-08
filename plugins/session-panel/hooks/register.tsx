@@ -11,7 +11,7 @@ import {
   addAgentCost, attributeCost, computeTurnStats, fmtDuration, fmtTokens, fmtUsd, pushLog, redact, shortType, shorten,
   toolLabel,
 } from './stats'
-import type { AgentRow, AgentStatus, Interval, LogKind, StepTiming, Usage } from './stats'
+import type { AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, Usage } from './stats'
 import { renderPane } from './view'
 import type { PaneData, SectionId } from './view'
 
@@ -72,13 +72,18 @@ const usageFields = (
   rateLimits: from.rateLimits.map(r => ({ kind: r.kind, percentUsed: r.percentUsed, resetsAt: toMs(r.resetsAt) })),
 })
 
-// The log line of a subagent that has ended.
-const agentOutcome = (status: AgentStatus, row: AgentRow, durationMs: number, answer: string): string => {
-  if (status !== 'done') return status
-  const took = [`done ${fmtDuration(durationMs)}`, ...(row.costUsd === null ? [] : [fmtUsd(row.costUsd)])].join(' · ')
+// The log line of a subagent that has ended: its text, and its outcome, the time it took behind a mark (✓ for an
+// answer, ✗ for a failure; a stop is no fault, so it has no mark).
+const agentOutcome = (
+  status: AgentStatus, row: AgentRow, durationMs: number, answer: string,
+): { text: string; outcome: string } => {
+  const took = fmtDuration(durationMs)
+  if (status === 'stopped') return { text: status, outcome: took }
+  if (status !== 'done') return { text: status, outcome: `✗ ${took}` }
   const said = shorten(redact(answer), 80)
+  const head = row.costUsd === null ? 'done' : `done · ${fmtUsd(row.costUsd)}`
 
-  return said === '' ? took : `${took} — ${said}`
+  return { text: said === '' ? head : `${head} — ${said}`, outcome: `✓ ${took}` }
 }
 
 // Whether a value of the store is a map of booleans, the shape of the folded sections: an object that is neither null
@@ -94,9 +99,13 @@ function inBackground($: EngineInterface, job: () => Promise<void>): void {
   })
 }
 
-// Puts a line on top of the log.
-async function addLog($: EngineInterface, at: number, who: string, text: string, kind: LogKind): Promise<void> {
-  await update($, logAtom, list => pushLog(list, { at, who, text, kind }))
+// Puts a line on top of the log. The outcome of an action, a mark and its time, is a field of its own; a line with
+// none has no such key.
+async function addLog(
+  $: EngineInterface, at: number, who: string, text: string, kind: LogKind, outcome?: string,
+): Promise<void> {
+  const entry: LogEntry = { at, who, text, kind, ...(outcome === undefined ? {} : { outcome }) }
+  await update($, logAtom, list => pushLog(list, entry))
 }
 
 // Whose line it is: `main`, or the type of the subagent that ran.
@@ -365,9 +374,10 @@ export const register: Register = on => {
       SPAWN_TOOLS.includes(e.tool) ||
       (e.tool === 'SendMessage' && typeof e.to === 'string' && Object.hasOwn(await read($, agentsAtom), e.to))
     if (isFailed || !isAgentCall) {
-      const outcome = ran.deny !== undefined ? ' denied' : isFailed ? ' ✗' : ` ✓ ${fmtDuration(t1 - t0)}`
-      const label = shorten(redact(toolLabel(e.tool, e, await $.session.root())), 64 - outcome.length)
-      await addLog($, t1, await whoIs($, e.agentId), `${label}${outcome}`, isFailed ? 'error' : 'ok')
+      // How it went is the outcome, a column of its own: the time it took behind a mark, or `denied`.
+      const outcome = ran.deny !== undefined ? 'denied' : `${isFailed ? '✗' : '✓'} ${fmtDuration(t1 - t0)}`
+      const label = shorten(redact(toolLabel(e.tool, e, await $.session.root())), 64)
+      await addLog($, t1, await whoIs($, e.agentId), label, isFailed ? 'error' : 'ok', outcome)
     }
 
     return ran
@@ -402,10 +412,10 @@ export const register: Register = on => {
     })
     const row = rows[agentId]
     if (row !== undefined) {
-      const text = agentOutcome(status, row, e.durationMs, e.answer)
+      const { text, outcome } = agentOutcome(status, row, e.durationMs, e.answer)
       // A subagent that failed is an error in the log; one that was stopped is news, not a fault.
       const kind: LogKind = status === 'done' ? 'ok' : status === 'stopped' ? 'info' : 'error'
-      await addLog($, now, shortType(row.type), text, kind)
+      await addLog($, now, shortType(row.type), text, kind, outcome)
     }
 
     return done

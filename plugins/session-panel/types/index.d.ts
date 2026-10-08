@@ -50,7 +50,7 @@ export type AgentRow = {
   costUsd: number | null
 }
 export type LogKind = 'info' | 'ok' | 'error'
-export type LogEntry = { at: number; who: string; text: string; kind: LogKind }
+export type LogEntry = { at: number; who: string; text: string; kind: LogKind; outcome?: string }
 
 export type PanelRateLimit = { kind: string; percentUsed: number; resetsAt?: number }
 export type PanelUsage = {
