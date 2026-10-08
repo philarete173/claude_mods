@@ -309,6 +309,18 @@ const logColumns = (tree: unknown): LogColumns[] =>
 const logRows = (tree: unknown): Node[] =>
   flat(tree).map(({ node }) => node).filter(node => node.type === 'Box' && isTimeCell(childrenOf(node)[0]))
 
+// What a cell of a log row is, from its props: the time (a clock), the text (the one that grows), the outcome (the
+// one that puts its text at the right edge), and else `who`. The cells of a row, in order, are its layout.
+const logRoles = (row: Node): string[] =>
+  childrenOf(row).map(cell => {
+    if (cell.props?.flexGrow === 1) return 'text'
+    if (cell.props?.justifyContent === 'flex-end') return 'outcome'
+
+    return isTimeCell(cell) ? 'time' : 'who'
+  })
+// How a Text is drawn: its colour, whether it is dim, and how it is cut.
+const styleOf = (el: Node): unknown[] => [el.props?.color, el.props?.dimColor, el.props?.wrap]
+
 // ---- Drawing without the engine ----
 
 // The element table as plain data, to call renderPane without the engine: each constructor answers its tag, its props
@@ -907,7 +919,7 @@ test('the log shows 15 lines, newest first, an error in red, and a long text cut
     expect(columns.map(column => column.whoCells), surface).toEqual(Array(15).fill(surface === 'desktop' ? 13 : 8))
     // The failed line has an outcome, in red like its `who`. The column is as wide as that outcome (`✗ 0.0s`, a cell
     // more on the desktop), and the 14 prompts have the cell empty, of the same width. At the 40 columns of the mount
-    // the desktop's text keeps 9 cells, one over the least that the column allows, so the column is drawn.
+    // the desktop's text keeps 9 cells, one over the least a row needs, so the row has all its cells.
     expect(columns.map(column => column.outcomeCell?.props?.width), surface).toEqual(
       Array(15).fill(surface === 'desktop' ? 7 : 6),
     )
@@ -987,12 +999,18 @@ const isType = (text: string): boolean => text.startsWith('@')
 // The Text that shows exactly this string, with the element that holds it.
 const textNode = (tree: unknown, text: string): Placed | undefined =>
   flat(tree).find(({ node }) => node.type === 'Text' && textsOf(node)[0] === text)
-// The subagent rows: a mark, the group of the description and the `@type`, the cost. The column that holds the rows is
-// no row, though it has three children when there are three subagents.
+// The subagent rows: a mark, the group of the description and the `@type` (the description alone where the pane is
+// too narrow for the type), the cost. The column that holds the rows is no row, though it has three children when
+// there are three subagents.
 const agentRows = (tree: unknown): Node[] =>
   flat(tree)
     .map(({ node }) => node)
-    .filter(node => isRow(node) && childrenOf(node).length === 3 && textsOf(childrenOf(node)[1]).some(isType))
+    .filter(node => {
+      const [, group, cost] = childrenOf(node)
+
+      return isRow(node) && childrenOf(node).length === 3 && group?.props?.flexGrow === 1 &&
+        group.props.columnGap === 1 && cost?.props?.width === 7 && cost.props.justifyContent === 'flex-end'
+    })
 // The rules: on the desktop an image 1600 px wide, on the terminal a row of ─.
 const isRuleNode = (node: Node): boolean =>
   (node.type === 'Svg' && node.props?.width === 1600) || (node.type === 'Text' && /^─+$/.test(textsOf(node)[0] ?? ''))
@@ -1211,6 +1229,53 @@ test('the subagent rows outgrow no pane, at the narrowest and the widest body th
   }
 })
 
+// The narrowest body that keeps the type column of a subagent row, by surface and subagents. The description keeps
+// the body less the mark (2 cells on the desktop, 1 on the terminal), the type, the cost (7) and 3 gaps (two in the
+// row, one in its group), and the type gives way under 12 cells of description. The desktop's type is 15 cells whatever
+// the types are: 2 + 15 + 7 + 3 + 12 = 39. The terminal's is the longest `@type` drawn: `@frontend-deve…` is 15, so
+// 1 + 15 + 7 + 3 + 12 = 38, and `@tdd` is 4, so 1 + 4 + 7 + 3 + 12 = 27.
+const TDD = [agent(1, 'done', { type: 'tdd', description: WIDE })]
+const TYPE_FROM: [surface: Surface, rows: AgentRow[], typeCells: number, bodyColumns: number][] = [
+  ['desktop', TYPED, 15, 39], ['desktop', TDD, 15, 39], ['terminal', TYPED, 15, 38], ['terminal', TDD, 4, 27],
+]
+
+test('a subagent row keeps its `@type` while the description keeps 12 cells beside it, and drops it below that', () => {
+  for (const [surface, set, typeCells, from] of TYPE_FROM) {
+    // The narrowest body the tests use, one column short of the edge, the edge itself, and a wide one.
+    for (const bodyColumns of [8, from - 1, from, 120]) {
+      const where = `${surface} ${set.length} subagents ${bodyColumns} columns, from ${from}`
+      const tree = draw(withAgents(set, surface), bodyColumns)
+      const hasType = bodyColumns >= from
+      expect(agentRows(tree), where).toHaveLength(set.length)
+      expect(rowProblems(tree), where).toEqual([])
+      for (const row of agentRows(tree)) {
+        expect(rowProblems(row), where).toEqual([])
+        // The cells of the row, and of its group, are one cell apart; the mark is the cell it was.
+        const [mark, group] = childrenOf(row)
+        expect(row.props?.columnGap, where).toBe(1)
+        expect(mark?.props?.width, where).toBe(surface === 'desktop' ? 2 : 1)
+        expect(group?.props, where).toMatchObject({
+          flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden', columnGap: 1,
+        })
+        // The type is the second cell of the group, in every row or in none; without it the description is the group.
+        const [description, type] = childrenOf(group)
+        expect(childrenOf(group), where).toHaveLength(hasType ? 2 : 1)
+        expect(description?.props, where).toMatchObject({ flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden' })
+        expect(childrenOf(description).map(text => text.props?.wrap), where).toEqual(['truncate'])
+        expect(type?.props?.width, where).toBe(hasType ? typeCells : undefined)
+        expect(textsOf(row).some(isType), where).toBe(hasType)
+      }
+    }
+  }
+  // The line that counts the rest does not move: the ninth subagent is `+1 more`, in a pane with no type column.
+  const nine = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => agent(n, 'running', { type: 'ui-designer' }))
+  for (const surface of SURFACES) {
+    const tree = draw(withAgents(nine, surface), 8)
+    expect(agentRows(tree), surface).toHaveLength(8)
+    expect(textNode(tree, '+1 more')?.parent?.props?.paddingLeft, surface).toBe(surface === 'desktop' ? 3 : 2)
+  }
+})
+
 test('the log keeps time and who in fixed columns, so every text starts at the same place', () => {
   const log = (who: string, kind: LogEntry['kind'] = 'info'): LogEntry[] =>
     ['a', 'b', 'c'].map((text, i) => ({ at: NOW - i * 1000, who, text, kind }))
@@ -1265,7 +1330,6 @@ test('the outcome of a log line is a fixed column at the right edge: one width, 
     // The prompt has the cell too, and it is empty. The others have their outcome in a cut Text, in red for an error
     // and dim for the rest, as their `who`.
     expect(rows.map(row => textsOf(row.outcomeCell)), surface).toEqual([['✓ 0.3s'], ['✗ 1m 12s'], [], ['denied']])
-    const styleOf = (el: Node): unknown[] => [el.props?.color, el.props?.dimColor, el.props?.wrap]
     expect(rows.map(row => childrenOf(row.outcomeCell).map(styleOf)), surface).toEqual([
       [[undefined, true, 'truncate']], [['error', undefined, 'truncate']], [], [['error', undefined, 'truncate']],
     ])
@@ -1318,47 +1382,94 @@ test('a line written before the outcome was a field keeps its suffix in its text
   }
 })
 
-// The narrowest body that draws the outcome column, by surface, `who` and longest outcome. The text keeps the body
-// less the time (8), `who`, the outcome and 3 gaps, and the column is drawn from 8 cells of text. The desktop's `who`
-// is 13 whatever the name, and its outcome has a cell more: `✗ 1m 12s` is 9 cells, `✓ 0.3s` is 7, so 8 + 13 + 9 + 3 +
-// 8 = 41 and 8 + 13 + 7 + 3 + 8 = 39. The terminal's `who` is the longest name and its outcome is as it is: 8 + 4 + 8
-// + 3 + 8 = 31 for `main`, 8 + 14 + 8 + 3 + 8 = 41 for `minimal-change`, and 8 + 4 + 6 + 3 + 8 = 29 with `✓ 0.3s`.
+// The layouts of a log row are the cells it has, in order.
+const LAYOUT_WHO = ['time', 'who', 'text', 'outcome']
+const LAYOUT_BARE = ['time', 'text', 'outcome']
+const LAYOUT_TEXT = ['time', 'text']
+// The bands of the layouts, by surface, `who` and lines: the narrowest body that draws [time, who, text, outcome], and
+// the narrowest that draws [time, text, outcome]; under that the row is [time, text]. The text keeps the body less the
+// time (8) and the other cells of the layout, less the gaps (the cells of the row less one), and a layout is drawn from
+// 8 cells of text. The desktop's `who` is 13 whatever the name, and its outcome has a cell more: `✗ 1m 12s` is 9 cells
+// and `✓ 0.3s` is 7, so 8 + 13 + 9 + 3 + 8 = 41 and 8 + 13 + 7 + 3 + 8 = 39 with `who`, and 8 + 9 + 2 + 8 = 27 and
+// 8 + 7 + 2 + 8 = 25 without it. The terminal's `who` is the longest name and its outcome is as it is: 8 + 4 + 8 +
+// 3 + 8 = 31 for `main`, 8 + 14 + 8 + 3 + 8 = 41 for `minimal-change`, 8 + 4 + 6 + 3 + 8 = 29 with `✓ 0.3s`, and
+// 8 + 8 + 2 + 8 = 26 and 8 + 6 + 2 + 8 = 24 without `who`.
 const SHORT_OUTCOMES = WITH_OUTCOMES.filter(line => line.outcome !== '✗ 1m 12s')
-const COLUMN_FROM: [surface: Surface, lines: LogEntry[], who: string, outcomeCells: number, bodyColumns: number][] = [
-  ['desktop', WITH_OUTCOMES, 'main', 9, 41], ['desktop', WITH_OUTCOMES, 'minimal-change', 9, 41],
-  ['desktop', SHORT_OUTCOMES, 'main', 7, 39], ['terminal', WITH_OUTCOMES, 'main', 8, 31],
-  ['terminal', WITH_OUTCOMES, 'minimal-change', 8, 41], ['terminal', SHORT_OUTCOMES, 'main', 6, 29],
+type Band = [surface: Surface, lines: LogEntry[], who: string, outcomeCells: number, withWho: number, bare: number]
+const BANDS: Band[] = [
+  ['desktop', WITH_OUTCOMES, 'main', 9, 41, 27], ['desktop', WITH_OUTCOMES, 'minimal-change', 9, 41, 27],
+  ['desktop', SHORT_OUTCOMES, 'main', 7, 39, 25], ['terminal', WITH_OUTCOMES, 'main', 8, 31, 26],
+  ['terminal', WITH_OUTCOMES, 'minimal-change', 8, 41, 26], ['terminal', SHORT_OUTCOMES, 'main', 6, 29, 24],
 ]
 
-test('the outcome column is drawn while the text beside it keeps 8 cells; narrower, the outcome ends the text', () => {
-  for (const [surface, lines, who, outcomeCells, from] of COLUMN_FROM) {
+test('a log row gives way in three steps: `who` first, then the outcome cell, which then leads the text', () => {
+  for (const [surface, lines, who, outcomeCells, withWho, bare] of BANDS) {
     const log = lines.map(line => ({ ...line, who }))
-    // The narrowest body the tests use, the one just short of the threshold, the threshold itself, and a wide one.
+    // The narrowest body the tests use, either side of each edge, and a wide one.
+    for (const bodyColumns of [8, bare - 1, bare, withWho - 1, withWho, 120]) {
+      const where = `${surface} ${who} ${bodyColumns} columns, edges ${bare} and ${withWho}`
+      const tree = draw(onSurface({ ...EMPTY, log }, surface), bodyColumns)
+      const rows = logRows(tree)
+      const layout = bodyColumns >= withWho ? LAYOUT_WHO : bodyColumns >= bare ? LAYOUT_BARE : LAYOUT_TEXT
+      expect(rowProblems(tree), where).toEqual([])
+      // Every row has the cells of one layout, in order.
+      expect(rows.map(logRoles), where).toEqual(Array(log.length).fill(layout))
+
+      rows.forEach((row, i) => {
+        const line = log[i]
+        const cell = (role: string): Node | undefined => childrenOf(row)[layout.indexOf(role)]
+        expect(row.props?.columnGap, where).toBe(1)
+        expect(cell('time')?.props?.width, where).toBe(8)
+        const whoCells = surface === 'desktop' ? 13 : who.length
+        expect(cell('who')?.props?.width, where).toBe(layout.includes('who') ? whoCells : undefined)
+        expect(cell('outcome')?.props?.width, where).toBe(layout.includes('outcome') ? outcomeCells : undefined)
+        // The text, whole, or behind its outcome when the row has no cell for it; one with no outcome shows its text.
+        const isLead = layout === LAYOUT_TEXT && line?.outcome !== undefined
+        expect(textsOf(cell('text')), where).toEqual([isLead ? `${line?.outcome} ${line?.text}` : line?.text])
+        // The text is a cell that gives way and is cut, in the plain colour.
+        expect(cell('text')?.props, where)
+          .toMatchObject({ flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden' })
+        expect(childrenOf(cell('text')).map(styleOf), where).toEqual([[undefined, undefined, 'truncate']])
+        // An error shows its `who` and its outcome in red, the others are dim, where they have a cell.
+        const style = line?.kind === 'error' ? ['error', undefined, 'truncate'] : [undefined, true, 'truncate']
+        expect(childrenOf(cell('who')).map(styleOf), where).toEqual(layout.includes('who') ? [style] : [])
+        expect(childrenOf(cell('outcome')).map(styleOf), where)
+          .toEqual(layout.includes('outcome') && line?.outcome !== undefined ? [style] : [])
+      })
+    }
+  }
+})
+
+test('a line with an outcome reads `✓ 0.3s Bash ls` where the row has the time and the text only', () => {
+  const log: LogEntry[] = [
+    { at: NOW, who: 'main', text: 'Bash ls', kind: 'ok', outcome: '✓ 0.3s' },
+    { at: NOW - 1000, who: 'main', text: 'Bash ls', kind: 'ok' },
+  ]
+  for (const surface of SURFACES) {
+    const rows = logRows(draw(onSurface({ ...EMPTY, log }, surface), 8))
+    expect(rows.map(logRoles), surface).toEqual([LAYOUT_TEXT, LAYOUT_TEXT])
+    expect(rows.map(row => textsOf(childrenOf(row)[1])), surface).toEqual([['✓ 0.3s Bash ls'], ['Bash ls']])
+  }
+})
+
+test('with no outcome drawn the row is [time, who, text] while the text keeps 8 cells, then [time, text]', () => {
+  const prompts: LogEntry[] = ['one', 'two', 'three'].map((text, i) => (
+    { at: NOW - i * 1000, who: 'you', text, kind: 'info' }
+  ))
+  // 8 + 13 + 2 + 8 = 31 on the desktop; on the terminal 8 + `who` + 2 + 8: 22 for `main`, 32 for `minimal-change`.
+  const edges: [surface: Surface, who: string, bodyColumns: number][] = [
+    ['desktop', 'main', 31], ['terminal', 'main', 22], ['terminal', 'minimal-change', 32],
+  ]
+  for (const [surface, who, from] of edges) {
+    const log = prompts.map(line => ({ ...line, who }))
     for (const bodyColumns of [8, from - 1, from, 120]) {
       const where = `${surface} ${who} ${bodyColumns} columns, from ${from}`
       const tree = draw(onSurface({ ...EMPTY, log }, surface), bodyColumns)
-      const rows = logColumns(tree)
-      const isColumn = bodyColumns >= from
       expect(rowProblems(tree), where).toEqual([])
-      // Four cells with the column, three without it: the time and `who` are the same cells either way.
-      expect(rows.map(row => row.cells), where).toEqual(Array(log.length).fill(isColumn ? 4 : 3))
-      expect(rows.map(row => [row.timeCells, row.whoCells]), where)
-        .toEqual(Array(log.length).fill([8, surface === 'desktop' ? 13 : who.length]))
-      expect(rows.map(row => row.outcomeCell?.props?.width), where)
-        .toEqual(Array(log.length).fill(isColumn ? outcomeCells : undefined))
-      // Without the column a line ends in its outcome, ` ✓ 0.3s`, and one with none shows its text as it is.
-      const texts = logRows(tree).map(row => textsOf(childrenOf(row)[2]))
-      expect(texts, where).toEqual(log.map(line => [
-        isColumn || line.outcome === undefined ? line.text : `${line.text} ${line.outcome}`,
-      ]))
-      // The cells of a row are one cell apart, and the 3 gaps of the sum are three of those. The text is a cell that
-      // gives way and is cut, with the column and without it.
-      for (const row of logRows(tree)) {
-        expect(row.props?.columnGap, where).toBe(1)
-        const text = childrenOf(row)[2]
-        expect(text?.props, where).toMatchObject({ flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden' })
-        expect(childrenOf(text)[0]?.props?.wrap, where).toBe('truncate')
-      }
+      expect(logRows(tree).map(logRoles), where)
+        .toEqual(Array(3).fill(bodyColumns >= from ? ['time', 'who', 'text'] : LAYOUT_TEXT))
+      expect(logRows(tree).map(row => textsOf(childrenOf(row)[bodyColumns >= from ? 2 : 1])), where)
+        .toEqual([['one'], ['two'], ['three']])
     }
   }
 })

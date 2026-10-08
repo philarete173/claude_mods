@@ -68,8 +68,13 @@ const TEXT_METER_CELLS = 10
 const RULE_PX = 1600 // the divider image; the Box around it cuts it to the pane
 const MAX_AGENT_ROWS = 8
 const MAX_LOG_ROWS = 15
-const MIN_LOG_TEXT_CELLS = 8 // the least text a log line keeps before its outcome column gives way
+const MIN_LOG_TEXT_CELLS = 8 // the least text a log line keeps: below it `who` gives way, then the outcome column
+// In a narrow pane the identity column gives way first, as in the log: a subagent row leaves out its `@type`, on
+// every row, when the description would keep fewer cells than this beside it.
+const MIN_AGENT_DESC_CELLS = 12
 const LOG_GAP_CELLS = 1 // the gap between the cells of a log row
+const AGENT_GAP_CELLS = 1 // the gap between the cells of a subagent row, and between those of its group
+const TEXT_MARK_CELLS = 1 // the mark of a subagent row where there is no icon slot
 
 // The meter, the ring and the icons are images, so their colours are raw and the same in both themes.
 const BLUE = '#2f7de1'
@@ -482,16 +487,16 @@ function turnSection(d: Draw): RenderElement {
 // One subagent, in columns: the mark (a cell of its own), a group that takes the rest of the row, and the cost
 // (right-aligned in a column of its own). The group holds the description, which grows and is cut to the room there
 // is, and the `@type`, a column of `typeCells` on every row, so the types start at one x whatever the descriptions
-// are. A pane too narrow for the type column leaves every description 0 wide and the group clips that column, on
-// every row alike.
+// are. A pane too narrow to leave the description MIN_AGENT_DESC_CELLS has no type column (`typeCells` is 0): the
+// description takes the whole group, on every row alike.
 function agentRow(d: Draw, agent: AgentRow, typeCells: number): RenderElement {
   const { Box, Text, Svg } = d.ui
   const mark = AGENT_MARKS[agent.status]
 
   return (
-    <Box flexDirection="row" alignItems="center" columnGap={1}>
+    <Box flexDirection="row" alignItems="center" columnGap={AGENT_GAP_CELLS}>
       {Svg === undefined ? (
-        <Box flexDirection="row" width={1} flexShrink={0}>
+        <Box flexDirection="row" width={TEXT_MARK_CELLS} flexShrink={0}>
           <Text color={mark.color} dimColor={mark.isDim}>
             {mark.glyph}
           </Text>
@@ -499,11 +504,20 @@ function agentRow(d: Draw, agent: AgentRow, typeCells: number): RenderElement {
       ) : (
         iconSlot(d, STATUS_SVG[agent.status], agent.status)
       )}
-      <Box flexDirection="row" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden" columnGap={1}>
+      <Box
+        flexDirection="row"
+        flexGrow={1}
+        flexShrink={1}
+        minWidth={0}
+        overflow="hidden"
+        columnGap={AGENT_GAP_CELLS}
+      >
         {growText(d, agent.description)}
-        <Box flexDirection="row" width={typeCells} flexShrink={0} overflow="hidden">
-          <Text dimColor wrap="truncate">{`@${shortType(agent.type)}`}</Text>
-        </Box>
+        {typeCells > 0 && (
+          <Box flexDirection="row" width={typeCells} flexShrink={0} overflow="hidden">
+            <Text dimColor wrap="truncate">{`@${shortType(agent.type)}`}</Text>
+          </Box>
+        )}
       </Box>
       <Box flexDirection="row" width={COST_CELLS} flexShrink={0} justifyContent="flex-end">
         {agent.costUsd === null ? <Text dimColor>—</Text> : <Text>{fmtUsd(agent.costUsd)}</Text>}
@@ -524,7 +538,12 @@ function agentsSection(d: Draw): RenderElement | null {
   // that is drawn, the desktop a width of its own.
   const longest = Math.max(...shown.map(agent => `@${shortType(agent.type)}`.length))
   const typeCells = Svg === undefined ? Math.min(TYPE_CELLS_MAX, longest) : TYPE_CELLS
-  const rows = shown.map(agent => agentRow(d, agent, typeCells))
+  // What the description keeps beside the type: the body less the mark, the type, the cost and the 3 gaps of a row
+  // (two in the row, one in its group). With less than MIN_AGENT_DESC_CELLS the type is left out of every row.
+  const markCells = Svg === undefined ? TEXT_MARK_CELLS : ICON_CELLS
+  const descCells = d.cols - markCells - typeCells - COST_CELLS - 3 * AGENT_GAP_CELLS
+  const hasType = descCells >= MIN_AGENT_DESC_CELLS
+  const rows = shown.map(agent => agentRow(d, agent, hasType ? typeCells : 0))
   const more = agents.length - MAX_AGENT_ROWS
   if (more > 0) {
     // The icon slot and its gap on the desktop, the one-cell mark and its gap on the terminal.
@@ -581,14 +600,15 @@ function sourcesSection(d: Draw): RenderElement | null {
 }
 
 // The newest log lines: time, who, what, and how it went. Time and `who` are dim fixed columns, so every text starts
-// at the same x; the text is cut to one line, an error shows its `who` in red. On the desktop `who` has a width of its
-// own, so the text column does not jump with the longest `who`; on the terminal it is the longest one there is, up to
-// the most shortType keeps. The outcome (the mark and the time of an action, or `denied`) is a fixed column at the
-// right edge, as wide as the longest one drawn, in red for an error. The desktop adds a cell: a ✓ or a ✗ varies by
-// font, and the margin keeps the mark whole. A line without an outcome has the cell empty, so every text is cut at
-// the same x. With no outcome among the lines drawn there is no column. Nor is there one while the text beside it
-// would keep fewer than MIN_LOG_TEXT_CELLS cells (the body less the time, `who`, the outcome and the three gaps of
-// the row): the row has three cells then, and the outcome of a line goes back to the end of its text, cut with it.
+// at the same x; the text is cut to one line. On the desktop `who` has a width of its own, so the text column does not
+// jump with the longest `who`; on the terminal it is the longest one there is, up to the most shortType keeps. The
+// outcome (the mark and the time of an action, or `denied`) is a fixed column at the right edge, as wide as the
+// longest one drawn, a cell wider on the desktop: a ✓ or a ✗ varies by font, and the margin keeps the mark whole. A
+// line without one has the cell empty. An error shows its `who` and its outcome in red, the others are dim.
+// The layout is the first of these whose text keeps MIN_LOG_TEXT_CELLS cells, one for every row: [time, who, text,
+// outcome]; then `who` gives way, [time, text, outcome]; then [time, text], where a line shows its outcome in front of
+// its text, so that the cut at the end keeps it. That one is also the layout when nothing fits. With no outcome among
+// the lines drawn there is no outcome cell, and a line shows its text alone.
 function logSection(d: Draw): RenderElement | null {
   const { Box, Text, Svg } = d.ui
   const lines = d.data.log.slice(0, MAX_LOG_ROWS)
@@ -597,27 +617,34 @@ function logSection(d: Draw): RenderElement | null {
   const whoCells = Svg === undefined ? Math.min(WHO_CELLS_MAX, longestWho) : WHO_CELLS
   const longestOutcome = Math.max(...lines.map(line => line.outcome?.length ?? 0))
   const outcomeCells = longestOutcome === 0 ? 0 : longestOutcome + (Svg === undefined ? 0 : 1)
-  // The cells the text keeps: the body less the time, `who` and outcome cells and the 3 gaps of a row of four.
-  const textCells = d.cols - TIME_CELLS - whoCells - outcomeCells - 3 * LOG_GAP_CELLS
-  const hasOutcomeColumn = outcomeCells > 0 && textCells >= MIN_LOG_TEXT_CELLS
+  // The cells the text keeps in a layout: the body less the time, `who` and outcome cells it has, and its gaps (the
+  // cells of the row less one).
+  const textCells = (withWho: boolean, withOutcome: boolean): number =>
+    d.cols - TIME_CELLS - (withWho ? whoCells : 0) - (withOutcome ? outcomeCells : 0) -
+    (1 + Number(withWho) + Number(withOutcome)) * LOG_GAP_CELLS
+  const hasOutcomes = outcomeCells > 0
+  const hasWho = textCells(true, hasOutcomes) >= MIN_LOG_TEXT_CELLS
+  const hasOutcomeCell = hasOutcomes && (hasWho || textCells(false, true) >= MIN_LOG_TEXT_CELLS)
   const rows = lines.map(line => (
     <Box flexDirection="row" columnGap={LOG_GAP_CELLS}>
       <Box flexDirection="row" width={TIME_CELLS} flexShrink={0}>
         <Text dimColor>{fmtClock(line.at)}</Text>
       </Box>
-      <Box flexDirection="row" width={whoCells} flexShrink={0} overflow="hidden">
-        {line.kind === 'error' ? (
-          <Text color={BAD} wrap="truncate">{line.who}</Text>
-        ) : (
-          <Text dimColor wrap="truncate">{line.who}</Text>
-        )}
-      </Box>
+      {hasWho && (
+        <Box flexDirection="row" width={whoCells} flexShrink={0} overflow="hidden">
+          {line.kind === 'error' ? (
+            <Text color={BAD} wrap="truncate">{line.who}</Text>
+          ) : (
+            <Text dimColor wrap="truncate">{line.who}</Text>
+          )}
+        </Box>
+      )}
       <Box flexDirection="row" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
         <Text wrap="truncate">
-          {hasOutcomeColumn || line.outcome === undefined ? line.text : `${line.text} ${line.outcome}`}
+          {hasOutcomeCell || line.outcome === undefined ? line.text : `${line.outcome} ${line.text}`}
         </Text>
       </Box>
-      {hasOutcomeColumn && (
+      {hasOutcomeCell && (
         <Box flexDirection="row" width={outcomeCells} flexShrink={0} overflow="hidden" justifyContent="flex-end">
           {line.outcome !== undefined && (line.kind === 'error' ? (
             <Text color={BAD} wrap="truncate">{line.outcome}</Text>
