@@ -131,7 +131,7 @@ export type AgentStatus = 'running' | 'done' | 'failed' | 'stopped'
 export type AgentRow = { id: string; description: string; type: string; model: string | null; status: AgentStatus;
   startedAt: number; endedAt: number | null; costUsd: number | null }
 export type LogKind = 'info' | 'ok' | 'error'
-export type LogEntry = { at: number; who: string; text: string; kind: LogKind }
+export type LogEntry = { at: number; who: string; text: string; kind: LogKind; outcome?: string }
 export type CostSplit = { total: number | null; session: number | null; subagents: number }
 export function mergedLength(intervals: Interval[]): number
 export function sumUsage(usages: Usage[]): Usage
@@ -184,7 +184,7 @@ export function fmtClock(ms: number): string
   /(\b[A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)=)\S+/g             → '$1•••'
   /(\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s@]+@/gi                   → '$1•••@'
   ```
-- **`toolLabel`** (текст строки журнала до суффикса ✓/✗):
+- **`toolLabel`** (текст строки журнала: что сделал вызов; как он прошёл, говорит поле `outcome` записи):
   - `mcp__<server>__<tool>` → `<server>:<tool>`;
   - Bash → `Bash <command>`;
   - Read, Edit, Write, MultiEdit → `<Tool> <file_path относительно root>`; NotebookEdit — так же по `notebook_path`. Если путь начинается с `root + '/'`, префикс срезается;
@@ -225,7 +225,7 @@ export function fmtClock(ms: number): string
   | `toolLabel('mcp__issue-hub__find_issues', {}, '/r')` | `'issue-hub:find_issues'` |
   | `toolLabel('Agent', { subagent_type: 'engineer', description: 'Fix qty' }, '/r')` | `'Agent → engineer: Fix qty'` |
   | `toolLabel('WebFetch', { url: 'https://docs.x.io/a?b' }, '/r')` | `'WebFetch docs.x.io'` |
-  | `fmtUsd`: `5.4867` / `0.152` / `0.0049` / `0.0004` / `0` | `'$5.49'` / `'$0.152'` / `'$0.005'` / `'<$0.001'` / `'$0'` |
+  | `fmtUsd`: `5.4867` / `0.152` / `0.0049` / `0.0004` / `0` / `0.9996` / `0.9994` | `'$5.49'` / `'$0.152'` / `'$0.005'` / `'<$0.001'` / `'$0'` / `'$1.00'` / `'$0.999'` |
   | `fmtPct(12.84, 1)` / `fmtPct(23.6, 0)` | `'12.8%'` / `'24%'` |
   | `fmtTokens`: `0`, `999`, `1000`, `2345`, `9960`, `128400`, `999400`, `999600`, `1240000`, `12000000` | `'0'`, `'999'`, `'1k'`, `'2.3k'`, `'10k'`, `'128k'`, `'999k'`, `'1M'`, `'1.2M'`, `'12M'` |
   | `fmtDuration`: `900`, `33500`, `59960`, `65000`, `3720000` | `'0.9s'`, `'33.5s'`, `'1m 00s'`, `'1m 05s'`, `'1h 02m'` |
@@ -284,7 +284,7 @@ export function fmtClock(ms: number): string
 - **`turn.step`:** асинхронный генератор с замерами по §4.3, чанки пробрасываются без изменений.
   - Без `agentId` — добавить `StepTiming` в `turn`.
   - После каждого `stop` (любого агента): `$.clock.after(1, …)` читает `usage().cost.usd` и вызывает `attributeCost(lastUsd, usd)`. Прирост идёт в `addAgentCost(agents[agentId], delta)` для субагента; для основного агента он нигде отдельно не хранится (Session = Total − Subagents). `lastUsd` — переменная модуля, её задаёт текущий `cost.usd` на `session.start`.
-- **`tool.call`:** `const t0 = await $.clock.now(); const ran = await next(e); const t1 = await $.clock.now()`. Для основного агента (без `agentId`) интервал `[t0, t1]` добавляется в `turn.toolIntervals` (`classic.PostToolUse*` до мода не доходят). Затем запись в журнал (`toolLabel` + `✓ fmtDuration` / `✗` / `denied`, через `redact` и `shorten(…, 64)`); вернуть `ran`.
+- **`tool.call`:** `const t0 = await $.clock.now(); const ran = await next(e); const t1 = await $.clock.now()`. Для основного агента (без `agentId`) интервал `[t0, t1]` добавляется в `turn.toolIntervals` (`classic.PostToolUse*` до мода не доходят). Затем запись в журнал (`toolLabel` + `✓ fmtDuration` / `✗` / `denied`, через `redact` и `shorten(…, 64)`) (задача 8: исход — `✓ время` / `✗ время` / `denied` — хранится в поле `outcome` и выводится отдельным столбцом справа); вернуть `ran`.
 - **`turn.complete`:**
   - без `agentId`: `const done = await next(e)`; `lastTurn = computeTurnStats(turn, e.durationMs, e.usage, usage().cost?.usd ?? null)`; `turn = null`; обновить branch; вернуть `done`;
   - с `agentId`: статус (`isAborted` → `stopped`; иначе `reason` → `done` или `failed` по правилу из итогов спайка), `endedAt`; запись в журнал §4.7.
@@ -383,3 +383,4 @@ export function fmtClock(ms: number): string
 - **Задача 6. Визуальная переработка** по отзыву пользователя на живую панель: секции с иконками и разделителями, ячейки без выхода за край, шкалы по ширине панели, кольцо контекста. Визуальная спецификация — `docs/superpowers/specs/2026-10-07-session-panel-visual.md`, утверждённое превью — `docs/design/session-panel-preview.html`. В ту же задачу вошла новая формула Response.
 - **Задача 7. Субагенты.** `@type` стоит в столбце постоянной ширины. Продолженный сообщением субагент снова показан как работающий. Запуск и продолжение дают в журнале по одной строке.
 - **Правки по итоговому ревью:** сброс панели при `resume`, как при `/clear`; прерванный до ответа ход не заменяет последний; окно перечитывается при смене модели; строки `spawned`/`resumed` маскируются и укорачиваются; команда с `immediate`; встроенные серверы десктопа скрыты; `THIRD_PARTY_NOTICES.md`.
+- **Задача 8. Столбец исхода в журнале**: отметка и время действия (`✓ 0.3s`, `✗ 1.2s`, `denied`) — отдельный столбец у правого края; в узкой панели (меньше 8 ячеек под текст) исход возвращается в конец строки.

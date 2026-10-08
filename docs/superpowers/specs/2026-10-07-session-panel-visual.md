@@ -12,7 +12,7 @@ Scope: presentation only. The sections, their content, the formats and every for
    - a 1 px rule with 8 px of space above and below;
    - then a header row: line icon, **bold title**, dim chevron, and a dim summary pushed to the right.
 2. **No row can outgrow the pane.** Every row is built from fixed cells (`flexShrink={0}`, width in cells) and at most two flexible cells (`flexShrink={1}` + `minWidth={0}` + `overflow="hidden"`, text `wrap="truncate"`).
-3. **Columns that must line up have fixed cell widths:** time, who, status mark, subagent `@type`, cost, percent and limit label. Nothing is aligned by character count.
+3. **Columns that must line up have fixed cell widths:** time, who, log outcome, status mark, subagent `@type`, cost, percent and limit label. Nothing is aligned by character count.
 4. **Icons.** 14 px line icons share one neutral grey, `#8a8a8a`, readable on dark and light. The Context ring draws the percent in the meter's colours. Subagent status icons are shape-coded.
 5. **The top block is a header card:**
    - Session and the total;
@@ -41,7 +41,7 @@ Elapsed                                             1m 18s
 …
 ──────────────────────────────────────────────────────────
 ≡  Log ▾
-22:09:07  minimal-change  Edit .claude-plugin/marketplace.j…
+22:09:07  minimal-change  Edit .claude-plugin/mar…  ✓ 0.3s
 ```
 
 ## 2. Ground rules
@@ -70,7 +70,7 @@ Every horizontal row is `<Box flexDirection="row">`, and each child is one of tw
 
 | Kind | Props | Holds |
 |---|---|---|
-| FIXED | `flexShrink={0}`; `width={n}` in cells when it is a column | icons, titles, values, percents, costs, times, the `who` column, the subagent `@type` column |
+| FIXED | `flexShrink={0}`; `width={n}` in cells when it is a column | icons, titles, values, percents, costs, times, the `who` column, the subagent `@type` column, the log's outcome column |
 | FLEX | `flexShrink={1}` `minWidth={0}` `overflow="hidden"` (l.798, l.808, l.828); `flexGrow={1}` when it must take the remaining room | exactly one `Text wrap="truncate"` (l.11886) |
 
 - A `Text` that may be cut is never a direct child of a row. It sits alone in a FLEX `Box`.
@@ -173,6 +173,7 @@ const TEXT_METER_CELLS = 10 // unchanged
 const RULE_PX = 1600 // the divider image; the Box around it cuts it to the pane
 const MAX_AGENT_ROWS = 8 // unchanged
 const MAX_LOG_ROWS = 15 // unchanged
+const MIN_LOG_TEXT_CELLS = 8 // the least text a log line keeps before its outcome column gives way
 ```
 
 `Draw` gains the body width and the two meter widths, and loses `meterPx`:
@@ -612,25 +613,57 @@ return section(d, 'mcp', 'MCP', String(mcp.servers.length), [
 ### 6.10 Log row
 
 ```tsx
-const lines = d.data.log.slice(0, MAX_LOG_ROWS)
-const longest = Math.max(...lines.map(line => line.who.length))
-const whoCells = Svg === undefined ? Math.min(WHO_CELLS_MAX, longest) : WHO_CELLS
-const rows = lines.map(line => (
-  <Box flexDirection="row" columnGap={1}>
-    <Box flexDirection="row" width={TIME_CELLS} flexShrink={0}>
-      <Text dimColor>{fmtClock(line.at)}</Text>
+// The newest log lines: time, who, what, and how it went. Time and `who` are dim fixed columns, so every text starts
+// at the same x; the text is cut to one line, an error shows its `who` in red. On the desktop `who` has a width of its
+// own, so the text column does not jump with the longest `who`; on the terminal it is the longest one there is, up to
+// the most shortType keeps. The outcome (the mark and the time of an action, or `denied`) is a fixed column at the
+// right edge, as wide as the longest one drawn, in red for an error. The desktop adds a cell: a ✓ or a ✗ varies by
+// font, and the margin keeps the mark whole. A line without an outcome has the cell empty, so every text is cut at
+// the same x. With no outcome among the lines drawn there is no column. Nor is there one while the text beside it
+// would keep fewer than MIN_LOG_TEXT_CELLS cells (the body less the time, `who`, the outcome and the three gaps of
+// the row): the row has three cells then, and the outcome of a line goes back to the end of its text, cut with it.
+function logSection(d: Draw): RenderElement | null {
+  const { Box, Text, Svg } = d.ui
+  const lines = d.data.log.slice(0, MAX_LOG_ROWS)
+  if (lines.length === 0) return null
+  const longestWho = Math.max(...lines.map(line => line.who.length))
+  const whoCells = Svg === undefined ? Math.min(WHO_CELLS_MAX, longestWho) : WHO_CELLS
+  const longestOutcome = Math.max(...lines.map(line => line.outcome?.length ?? 0))
+  const outcomeCells = longestOutcome === 0 ? 0 : longestOutcome + (Svg === undefined ? 0 : 1)
+  // The cells the text keeps: the body less the time, `who` and outcome cells and the 3 gaps of a row of four.
+  const textCells = d.cols - TIME_CELLS - whoCells - outcomeCells - 3
+  const hasOutcomeColumn = outcomeCells > 0 && textCells >= MIN_LOG_TEXT_CELLS
+  const rows = lines.map(line => (
+    <Box flexDirection="row" columnGap={1}>
+      <Box flexDirection="row" width={TIME_CELLS} flexShrink={0}>
+        <Text dimColor>{fmtClock(line.at)}</Text>
+      </Box>
+      <Box flexDirection="row" width={whoCells} flexShrink={0} overflow="hidden">
+        {line.kind === 'error' ? (
+          <Text color={BAD} wrap="truncate">{line.who}</Text>
+        ) : (
+          <Text dimColor wrap="truncate">{line.who}</Text>
+        )}
+      </Box>
+      <Box flexDirection="row" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+        <Text wrap="truncate">
+          {hasOutcomeColumn || line.outcome === undefined ? line.text : `${line.text} ${line.outcome}`}
+        </Text>
+      </Box>
+      {hasOutcomeColumn && (
+        <Box flexDirection="row" width={outcomeCells} flexShrink={0} overflow="hidden" justifyContent="flex-end">
+          {line.outcome !== undefined && (line.kind === 'error' ? (
+            <Text color={BAD} wrap="truncate">{line.outcome}</Text>
+          ) : (
+            <Text dimColor wrap="truncate">{line.outcome}</Text>
+          ))}
+        </Box>
+      )}
     </Box>
-    <Box flexDirection="row" width={whoCells} flexShrink={0} overflow="hidden">
-      {line.kind === 'error'
-        ? <Text color={BAD} wrap="truncate">{line.who}</Text>
-        : <Text dimColor wrap="truncate">{line.who}</Text>}
-    </Box>
-    <Box flexDirection="row" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
-      <Text wrap="truncate">{line.text}</Text>
-    </Box>
-  </Box>
-))
-return section(d, 'log', 'Log', '', rows)
+  ))
+
+  return section(d, 'log', 'Log', '', rows)
+}
 ```
 
 - **Time and `who`** are fixed columns.
@@ -641,6 +674,14 @@ return section(d, 'log', 'Log', '', rows)
 - **`who` width per surface.**
   - Desktop: a constant 13 cells, so the text column does not jump when the longest `who` changes.
   - Terminal: v1's longest-visible `who`, capped at 14.
+- **Outcome.** The mark and the time of an action (`✓ 0.3s`, `✗ 0.3s`), or `denied`, in a column of its own at the right edge of the row. A subagent's result has one too: `✓ 1m 12s`, `✗ 1m 12s`, or the time alone for a stop, which is no fault.
+  - The column is FIXED and right-aligned (`justifyContent="flex-end"`). It holds one `Text wrap="truncate"`, styled like the `who` of the same line: red for an error line, dim otherwise.
+  - A line without an outcome (a prompt, `spawned`, `resumed`, a compaction) gets the same cell, empty, so every text is cut at the same x.
+- **Outcome width per surface.** Worked out once per section, from the lines drawn.
+  - Terminal: the longest outcome, in characters.
+  - Desktop: the longest outcome + 1 cell. A ✓ or a ✗ varies by font, and the margin keeps the mark whole.
+  - With no outcome among the lines drawn there is no column: the row has three cells, as before.
+- **Fallback.** The text keeps the body less the time, `who` and outcome cells and the 3 gaps of a row of four. Under `MIN_LOG_TEXT_CELLS` (8) cells of text there is no column: the row has three cells, and the outcome of a line goes back to the end of its text, cut with it.
 
 ### 6.11 Empty and partial states
 
@@ -755,7 +796,7 @@ Butt caps keep the arc honest: round caps would add a stroke-width to its visibl
 | Project row | the longer of project and branch | the other | icons |
 | Subagent row | description (ellipsis) | the `@type` column, clipped by the group at the same x on every row (panes too narrow for it) | mark, cost |
 | MCP chip | the name, only when it alone is wider than the pane | nothing | the dot |
-| Log row | text (ellipsis) | nothing | time; `who` cuts inside its own column |
+| Log row | text (ellipsis) | nothing | time, the outcome (below 8 cells of text it stops being a column and ends the text, §6.10); `who` cuts inside its own column |
 
 The ellipsis is the surface's own, from `wrap="truncate"`. No string is shortened by hand for layout: `shorten()` in the log formulas is content and stays as it is.
 
@@ -771,6 +812,7 @@ The ellipsis is the surface's own, from `wrap="truncate"`. No string is shortene
 | `+N more` indent | 3 cells | 2 cells |
 | `who` column | 13 cells | longest visible `who`, ≤ 14 |
 | `@type` column | 15 cells | longest drawn `@type`, ≤ 15 |
+| Outcome column | longest drawn outcome + 1 cell | longest drawn outcome |
 | Header | `[icon] Title ▾ … summary` | `Title ▾ … summary`. The plain Button draws the glyph alone, and the focus inverts it (l.896–897, l.929–934). |
 
 The chevron Button and the bold title are the same elements on both surfaces, so the tests drive one tree.
@@ -806,7 +848,7 @@ Results of the live renders (2026-10-07 and 2026-10-08):
 
 1. Pass. At ~300 px the bar ends ~18 px left of the percent; `CELL_PX` 8 stays.
 2. Pass. 12–14 px between the ink and the rule on each side, ≈ 17 px box to box.
-3. Pass. At ~300 px no row crosses the edge; descriptions and log text end in `…`.
+3. Pass. At ~300 px no row crosses the edge; descriptions and log text end in `…`. Since Task 8 the log's outcome column gives way when the text would keep fewer than 8 cells (about 40 columns on the desktop), so at ~300 px the log shows the outcome at the end of the text, by design.
 4. The tree was not refused, but the desktop drew no Svg with an empty `alt`: the icons, the ring and the rules were missing while their slots stayed. Fixed by giving every Svg a label (commit c5f73d1).
 5. Pass. A click on the chevron folds the section, and the folded state survives a reload.
 
@@ -847,7 +889,7 @@ These tests encode v1's tree and need updating with the implementation:
 | Empty pane | The desktop now draws the ring track. Assert "no meter" (no Svg with a `%` alt) instead of "no Svg". |
 | Meter widths | `meterWidth` becomes `contextMeterWidth` and `limitMeterWidth` (§6.2, §6.5). |
 | `markCells()` | Desktop marks are Svg in a 2-cell slot. The terminal is unchanged (1-cell Box with `◐ ✓ ✗`). |
-| `logColumns()` | The time `Text` sits in an 8-cell Box. The row is [time Box, who Box, text Box]; `who` is 13 cells on the desktop. |
+| `logColumns()` | The time `Text` sits in an 8-cell Box. The row is [time Box, who Box, text Box, outcome Box], the last one only when the column is drawn; `who` is 13 cells on the desktop. |
 | MCP | `● name` in `success` becomes `Text '● '` in `success` + `Text 'name'` with no colour. |
 
 ## 14. d.ts references

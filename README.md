@@ -19,9 +19,10 @@ The pane redraws as the session runs. Every section below the top block can be f
 - **MCP**: the servers that have tools in the context, by name, with their count. The desktop app's own servers
   (`ccd_*`, `Claude_Browser`, `scheduled-tasks`, `terminal`) are hidden and not counted.
 - **Context sources**: how many skills and MCP servers feed the context.
-- **Log**: the latest 15 of the last 60 events, newest first: prompts, tool calls with their outcome, subagent
-  spawns, resumes and results (a successful Agent call, or a SendMessage to a known subagent, is not logged: their
-  lines say it), compactions. Common secret patterns (tokens, keys, passwords in URLs and flags) are masked.
+- **Log**: the latest 15 of the last 60 events, newest first: prompts, tool calls, subagent spawns, resumes and
+  results (a successful Agent call, or a SendMessage to a known subagent, is not logged: their lines say it),
+  compactions. Tool calls and subagent results both carry their outcome (✓/✗ and the time, or denied) in a
+  right-aligned column. Common secret patterns (tokens, keys, passwords in URLs and flags) are masked.
 
 ## How costs are measured
 

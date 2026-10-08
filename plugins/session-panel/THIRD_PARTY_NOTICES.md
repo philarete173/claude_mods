@@ -6,8 +6,8 @@ session-panel builds on three MIT-licensed projects. Their license notices follo
 
 - **URL:** https://github.com/scasella/claude-flightdeck
 - **Revision:** commit f31daca
-- **Used:** the secret-masking regular expressions of `redact` in `plugins/session-panel/hooks/stats.ts`, copied
-  verbatim from `hooks/core.ts`; and the session-log design.
+- **Used:** the secret-masking regular expressions of `redact` in `hooks/stats.ts`, copied verbatim from
+  `hooks/core.ts`; and the session-log design.
 
 ```text
 MIT License
