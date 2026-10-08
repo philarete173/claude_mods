@@ -1016,6 +1016,9 @@ test('the message a subagent handed back is the answer of its done line when the
     const cases: [handed: Record<string, unknown> | undefined, answer: string, shown: string][] = [
       [{ message: 'first finding, then more' }, '', 'done · $0.500 — first finding, then more'],
       [{ message: 'not this one' }, 'the engine answer', 'done · $0.500 — the engine answer'],
+      // An answer of spaces and a line break is no answer: the message stands in for it, or the line has none.
+      [{ message: 'first finding' }, '  \n', 'done · $0.500 — first finding'],
+      [undefined, '  \n', 'done · $0.500'],
       [undefined, '', 'done · $0.500'],
       // A message that is not a string is ignored: a number, nothing at all, null, an object.
       [{ message: 42 }, '', 'done · $0.500'],

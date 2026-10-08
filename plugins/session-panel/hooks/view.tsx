@@ -74,6 +74,7 @@ const MIN_LOG_TEXT_CELLS = 8 // the least text a log line keeps: below it `who` 
 const MIN_AGENT_DESC_CELLS = 12
 const LOG_GAP_CELLS = 1 // the gap between the cells of a log row
 const AGENT_GAP_CELLS = 1 // the gap between the cells of a subagent row, and between those of its group
+const AGENT_ROW_GAPS = 3 // the gaps of a subagent row that has its type: two between its cells, one in its group
 const TEXT_MARK_CELLS = 1 // the mark of a subagent row where there is no icon slot
 
 // The meter, the ring and the icons are images, so their colours are raw and the same in both themes.
@@ -538,17 +539,17 @@ function agentsSection(d: Draw): RenderElement | null {
   // that is drawn, the desktop a width of its own.
   const longest = Math.max(...shown.map(agent => `@${shortType(agent.type)}`.length))
   const typeCells = Svg === undefined ? Math.min(TYPE_CELLS_MAX, longest) : TYPE_CELLS
-  // What the description keeps beside the type: the body less the mark, the type, the cost and the 3 gaps of a row
-  // (two in the row, one in its group). With less than MIN_AGENT_DESC_CELLS the type is left out of every row.
+  // What the description keeps beside the type: the body less the mark, the type, the cost and the gaps of a row. With
+  // less than MIN_AGENT_DESC_CELLS the type is left out of every row.
   const markCells = Svg === undefined ? TEXT_MARK_CELLS : ICON_CELLS
-  const descCells = d.cols - markCells - typeCells - COST_CELLS - 3 * AGENT_GAP_CELLS
+  const descCells = d.cols - markCells - typeCells - COST_CELLS - AGENT_ROW_GAPS * AGENT_GAP_CELLS
   const hasType = descCells >= MIN_AGENT_DESC_CELLS
   const rows = shown.map(agent => agentRow(d, agent, hasType ? typeCells : 0))
   const more = agents.length - MAX_AGENT_ROWS
   if (more > 0) {
-    // The icon slot and its gap on the desktop, the one-cell mark and its gap on the terminal.
+    // The line starts where the descriptions do: after the mark and its gap.
     rows.push(
-      <Box flexDirection="row" paddingLeft={Svg === undefined ? 2 : 3}>
+      <Box flexDirection="row" paddingLeft={markCells + AGENT_GAP_CELLS}>
         <Text dimColor>{`+${more} more`}</Text>
       </Box>,
     )
@@ -604,7 +605,8 @@ function sourcesSection(d: Draw): RenderElement | null {
 // jump with the longest `who`; on the terminal it is the longest one there is, up to the most shortType keeps. The
 // outcome (the mark and the time of an action, or `denied`) is a fixed column at the right edge, as wide as the
 // longest one drawn, a cell wider on the desktop: a ✓ or a ✗ varies by font, and the margin keeps the mark whole. A
-// line without one has the cell empty. An error shows its `who` and its outcome in red, the others are dim.
+// line without one has the cell empty. An error shows its `who` and its outcome in red, the others are dim; in
+// [time, text], which has neither cell, its text is red.
 // The layout is the first of these whose text keeps MIN_LOG_TEXT_CELLS cells, one for every row: [time, who, text,
 // outcome]; then `who` gives way, [time, text, outcome]; then [time, text], where a line shows its outcome in front of
 // its text, so that the cut at the end keeps it. That one is also the layout when nothing fits. With no outcome among
@@ -625,6 +627,7 @@ function logSection(d: Draw): RenderElement | null {
   const hasOutcomes = outcomeCells > 0
   const hasWho = textCells(true, hasOutcomes) >= MIN_LOG_TEXT_CELLS
   const hasOutcomeCell = hasOutcomes && (hasWho || textCells(false, true) >= MIN_LOG_TEXT_CELLS)
+  const isTextOnly = !hasWho && !hasOutcomeCell
   const rows = lines.map(line => (
     <Box flexDirection="row" columnGap={LOG_GAP_CELLS}>
       <Box flexDirection="row" width={TIME_CELLS} flexShrink={0}>
@@ -640,7 +643,7 @@ function logSection(d: Draw): RenderElement | null {
         </Box>
       )}
       <Box flexDirection="row" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
-        <Text wrap="truncate">
+        <Text color={isTextOnly && line.kind === 'error' ? BAD : undefined} wrap="truncate">
           {hasOutcomeCell || line.outcome === undefined ? line.text : `${line.outcome} ${line.text}`}
         </Text>
       </Box>

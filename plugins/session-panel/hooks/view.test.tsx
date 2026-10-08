@@ -1304,6 +1304,11 @@ test('the log keeps time and who in fixed columns, so every text starts at the s
       .map(({ node }) => [node.props?.color, node.props?.dimColor])
   expect(styles('error')).toEqual(Array(3).fill(['error', undefined]))
   expect(styles('ok')).toEqual(Array(3).fill([undefined, true]))
+  // The text of an error line stays plain: its `who` is the red.
+  const textColours = flat(draw({ ...EMPTY, log: log('engineer', 'error') }))
+    .filter(({ node }) => node.type === 'Text' && ['a', 'b', 'c'].includes(textsOf(node)[0] ?? ''))
+    .map(({ node }) => node.props?.color)
+  expect(textColours).toEqual(Array(3).fill(undefined))
 })
 
 // Log lines with outcomes of three lengths (an error among them) and one with none: a prompt.
@@ -1426,10 +1431,12 @@ test('a log row gives way in three steps: `who` first, then the outcome cell, wh
         // The text, whole, or behind its outcome when the row has no cell for it; one with no outcome shows its text.
         const isLead = layout === LAYOUT_TEXT && line?.outcome !== undefined
         expect(textsOf(cell('text')), where).toEqual([isLead ? `${line?.outcome} ${line?.text}` : line?.text])
-        // The text is a cell that gives way and is cut, in the plain colour.
+        // The text is a cell that gives way and is cut. It is plain, but in [time, text], which has no cell for `who`
+        // or the outcome to be red in, the text of an error line is red.
         expect(cell('text')?.props, where)
           .toMatchObject({ flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden' })
-        expect(childrenOf(cell('text')).map(styleOf), where).toEqual([[undefined, undefined, 'truncate']])
+        const textColour = layout === LAYOUT_TEXT && line?.kind === 'error' ? 'error' : undefined
+        expect(childrenOf(cell('text')).map(styleOf), where).toEqual([[textColour, undefined, 'truncate']])
         // An error shows its `who` and its outcome in red, the others are dim, where they have a cell.
         const style = line?.kind === 'error' ? ['error', undefined, 'truncate'] : [undefined, true, 'truncate']
         expect(childrenOf(cell('who')).map(styleOf), where).toEqual(layout.includes('who') ? [style] : [])
@@ -1449,6 +1456,40 @@ test('a line with an outcome reads `✓ 0.3s Bash ls` where the row has the time
     const rows = logRows(draw(onSurface({ ...EMPTY, log }, surface), 8))
     expect(rows.map(logRoles), surface).toEqual([LAYOUT_TEXT, LAYOUT_TEXT])
     expect(rows.map(row => textsOf(childrenOf(row)[1])), surface).toEqual([['✓ 0.3s Bash ls'], ['Bash ls']])
+  }
+})
+
+test('where the row has the time and the text only, the text of an error line is red and the others are plain', () => {
+  const log: LogEntry[] = [
+    { at: NOW, who: 'main', text: 'Bash ls', kind: 'ok', outcome: '✓ 0.3s' },
+    { at: NOW - 1000, who: 'main', text: 'Bash false', kind: 'error', outcome: '✗ 3.3s' },
+    { at: NOW - 2000, who: 'main', text: 'stopped', kind: 'info', outcome: '27.4s' },
+    // A line from before the outcome was a field has none, and its kind says it failed.
+    { at: NOW - 3000, who: 'main', text: 'Bash old ✗', kind: 'error' },
+  ]
+  const oldErrors = [log[3], log[3]] as LogEntry[]
+  const colours = (tree: unknown): unknown[] =>
+    logRows(tree).map(row => childrenOf(childrenOf(row)[logRoles(row).indexOf('text')]).map(styleOf)[0])
+  // The layout of each width, with the longest outcome at 6 characters: the edges are 39 and 25 on the desktop, 29 and
+  // 24 on the terminal. With no outcome at all there is `who` from 31 columns on the desktop, from 22 on the terminal:
+  // the old lines are in [time, text], and red, only where the last field is true.
+  const widths: [surface: Surface, bodyColumns: number, layout: string[], isOldRed: boolean][] = [
+    ['desktop', 8, LAYOUT_TEXT, true], ['desktop', 30, LAYOUT_BARE, true], ['desktop', 120, LAYOUT_WHO, false],
+    ['terminal', 8, LAYOUT_TEXT, true], ['terminal', 26, LAYOUT_BARE, false], ['terminal', 120, LAYOUT_WHO, false],
+  ]
+  for (const [surface, bodyColumns, layout, isOldRed] of widths) {
+    const where = `${surface} ${bodyColumns} columns`
+    const tree = draw(onSurface({ ...EMPTY, log }, surface), bodyColumns)
+    expect(logRows(tree).map(logRoles), where).toEqual(Array(4).fill(layout))
+    // Only in [time, text] is the text red, and only for an error line (the old one too); no line is ever dim.
+    const red = layout === LAYOUT_TEXT ? 'error' : undefined
+    expect(colours(tree), where).toEqual([
+      [undefined, undefined, 'truncate'], [red, undefined, 'truncate'], [undefined, undefined, 'truncate'],
+      [red, undefined, 'truncate'],
+    ])
+    // With no outcome among the lines the same holds: red in [time, text], plain beside a `who` that is red.
+    const bare = draw(onSurface({ ...EMPTY, log: oldErrors }, surface), bodyColumns)
+    expect(colours(bare), where).toEqual(Array(2).fill([isOldRed ? 'error' : undefined, undefined, 'truncate']))
   }
 })
 

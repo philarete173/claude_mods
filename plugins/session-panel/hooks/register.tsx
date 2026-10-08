@@ -418,9 +418,9 @@ export const register: Register = on => {
       return done
     }
     const { agentId } = e
-    // The answer is the engine's, or the message that the agent handed back when the engine has none; the message
-    // serves once, whatever the outcome.
-    const answer = e.answer !== '' ? e.answer : (handbacks.get(agentId) ?? '')
+    // The answer is the engine's, or the message that the agent handed back when the engine has none (spaces are none);
+    // the message serves once, whatever the outcome.
+    const answer = e.answer.trim() !== '' ? e.answer : (handbacks.get(agentId) ?? '')
     handbacks.delete(agentId)
     const now = await $.clock.now()
     // The agent's last request may not be charged yet: a reading in line with the others settles that before the row
