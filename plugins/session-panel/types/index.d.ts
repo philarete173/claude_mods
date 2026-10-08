@@ -74,7 +74,8 @@ export type PanelProject = {
   name: string
   // The branch; the short commit on a detached HEAD; null outside a git repository or when git fails.
   branch: string | null
-  // Null when there is nothing to show: outside a git repository, on a clean tree, or when git failed.
+  // Null when there is nothing to show: outside a git repository, on a clean tree, or when git failed. Also null from
+  // the moment the name changes until the changes of the new folder are read: a count is never kept under another name.
   changes: PanelChanges | null
 }
 export type PanelMcp = { servers: { name: string }[] }

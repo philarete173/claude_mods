@@ -24,22 +24,30 @@ const MESSAGES: SessionMessage[] = [{ role: 'user', text: 'hi', toolUses: [] }]
 const PANE_UP: UiPane = { id: 'session-panel', title: 'Session', isShown: true, isFocused: false, isPlaced: true }
 
 // The git calls that read the project, as register.tsx makes them: the argv and the options, exactly. The delay is the
-// one that register.tsx waits after a call of a tool that may change a file. A call that reads the tree starts with
-// GIT_READ: no optional locks, and no fsmonitor (a program or a daemon of the person's, which a read must not start).
+// one that register.tsx waits after a call of a tool that may change a file; the gap factor is how many times as long
+// as the last read took a delayed read waits at least. A call that reads the tree starts with GIT_READ: no optional
+// locks, no fsmonitor (a program or a daemon of the person's, which a read must not start) and no refresh of the index
+// by a diff (it takes index.lock and writes .git/index). Its options carry GIT_NO_LAZY_FETCH, so that a partial clone
+// does not fetch from its remote; the call of rev-parse reads no object, so it carries none.
 const PROJECT_DELAY_MS = 1000
-const GIT_READ = ['git', '--no-optional-locks', '-c', 'core.fsmonitor=false']
+const PROJECT_GAP_FACTOR = 4
+const GIT_READ = [
+  'git', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'diff.autoRefreshIndex=false',
+]
+const NO_LAZY_FETCH = { GIT_NO_LAZY_FETCH: '1' }
 const BRANCH_RUN = { argv: ['git', 'branch', '--show-current'], init: { cwd: ROOT, timeoutMs: 5000 } }
 const STATUS_RUN = {
-  argv: [...GIT_READ, 'status', '--porcelain', '-z', '-uall'], init: { cwd: ROOT, timeoutMs: 10_000 },
+  argv: [...GIT_READ, 'status', '--porcelain', '-z', '-uall'],
+  init: { cwd: ROOT, timeoutMs: 10_000, env: NO_LAZY_FETCH },
 }
 const DIFF_RUN = {
-  argv: [...GIT_READ, 'diff', '--numstat', '--no-textconv', '--no-ext-diff', 'HEAD', '--'],
-  init: { cwd: ROOT, timeoutMs: 10_000 },
+  argv: [...GIT_READ, 'diff', '--numstat', '--no-relative', '--no-textconv', '--no-ext-diff', 'HEAD', '--'],
+  init: { cwd: ROOT, timeoutMs: 10_000, env: NO_LAZY_FETCH },
 }
 const TOPLEVEL_RUN = { argv: ['git', 'rev-parse', '--show-toplevel'], init: { cwd: ROOT, timeoutMs: 10_000 } }
 const noIndexRun = (path: string, cwd: string) => ({
   argv: [...GIT_READ, 'diff', '--no-index', '--numstat', '--no-textconv', '--no-ext-diff', '--', '/dev/null', path],
-  init: { cwd, timeoutMs: 10_000 },
+  init: { cwd, timeoutMs: 10_000, env: NO_LAZY_FETCH },
 })
 
 // A test's own `$` has no `state` noun, so a second plugin reads the session-panel values back through a command.
@@ -78,15 +86,16 @@ const TICKER: Plugin = {
     })
   },
 }
-// A plugin above the mod's that refuses the first timer of 1000 ms, as a hook may: a `clock.after` that is refused
-// never runs its fn. Like any plugin of a test it closes over nothing of this file, so the delay is spelled out.
+// A plugin above the mod's that refuses the first timer of 1000 ms or more, as a hook may: a `clock.after` that is
+// refused never runs its fn. The timer of a delayed read is the only one that long (the others wait a millisecond).
+// Like any plugin of a test it closes over nothing of this file, so the delay is spelled out.
 const REFUSER: Plugin = {
   name: 'refuser',
   tier: 'prepend',
   register(on) {
     let isRefused = false
     on('clock.after', (_$, e, next) => {
-      if (e.ms !== 1000 || isRefused) return next(e)
+      if (e.ms < 1000 || isRefused) return next(e)
       isRefused = true
 
       return { deny: 'refused' }
@@ -157,6 +166,8 @@ type World = {
   maxGitInFlight: number
   rootLag: number // how long session.root() takes, in mock ms
   rootFailures: number // how many of the next session.root() calls reject
+  root: string // what session.root() answers
+  isReadOnly: boolean // core ran the next calls of tools read-only: their results say so
   listed: { id: string; status: string }[] // what $.agent.list() answers
   compacted: Record<string, unknown>
   spawns: number
@@ -207,6 +218,8 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
     maxGitInFlight: 0,
     rootLag: 0,
     rootFailures: 0,
+    root: ROOT,
+    isReadOnly: false,
     listed: [],
     compacted: { messages: MESSAGES, tokensBefore: 180_000, tokensAfter: 40_000 },
     spawns: 0,
@@ -262,14 +275,15 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
     if (e.tool === 'SendMessage') says = e.message
     if (e.tool === HANDBACK_TOOL) says = String('message' in e ? e.message : '')
     if (says.startsWith('deny')) return { deny: 'no' }
+    const readOnly = w.isReadOnly ? { isReadOnly: true as const } : {}
     if (says.startsWith('fail')) {
       if (w.toolFailMs > 0) await clock.sleep(w.toolFailMs)
 
-      return { isError: true as const, result: 'boom', text: 'boom' }
+      return { isError: true as const, result: 'boom', text: 'boom', ...readOnly }
     }
     await clock.sleep(300)
 
-    return { result: { stdout: 'ok' } as never, text: 'ok' }
+    return { result: { stdout: 'ok' } as never, text: 'ok', ...readOnly }
   })
   // Calls on `$`; the test host serves `state` itself and mock.clock serves `clock`.
   on('command.register', (_$, e) => {
@@ -285,7 +299,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
       throw new Error('the root is not available')
     }
 
-    return { value: ROOT }
+    return { value: w.root }
   })
   on('session.usage', async (_$, e) => {
     w.usageInFlight += 1
@@ -1019,6 +1033,195 @@ test('a read that fails does not stop the next one: a request that came meanwhil
     await ask()
     await clock.advance(5000)
     expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN])
+  })
+
+// A call that core ran read-only (a Bash `ls`) says so in its result, and it changed no file: it asks for no read. The
+// same calls, when core did not hold them read-only, ask.
+test('a call that core ran read-only asks for no read, and the same call that it did not gives one', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    w.runs.length = 0
+
+    const calls = [
+      ['Bash', { tool: 'Bash', command: 'ls -la' }], ['Edit', edit()], ['a Bash that failed', instant()],
+    ] as const
+    for (const [what, call] of calls) {
+      const before = reads(w)
+      w.isReadOnly = true
+      await drive(clock, $.tool.call(call as never))
+      await clock.advance(5 * PROJECT_DELAY_MS)
+      expect(reads(w) - before, `${what}, run read-only`).toBe(0)
+      w.isReadOnly = false
+      await drive(clock, $.tool.call(call as never))
+      await clock.advance(5 * PROJECT_DELAY_MS)
+      expect(reads(w) - before, what).toBe(1)
+    }
+  })
+
+// A read takes two git calls when the tree is clean, `lag` each: the next delayed read waits as long as four such
+// reads, but never less than the delay. The second row is where the two meet.
+const READ_DELAYS: Array<[lag: number, delay: number]> = [
+  [50, PROJECT_DELAY_MS], // a read of 100 ms: four of them are 400 ms, the delay of 1000 ms stands
+  [125, PROJECT_DELAY_MS], // 250 ms: four of them are 1000 ms, the same
+  [126, 4 * 2 * 126], // 252 ms: 1008 ms
+  [300, 4 * 2 * 300], // 600 ms: 2400 ms
+  [1000, 4 * 2 * 1000], // 2000 ms: 8000 ms
+]
+for (const [lag, delay] of READ_DELAYS) {
+  test(`a read of ${2 * lag} ms makes the next delayed read wait ${delay} ms, and not before`, WITH_READER,
+    async ($, on) => {
+      const clock = mock.clock(on)
+      const w = bottom(on, clock)
+      w.gitLag = lag
+      await $.session.start(START)
+      await clock.advance(1 + 2 * lag) // the read of the start of the session is over
+      w.runs.length = 0
+      expect(delay).toBe(Math.max(PROJECT_DELAY_MS, PROJECT_GAP_FACTOR * 2 * lag))
+
+      await $.tool.call(instant())
+      await clock.advance(delay - 1)
+      expect(reads(w)).toBe(0)
+      await clock.advance(1)
+      expect(reads(w)).toBe(1)
+    })
+}
+
+test('a read that fails after 600 ms makes the next delayed read wait 2400 ms, as one that succeeded does', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.rootLag = 600
+    w.rootFailures = 1 // the read of the start of the session fails, after 600 ms
+    await $.session.start(START)
+    await clock.advance(1 + 600)
+    expect((await readState($)).project).toBeUndefined() // it wrote nothing
+    w.rootLag = 0
+    w.runs.length = 0
+
+    await $.tool.call(instant())
+    await clock.advance(4 * 600 - 1)
+    expect(reads(w)).toBe(0)
+    await clock.advance(1)
+    expect(reads(w)).toBe(1)
+  })
+
+test('a read whose git calls are refused after 600 ms makes the next delayed read wait 2400 ms', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.gitThrows = true // each call is refused after its lag
+    w.gitLag = 300
+    await $.session.start(START)
+    await clock.advance(1 + 2 * 300)
+    w.runs.length = 0
+
+    await $.tool.call(instant())
+    await clock.advance(4 * 600 - 1)
+    expect(reads(w)).toBe(0)
+    await clock.advance(1)
+    expect(reads(w)).toBe(1)
+  })
+
+// The wait of a read that a hook refused is lost once it is twice its own delay old, as the delay follows the last
+// read: here 2400 ms, so the window is 4800 ms. A call inside it adds nothing, one after it asks again.
+const SCALED_WAITS: Array<[gap: number, isRead: boolean]> = [
+  [2 * PROJECT_DELAY_MS + 500, false], // past twice the delay of 1000 ms, still inside the window of this one
+  [2 * 4 * 600 - 1, false],
+  [2 * 4 * 600, true],
+]
+for (const [gap, isRead] of SCALED_WAITS) {
+  test(`with a delay of 2400 ms, a refused timer's wait is lost after 4800 ms: a call ${gap} ms later ${
+    isRead ? 'asks again, and is read' : 'adds nothing'}`, WITH_REFUSER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.gitLag = 300
+    await $.session.start(START)
+    await clock.advance(1 + 2 * 300)
+    w.runs.length = 0
+
+    await $.tool.call(instant()) // asks, with a delay of 2400 ms; the timer is refused
+    await clock.advance(gap)
+    await $.tool.call(instant())
+    await clock.advance(10 * PROJECT_DELAY_MS)
+    expect(reads(w)).toBe(isRead ? 1 : 0)
+  })
+}
+
+// Only a delayed read waits in proportion to the last one: the read that a request during a read brings starts as that
+// read ends, however long it took.
+test('the read that a request during a slow read brings starts as that read ends, with no gap', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    w.runs.length = 0
+    w.gitLag = 300 // a read is two calls, so it takes 600 ms, and a delayed read would wait 2400 ms after it
+    const ask = () => $.classic.CwdChanged({ old_cwd: ROOT, new_cwd: ROOT })
+
+    await ask()
+    await clock.advance(101)
+    await ask() // 100 ms into the read
+    await clock.advance(499)
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN]) // the read is in its last call
+    await clock.advance(1)
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, BRANCH_RUN]) // it ends, and the one more starts at once
+  })
+
+// The branch is written as soon as git has said it, and the changes follow when they are read. A read is slow when its
+// status is: each git call takes 300 ms here, so the branch is in the value at 300 ms, and the changes at 600.
+test('the branch is in the project value before the changes are read, with the changes held that were read before',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0')
+    w.diff = ok('3\t1\ta.ts\n')
+    await $.session.start(START)
+    await clock.advance(1)
+    const first = { name: 'online_shop', branch: 'master', changes: { files: 1, lines: { added: 3, removed: 1 } } }
+    expect((await readState($)).project).toEqual(first)
+
+    // A checkout, and two modified files now; the read is slow.
+    w.branch = 'dev\n'
+    w.status = ok(' M a.ts\0 M b.ts\0')
+    w.diff = ok('5\t2\ta.ts\n')
+    w.gitLag = 300
+    await $.classic.CwdChanged({ old_cwd: ROOT, new_cwd: ROOT })
+    await clock.advance(1 + 300 + 50)
+    expect(w.gitInFlight).toBe(1) // the status is still being read
+    expect((await readState($)).project).toEqual({ ...first, branch: 'dev' })
+
+    await clock.advance(5000)
+    expect((await readState($)).project).toEqual({
+      name: 'online_shop', branch: 'dev', changes: { files: 2, lines: { added: 5, removed: 2 } },
+    })
+  })
+
+test('a count from another folder is never shown under the new name: the held changes go at once', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0')
+    w.diff = ok('3\t1\ta.ts\n')
+    await $.session.start(START)
+    await clock.advance(1)
+    expect((await readState($)).project.changes).toEqual({ files: 1, lines: { added: 3, removed: 1 } })
+
+    // The session root is another folder now; its status takes 300 ms, and says the same.
+    w.root = '/work/other_repo'
+    w.gitLag = 300
+    await $.classic.CwdChanged({ old_cwd: ROOT, new_cwd: w.root })
+    await clock.advance(1 + 300 + 50)
+    expect(w.gitInFlight).toBe(1)
+    expect((await readState($)).project).toEqual({ name: 'other_repo', branch: 'master', changes: null })
+
+    await clock.advance(5000)
+    expect((await readState($)).project).toEqual({
+      name: 'other_repo', branch: 'master', changes: { files: 1, lines: { added: 3, removed: 1 } },
+    })
   })
 
 test('session.measure fills usage, resetsAt becomes epoch ms and skills survive', WITH_READER, async ($, on) => {

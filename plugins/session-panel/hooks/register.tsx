@@ -47,15 +47,25 @@ const HANDBACK_TOOL: string = 'SubagentHandback'
 // The tools whose call may have changed a file, whichever agent made it: the project is read again after one.
 const WRITE_TOOLS: string[] = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash']
 
-// How long after such a call the project is read, in ms: its change has landed by then, and a burst of calls is read
-// once.
+// How long after such a call the project is read at least, in ms: its change has landed by then, and a burst of calls
+// is read once.
 const PROJECT_DELAY_MS = 1000
+
+// A delayed read of the project waits at least four times as long as the last read took. So git takes at most about a
+// fifth of the time, even in a big repository, and a read that ran into its timeouts is not retried at once.
+const PROJECT_GAP_FACTOR = 4
 
 // How long each git call that reads the changes may run, in ms.
 const CHANGES_TIMEOUT_MS = 10_000
 
 // The start of every git call that reads the tree; gitOut says why each option is there.
-const GIT_READ: string[] = ['git', '--no-optional-locks', '-c', 'core.fsmonitor=false']
+const GIT_READ: string[] = [
+  'git', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'diff.autoRefreshIndex=false',
+]
+
+// The variables that such a call runs with, set over the process's own. git 2.44 and later honour GIT_NO_LAZY_FETCH,
+// and older git ignores it.
+const GIT_READ_ENV: Record<string, string> = { GIT_NO_LAZY_FETCH: '1' }
 
 // How many new files have their lines counted. A new file is in no diff against HEAD, so each takes a git call of its
 // own; the files past this many add no lines, so past it the plus is a lower bound.
@@ -85,10 +95,15 @@ let isProjectBusy = false
 // request is always served.
 let isProjectStale = false
 
-// The time at which the read of the project that waits on a timer was asked for, in ms; null when none waits. A call of
-// WRITE_TOOLS that comes meanwhile adds nothing: that read sees the tree as it is when it runs. A timer that a hook
-// refused never runs, so a wait older than twice the delay is taken as lost, and the next call asks again.
-let projectAskedAt: number | null = null
+// The read of the project that waits on a timer: the time at which it was asked for and how long it waits, in ms; null
+// when none waits. A call of WRITE_TOOLS that comes meanwhile adds nothing: that read sees the tree as it is when it
+// runs. A timer that a hook refused never runs, so a wait older than twice its own delay is taken as lost, and the next
+// call asks again.
+let projectWait: { askedAt: number; delayMs: number } | null = null
+
+// How long the last read of the project took, in ms, whether it succeeded or failed; 0 until the first one ends. The
+// delay of the next delayed read follows it (PROJECT_GAP_FACTOR).
+let lastReadMs = 0
 
 // ISO 8601 to epoch ms, which is what the `usage` value keeps; undefined when there is none or it does not parse.
 const toMs = (iso: string | undefined): number | undefined => {
@@ -212,10 +227,16 @@ async function gitBranch($: EngineInterface, root: string): Promise<string | nul
 // The stdout of a git call that reads the changes: null unless it ended with one of `exits` and was not cut, or when
 // it could not be started. A call that reads the tree (GIT_READ) passes `--no-optional-locks`: a plain one may refresh
 // the index and take index.lock, which makes the git commands of the person or the agent fail. It passes
-// `-c core.fsmonitor=false` too, or git may run the fsmonitor hook that the person configured, or start its own daemon.
-async function gitOut($: EngineInterface, argv: string[], cwd: string, exits: number[]): Promise<string | null> {
+// `-c core.fsmonitor=false` too, or git may run the fsmonitor hook that the person configured, or start its own daemon,
+// and `-c diff.autoRefreshIndex=false`, or a diff of the tree refreshes the index all the same, taking index.lock and
+// rewriting .git/index. The `env` it is given, GIT_READ_ENV, keeps a partial clone from fetching the objects it lacks
+// from its remote, which is network.
+async function gitOut(
+  $: EngineInterface, argv: string[], cwd: string, exits: number[], env?: Record<string, string>,
+): Promise<string | null> {
   try {
-    const ran = await $.process.run(argv, { cwd, timeoutMs: CHANGES_TIMEOUT_MS })
+    const init = { cwd, timeoutMs: CHANGES_TIMEOUT_MS, ...(env === undefined ? {} : { env }) }
+    const ran = await $.process.run(argv, init)
 
     return exits.includes(ran.exitCode) && !ran.isStdoutTruncated ? ran.stdout : null
   } catch {
@@ -227,20 +248,22 @@ async function gitOut($: EngineInterface, argv: string[], cwd: string, exits: nu
 // is nothing to show: outside a git repository, on a clean tree, or when the list of files cannot be had whole. The
 // lines are null when they cannot be had (an unborn HEAD has no HEAD to diff against).
 async function gitChanges($: EngineInterface, root: string): Promise<Changes> {
-  const status = await gitOut($, [...GIT_READ, 'status', '--porcelain', '-z', '-uall'], root, [0])
+  const status = await gitOut($, [...GIT_READ, 'status', '--porcelain', '-z', '-uall'], root, [0], GIT_READ_ENV)
   if (status === null) return null
   const { files, newFiles } = parseStatus(status)
   if (files === 0) return null
-  // The tracked files, net against HEAD. --no-textconv and --no-ext-diff count the files themselves, and run no program
-  // that the person configured. The `--` after HEAD makes it a revision: a file or folder named HEAD in the root would
-  // make it ambiguous, and git would refuse.
-  const diff = await gitOut(
-    $, [...GIT_READ, 'diff', '--numstat', '--no-textconv', '--no-ext-diff', 'HEAD', '--'], root, [0],
-  )
+  // The tracked files, net against HEAD, over the whole repository whatever the person's `diff.relative` says
+  // (--no-relative). --no-textconv and --no-ext-diff count the files themselves: no textconv or external diff program
+  // runs. The person's own filters may (clean and process filters, Git LFS among them), as in any `git status`. The
+  // `--` after HEAD makes it a revision: a file or folder named HEAD in the root would make it ambiguous, and git would
+  // refuse.
+  const diffArgv = [...GIT_READ, 'diff', '--numstat', '--no-relative', '--no-textconv', '--no-ext-diff', 'HEAD', '--']
+  const diff = await gitOut($, diffArgv, root, [0], GIT_READ_ENV)
   if (diff === null) return { files, lines: null }
   let { added, removed } = sumNumstat(diff)
   if (newFiles.length > 0) {
-    // The paths of the status are relative to the top of the repository, which may not be the session root.
+    // The paths of the status are relative to the top of the repository, which may not be the session root. Finding it
+    // reads no object, so that call runs without GIT_READ_ENV.
     const toplevel = await gitOut($, ['git', 'rev-parse', '--show-toplevel'], root, [0])
     if (toplevel === null) return { files, lines: null }
     const top = toplevel.trim()
@@ -250,7 +273,7 @@ async function gitChanges($: EngineInterface, root: string): Promise<Changes> {
       const argv = [
         ...GIT_READ, 'diff', '--no-index', '--numstat', '--no-textconv', '--no-ext-diff', '--', '/dev/null', path,
       ]
-      const counted = await gitOut($, argv, top, [0, 1])
+      const counted = await gitOut($, argv, top, [0, 1], GIT_READ_ENV)
       if (counted !== null) {
         const lines = sumNumstat(counted)
         added += lines.added
@@ -262,12 +285,27 @@ async function gitChanges($: EngineInterface, root: string): Promise<Changes> {
   return { files, lines: { added, removed } }
 }
 
-// Reads the project: the name (the folder of the session root), its branch, then the changes of its working tree.
+// Reads the project: the name (the folder of the session root), its branch, then the changes of its working tree. The
+// changes can take long to read, so it writes twice: the name and the branch as soon as git has said it, with the
+// changes held, or none when the name changed (a count of another folder is never shown under the new name), and then
+// the changes.
 async function refreshProject($: EngineInterface): Promise<void> {
   const root = await $.session.root()
+  const name = root.replace(/^.*[\\/]/, '')
   const branch = await gitBranch($, root)
+  await update($, projectAtom, held => ({ name, branch, changes: held.name === name ? held.changes : null }))
   const changes = await gitChanges($, root)
-  await update($, projectAtom, () => ({ name: root.replace(/^.*[\\/]/, ''), branch, changes }))
+  await update($, projectAtom, held => ({ ...held, changes }))
+}
+
+// Reads the project once, and keeps in lastReadMs how long it took, whether the read succeeded or failed.
+async function readProject($: EngineInterface): Promise<void> {
+  const startedAt = await $.clock.now()
+  try {
+    await refreshProject($)
+  } finally {
+    lastReadMs = (await $.clock.now()) - startedAt
+  }
 }
 
 // Asks for a read of the project. The reads run one at a time: one asked for while another is under way only marks the
@@ -282,19 +320,21 @@ async function requestProject($: EngineInterface): Promise<void> {
   isProjectBusy = true
   do {
     isProjectStale = false
-    await refreshProject($).catch(() => undefined)
+    await readProject($).catch(() => undefined)
   } while (isProjectStale)
   isProjectBusy = false
 }
 
-// Asks for a read of the project PROJECT_DELAY_MS from `now`, which the call of a tool that may have changed a file
-// does. One timer waits at most: a call that comes while it waits adds nothing. A wait counts for twice the delay, as a
-// timer that a hook refused never runs; a late timer that still fires only adds a read, which the runner coalesces.
+// Asks for a read of the project some time after `now`, which the call of a tool that may have changed a file does: the
+// delay is PROJECT_DELAY_MS, or PROJECT_GAP_FACTOR times as long as the last read took when that is more. One timer
+// waits at most: a call that comes while it waits adds nothing. A wait counts for twice its own delay, as a timer that
+// a hook refused never runs; a late timer that still fires only adds a read, which the runner coalesces.
 function requestProjectLater($: EngineInterface, now: number): void {
-  if (projectAskedAt !== null && now - projectAskedAt < 2 * PROJECT_DELAY_MS) return
-  projectAskedAt = now
-  $.clock.after(PROJECT_DELAY_MS, () => {
-    projectAskedAt = null
+  if (projectWait !== null && now - projectWait.askedAt < 2 * projectWait.delayMs) return
+  const delayMs = Math.max(PROJECT_DELAY_MS, PROJECT_GAP_FACTOR * lastReadMs)
+  projectWait = { askedAt: now, delayMs }
+  $.clock.after(delayMs, () => {
+    projectWait = null
     requestProject($).catch(() => undefined)
   })
 }
@@ -496,8 +536,9 @@ export const register: Register = on => {
     const ran = await next(e)
     const t1 = await $.clock.now()
     // A call that may have changed a file asks for a read of the project, whatever its outcome (a command that failed
-    // may have changed some first); a denied one never ran.
-    if (ran.deny === undefined && WRITE_TOOLS.includes(e.tool)) requestProjectLater($, t1)
+    // may have changed some first); a denied one never ran. A call that core ran read-only (a Bash `ls`) changed no
+    // file, so it asks for none.
+    if (ran.deny === undefined && ran.isReadOnly !== true && WRITE_TOOLS.includes(e.tool)) requestProjectLater($, t1)
     if (e.agentId === undefined) {
       const interval: Interval = [t0, t1]
       await update($, turnAtom, acc => acc && { ...acc, toolIntervals: [...acc.toolIntervals, interval] })
