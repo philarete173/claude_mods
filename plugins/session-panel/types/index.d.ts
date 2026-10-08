@@ -65,8 +65,8 @@ export type PanelUsage = {
 export type PanelChanges = {
   // The files that changed: modified, added, deleted, renamed and new ones, each counted once.
   files: number
-  // The lines added and removed, those of the new files included (the first 50 of them); null when the counts are
-  // unknown, as on an unborn HEAD or after a diff that failed.
+  // The lines added and removed, those of the new files included up to the limit that NEW_FILES_MAX in register.tsx
+  // sets; null when the counts are unknown, as on an unborn HEAD or after a diff that failed.
   lines: { added: number; removed: number } | null
 }
 export type PanelProject = {

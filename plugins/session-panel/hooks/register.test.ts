@@ -24,20 +24,21 @@ const MESSAGES: SessionMessage[] = [{ role: 'user', text: 'hi', toolUses: [] }]
 const PANE_UP: UiPane = { id: 'session-panel', title: 'Session', isShown: true, isFocused: false, isPlaced: true }
 
 // The git calls that read the project, as register.tsx makes them: the argv and the options, exactly. The delay is the
-// one that register.tsx waits after a call of a tool that may change a file.
+// one that register.tsx waits after a call of a tool that may change a file. A call that reads the tree starts with
+// GIT_READ: no optional locks, and no fsmonitor (a program or a daemon of the person's, which a read must not start).
 const PROJECT_DELAY_MS = 1000
-const NO_LOCKS = ['git', '--no-optional-locks']
+const GIT_READ = ['git', '--no-optional-locks', '-c', 'core.fsmonitor=false']
 const BRANCH_RUN = { argv: ['git', 'branch', '--show-current'], init: { cwd: ROOT, timeoutMs: 5000 } }
 const STATUS_RUN = {
-  argv: [...NO_LOCKS, 'status', '--porcelain', '-z', '-uall'], init: { cwd: ROOT, timeoutMs: 10_000 },
+  argv: [...GIT_READ, 'status', '--porcelain', '-z', '-uall'], init: { cwd: ROOT, timeoutMs: 10_000 },
 }
 const DIFF_RUN = {
-  argv: [...NO_LOCKS, 'diff', '--numstat', '--no-textconv', '--no-ext-diff', 'HEAD'],
+  argv: [...GIT_READ, 'diff', '--numstat', '--no-textconv', '--no-ext-diff', 'HEAD', '--'],
   init: { cwd: ROOT, timeoutMs: 10_000 },
 }
 const TOPLEVEL_RUN = { argv: ['git', 'rev-parse', '--show-toplevel'], init: { cwd: ROOT, timeoutMs: 10_000 } }
 const noIndexRun = (path: string, cwd: string) => ({
-  argv: [...NO_LOCKS, 'diff', '--no-index', '--numstat', '--no-textconv', '--no-ext-diff', '--', '/dev/null', path],
+  argv: [...GIT_READ, 'diff', '--no-index', '--numstat', '--no-textconv', '--no-ext-diff', '--', '/dev/null', path],
   init: { cwd, timeoutMs: 10_000 },
 })
 
@@ -77,7 +78,23 @@ const TICKER: Plugin = {
     })
   },
 }
+// A plugin above the mod's that refuses the first timer of 1000 ms, as a hook may: a `clock.after` that is refused
+// never runs its fn. Like any plugin of a test it closes over nothing of this file, so the delay is spelled out.
+const REFUSER: Plugin = {
+  name: 'refuser',
+  tier: 'prepend',
+  register(on) {
+    let isRefused = false
+    on('clock.after', (_$, e, next) => {
+      if (e.ms !== 1000 || isRefused) return next(e)
+      isRefused = true
+
+      return { deny: 'refused' }
+    })
+  },
+}
 const WITH_READER = { plugins: [READER] }
+const WITH_REFUSER = { plugins: [READER, REFUSER] }
 // Streams and timers: every wait of the bottom hooks is a held sleep that the test advances by hand.
 const SLOW_READER = { plugins: [READER], timeoutMs: 30_000 }
 const TICKING_READER = { plugins: [READER, TICKER], timeoutMs: 30_000 }
@@ -161,7 +178,8 @@ type World = {
 
 // What git answers to a call, by the command it is: the short commit is the answer to any rev-parse but the top.
 const gitAnswer = (w: World, argv: readonly string[]): GitAnswer => {
-  const command = argv.slice(1).find(arg => !arg.startsWith('-'))
+  // The command is the first word that is no option and no value of `-c`.
+  const command = argv.slice(1).find((arg, i, all) => !arg.startsWith('-') && all[i - 1] !== '-c')
   if (command === 'branch') return ok(w.branch)
   if (command === 'status') return w.status
   if (command === 'diff') return argv.includes('--no-index') ? w.noIndex(argv.at(-1) ?? '') : w.diff
@@ -772,6 +790,69 @@ test('two calls inside the delay give one read, at the end of the first call plu
     expect(reads(w)).toBe(1)
   })
 
+// A call that ends at once, whatever the clock: a Bash that fails still asks for a read, since it may have changed a
+// file before it failed. With it a test sets the time of each call exactly.
+const instant = () => ({ tool: 'Bash', command: 'fail it' }) as const
+
+// The first timer that a write call sets is refused, so it never runs and its read never comes. The wait it left is
+// taken as lost once it is twice the delay old: a call before that adds nothing, a call from then on asks again.
+const REFUSED_WAITS: Array<[gap: number, isRead: boolean]> = [
+  [0, false],
+  [PROJECT_DELAY_MS, false],
+  [2 * PROJECT_DELAY_MS - 1, false],
+  [2 * PROJECT_DELAY_MS, true],
+  [10 * PROJECT_DELAY_MS, true],
+]
+for (const [gap, isRead] of REFUSED_WAITS) {
+  test(`after a timer that a hook refused, a write call ${gap} ms after the one that asked ${
+    isRead ? 'asks again, and is read' : 'adds nothing'}`, WITH_REFUSER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    w.runs.length = 0
+
+    await $.tool.call(instant()) // asks for a read; the timer is refused
+    await clock.advance(gap)
+    await $.tool.call(instant())
+    await clock.advance(5 * PROJECT_DELAY_MS)
+    expect(reads(w)).toBe(isRead ? 1 : 0)
+  })
+}
+
+test('a call after the read ran asks for the next one, though the call before it was less than twice the delay ago',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    w.runs.length = 0
+
+    await $.tool.call(instant())
+    await clock.advance(PROJECT_DELAY_MS)
+    expect(reads(w)).toBe(1)
+    await $.tool.call(instant())
+    await clock.advance(PROJECT_DELAY_MS)
+    expect(reads(w)).toBe(2)
+  })
+
+test('the wait is dated from the end of the call, when its timer is set, not from its start', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    w.runs.length = 0
+    w.toolFailMs = 3 * PROJECT_DELAY_MS // the first call fails after 3 s
+
+    await drive(clock, $.tool.call(instant())) // ends 3 s after it began, and the read is due 1 s after that
+    w.toolFailMs = 0
+    await clock.advance(PROJECT_DELAY_MS / 2)
+    await $.tool.call(instant()) // a wait dated from the start would be over 3 s old, lost, and asked again
+    await clock.advance(5 * PROJECT_DELAY_MS)
+    expect(reads(w)).toBe(1)
+  })
+
 test('a Read gives no read, and neither does an Edit that was denied: it never ran', WITH_READER,
   async ($, on) => {
     const clock = mock.clock(on)
@@ -808,6 +889,35 @@ test('a subagent\'s Bash gives one read, and so does a call that failed: it may 
     await $.tool.call({ tool: 'Bash', command: 'fail it' })
     await clock.advance(PROJECT_DELAY_MS)
     expect(reads(w)).toBe(2)
+  })
+
+// What each tool does to the project: the five that may change a file give one read, the others none. The input of each
+// is what the tool takes; the bottom ends every call in 300 ms.
+const TOOL_READS: Array<[tool: string, input: Record<string, unknown>, reads: number]> = [
+  ['Edit', { file_path: `${ROOT}/a.ts`, old_string: 'a', new_string: 'b' }, 1],
+  ['Write', { file_path: `${ROOT}/b.ts`, content: 'x' }, 1],
+  ['MultiEdit', { file_path: `${ROOT}/a.ts`, edits: [{ old_string: 'a', new_string: 'b' }] }, 1],
+  ['NotebookEdit', { notebook_path: `${ROOT}/n.ipynb`, new_source: 'x' }, 1],
+  ['Bash', { command: 'sed -i s/a/b/ a.ts' }, 1],
+  ['Read', { file_path: `${ROOT}/a.ts` }, 0],
+  ['Grep', { pattern: 'a' }, 0],
+  ['Glob', { pattern: '**/*.ts' }, 0],
+  ['WebFetch', { url: 'https://example.com', prompt: 'p' }, 0],
+]
+test('Edit, Write, MultiEdit, NotebookEdit and Bash give one read each; Read, Grep, Glob and WebFetch give none',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    w.runs.length = 0
+
+    for (const [tool, input, expected] of TOOL_READS) {
+      const before = reads(w)
+      await drive(clock, $.tool.call({ tool, ...input } as never))
+      await clock.advance(2 * PROJECT_DELAY_MS)
+      expect(reads(w) - before, tool).toBe(expected)
+    }
   })
 
 test('a request while a read runs gives one more read after it, and the two never overlap', WITH_READER,

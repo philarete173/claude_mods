@@ -54,6 +54,9 @@ const PROJECT_DELAY_MS = 1000
 // How long each git call that reads the changes may run, in ms.
 const CHANGES_TIMEOUT_MS = 10_000
 
+// The start of every git call that reads the tree; gitOut says why each option is there.
+const GIT_READ: string[] = ['git', '--no-optional-locks', '-c', 'core.fsmonitor=false']
+
 // How many new files have their lines counted. A new file is in no diff against HEAD, so each takes a git call of its
 // own; the files past this many add no lines, so past it the plus is a lower bound.
 const NEW_FILES_MAX = 50
@@ -82,9 +85,10 @@ let isProjectBusy = false
 // request is always served.
 let isProjectStale = false
 
-// Whether a read of the project waits on the timer that a call of WRITE_TOOLS set. A call that comes meanwhile adds
-// nothing: that read sees the tree as it is when it runs.
-let isProjectWaiting = false
+// The time at which the read of the project that waits on a timer was asked for, in ms; null when none waits. A call of
+// WRITE_TOOLS that comes meanwhile adds nothing: that read sees the tree as it is when it runs. A timer that a hook
+// refused never runs, so a wait older than twice the delay is taken as lost, and the next call asks again.
+let projectAskedAt: number | null = null
 
 // ISO 8601 to epoch ms, which is what the `usage` value keeps; undefined when there is none or it does not parse.
 const toMs = (iso: string | undefined): number | undefined => {
@@ -206,8 +210,9 @@ async function gitBranch($: EngineInterface, root: string): Promise<string | nul
 }
 
 // The stdout of a git call that reads the changes: null unless it ended with one of `exits` and was not cut, or when
-// it could not be started. A call that reads the tree passes `--no-optional-locks`: a plain one may refresh the index
-// and take index.lock, which makes the git commands of the person or the agent fail.
+// it could not be started. A call that reads the tree (GIT_READ) passes `--no-optional-locks`: a plain one may refresh
+// the index and take index.lock, which makes the git commands of the person or the agent fail. It passes
+// `-c core.fsmonitor=false` too, or git may run the fsmonitor hook that the person configured, or start its own daemon.
 async function gitOut($: EngineInterface, argv: string[], cwd: string, exits: number[]): Promise<string | null> {
   try {
     const ran = await $.process.run(argv, { cwd, timeoutMs: CHANGES_TIMEOUT_MS })
@@ -222,14 +227,15 @@ async function gitOut($: EngineInterface, argv: string[], cwd: string, exits: nu
 // is nothing to show: outside a git repository, on a clean tree, or when the list of files cannot be had whole. The
 // lines are null when they cannot be had (an unborn HEAD has no HEAD to diff against).
 async function gitChanges($: EngineInterface, root: string): Promise<Changes> {
-  const status = await gitOut($, ['git', '--no-optional-locks', 'status', '--porcelain', '-z', '-uall'], root, [0])
+  const status = await gitOut($, [...GIT_READ, 'status', '--porcelain', '-z', '-uall'], root, [0])
   if (status === null) return null
   const { files, newFiles } = parseStatus(status)
   if (files === 0) return null
   // The tracked files, net against HEAD. --no-textconv and --no-ext-diff count the files themselves, and run no program
-  // that the person configured.
+  // that the person configured. The `--` after HEAD makes it a revision: a file or folder named HEAD in the root would
+  // make it ambiguous, and git would refuse.
   const diff = await gitOut(
-    $, ['git', '--no-optional-locks', 'diff', '--numstat', '--no-textconv', '--no-ext-diff', 'HEAD'], root, [0],
+    $, [...GIT_READ, 'diff', '--numstat', '--no-textconv', '--no-ext-diff', 'HEAD', '--'], root, [0],
   )
   if (diff === null) return { files, lines: null }
   let { added, removed } = sumNumstat(diff)
@@ -242,8 +248,7 @@ async function gitChanges($: EngineInterface, root: string): Promise<Changes> {
     // when the sides differ, an empty new file included, and 0 when they do not; any other end adds nothing.
     for (const path of newFiles.slice(0, NEW_FILES_MAX)) {
       const argv = [
-        'git', '--no-optional-locks', 'diff', '--no-index', '--numstat', '--no-textconv', '--no-ext-diff', '--',
-        '/dev/null', path,
+        ...GIT_READ, 'diff', '--no-index', '--numstat', '--no-textconv', '--no-ext-diff', '--', '/dev/null', path,
       ]
       const counted = await gitOut($, argv, top, [0, 1])
       if (counted !== null) {
@@ -282,13 +287,14 @@ async function requestProject($: EngineInterface): Promise<void> {
   isProjectBusy = false
 }
 
-// Asks for a read of the project PROJECT_DELAY_MS from now, which the call of a tool that may have changed a file does.
-// One timer waits at most: a call that comes while it waits adds nothing.
-function requestProjectLater($: EngineInterface): void {
-  if (isProjectWaiting) return
-  isProjectWaiting = true
+// Asks for a read of the project PROJECT_DELAY_MS from `now`, which the call of a tool that may have changed a file
+// does. One timer waits at most: a call that comes while it waits adds nothing. A wait counts for twice the delay, as a
+// timer that a hook refused never runs; a late timer that still fires only adds a read, which the runner coalesces.
+function requestProjectLater($: EngineInterface, now: number): void {
+  if (projectAskedAt !== null && now - projectAskedAt < 2 * PROJECT_DELAY_MS) return
+  projectAskedAt = now
   $.clock.after(PROJECT_DELAY_MS, () => {
-    isProjectWaiting = false
+    projectAskedAt = null
     requestProject($).catch(() => undefined)
   })
 }
@@ -491,7 +497,7 @@ export const register: Register = on => {
     const t1 = await $.clock.now()
     // A call that may have changed a file asks for a read of the project, whatever its outcome (a command that failed
     // may have changed some first); a denied one never ran.
-    if (ran.deny === undefined && WRITE_TOOLS.includes(e.tool)) requestProjectLater($)
+    if (ran.deny === undefined && WRITE_TOOLS.includes(e.tool)) requestProjectLater($, t1)
     if (e.agentId === undefined) {
       const interval: Interval = [t0, t1]
       await update($, turnAtom, acc => acc && { ...acc, toolIntervals: [...acc.toolIntervals, interval] })
