@@ -23,6 +23,24 @@ const RUN = { args: '', origin: { kind: 'composer' }, presentation: { isFullscre
 const MESSAGES: SessionMessage[] = [{ role: 'user', text: 'hi', toolUses: [] }]
 const PANE_UP: UiPane = { id: 'session-panel', title: 'Session', isShown: true, isFocused: false, isPlaced: true }
 
+// The git calls that read the project, as register.tsx makes them: the argv and the options, exactly. The delay is the
+// one that register.tsx waits after a call of a tool that may change a file.
+const PROJECT_DELAY_MS = 1000
+const NO_LOCKS = ['git', '--no-optional-locks']
+const BRANCH_RUN = { argv: ['git', 'branch', '--show-current'], init: { cwd: ROOT, timeoutMs: 5000 } }
+const STATUS_RUN = {
+  argv: [...NO_LOCKS, 'status', '--porcelain', '-z', '-uall'], init: { cwd: ROOT, timeoutMs: 10_000 },
+}
+const DIFF_RUN = {
+  argv: [...NO_LOCKS, 'diff', '--numstat', '--no-textconv', '--no-ext-diff', 'HEAD'],
+  init: { cwd: ROOT, timeoutMs: 10_000 },
+}
+const TOPLEVEL_RUN = { argv: ['git', 'rev-parse', '--show-toplevel'], init: { cwd: ROOT, timeoutMs: 10_000 } }
+const noIndexRun = (path: string, cwd: string) => ({
+  argv: [...NO_LOCKS, 'diff', '--no-index', '--numstat', '--no-textconv', '--no-ext-diff', '--', '/dev/null', path],
+  init: { cwd, timeoutMs: 10_000 },
+})
+
 // A test's own `$` has no `state` noun, so a second plugin reads the session-panel values back through a command.
 const READER: Plugin = {
   name: 'reader',
@@ -100,6 +118,10 @@ const ANSWER_STEP = [
   { at: 700, chunk: { kind: 'stop', stopReason: 'end_turn', usage: usage(100) } },
 ] as const
 
+// What one git call answers; a missing `isStdoutTruncated` is false.
+type GitAnswer = { exitCode: number; stdout: string; isStdoutTruncated?: boolean }
+const ok = (stdout: string): GitAnswer => ({ exitCode: 0, stdout })
+
 type World = {
   usd: number // the engine's cost ledger, in dollars
   stepCost: number // what the next model request adds to the ledger when it stops
@@ -107,8 +129,17 @@ type World = {
   panes: UiPane[]
   placed: { isPlaced: true } | { isPlaced: false; reason: string }
   branch: string // what `git branch --show-current` prints
-  gitExit: number
+  gitExit: number // when it is not 0, the exit of every git call
   gitThrows: boolean // git cannot be started
+  status: GitAnswer // `git status --porcelain -z -uall`; a clean tree prints nothing
+  diff: GitAnswer // `git diff --numstat HEAD`
+  toplevel: GitAnswer // `git rev-parse --show-toplevel`
+  noIndex: (path: string) => GitAnswer // `git diff --no-index` of a new file: exit 1, as git does when the files differ
+  gitLag: number // how long each git call takes, in mock ms
+  gitInFlight: number
+  maxGitInFlight: number
+  rootLag: number // how long session.root() takes, in mock ms
+  rootFailures: number // how many of the next session.root() calls reject
   listed: { id: string; status: string }[] // what $.agent.list() answers
   compacted: Record<string, unknown>
   spawns: number
@@ -128,6 +159,16 @@ type World = {
   runs: { argv: readonly string[]; init: unknown }[]
 }
 
+// What git answers to a call, by the command it is: the short commit is the answer to any rev-parse but the top.
+const gitAnswer = (w: World, argv: readonly string[]): GitAnswer => {
+  const command = argv.slice(1).find(arg => !arg.startsWith('-'))
+  if (command === 'branch') return ok(w.branch)
+  if (command === 'status') return w.status
+  if (command === 'diff') return argv.includes('--no-index') ? w.noIndex(argv.at(-1) ?? '') : w.diff
+
+  return argv.includes('--show-toplevel') ? w.toplevel : ok('abc1234\n')
+}
+
 // The bottom of every chain: what the engine itself would answer, and what it was asked.
 const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): World => {
   const w: World = {
@@ -139,6 +180,15 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
     branch: 'master\n',
     gitExit: 0,
     gitThrows: false,
+    status: ok(''),
+    diff: ok(''),
+    toplevel: ok('/repo\n'),
+    noIndex: path => ({ exitCode: 1, stdout: `1\t0\t/dev/null => ${path}\n` }),
+    gitLag: 0,
+    gitInFlight: 0,
+    maxGitInFlight: 0,
+    rootLag: 0,
+    rootFailures: 0,
     listed: [],
     compacted: { messages: MESSAGES, tokensBefore: 180_000, tokensAfter: 40_000 },
     spawns: 0,
@@ -184,10 +234,12 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null } as never
   })
   on('tool.call', async (_$, e) => {
-    // What a call says decides how it ends: the command of a Bash, the description of an Agent, the message of a
-    // SendMessage or of a SubagentHandback. One that starts with `deny` is denied, one that starts with `fail` fails.
+    // What a call says decides how it ends: the command of a Bash, the new text of an Edit, the description of an
+    // Agent, the message of a SendMessage or of a SubagentHandback. One that starts with `deny` is denied, one that
+    // starts with `fail` fails.
     let says = ''
     if (e.tool === 'Bash') says = e.command
+    if (e.tool === 'Edit') says = e.new_string
     if (e.tool === 'Agent') says = e.description
     if (e.tool === 'SendMessage') says = e.message
     if (e.tool === HANDBACK_TOOL) says = String('message' in e ? e.message : '')
@@ -208,7 +260,15 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
     return { value: { command: e.name } }
   })
   on('session.surfaces', () => ({ value: w.surfaces }))
-  on('session.root', () => ({ value: ROOT }))
+  on('session.root', async () => {
+    if (w.rootLag > 0) await clock.sleep(w.rootLag)
+    if (w.rootFailures > 0) {
+      w.rootFailures -= 1
+      throw new Error('the root is not available')
+    }
+
+    return { value: ROOT }
+  })
   on('session.usage', async (_$, e) => {
     w.usageInFlight += 1
     w.maxUsageInFlight = Math.max(w.maxUsageInFlight, w.usageInFlight)
@@ -236,12 +296,24 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>): Worl
       } as never,
     }
   })
-  on('process.run', (_$, e) => {
+  on('process.run', async (_$, e) => {
     w.runs.push({ argv: e.argv, init: e.init })
+    w.gitInFlight += 1
+    w.maxGitInFlight = Math.max(w.maxGitInFlight, w.gitInFlight)
+    if (w.gitLag > 0) await clock.sleep(w.gitLag)
+    w.gitInFlight -= 1
     if (w.gitThrows) throw new Error('spawn git ENOENT')
-    const stdout = e.argv[1] === 'branch' ? w.branch : 'abc1234\n'
+    const answer = gitAnswer(w, e.argv)
 
-    return { value: { exitCode: w.gitExit, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    return {
+      value: {
+        exitCode: w.gitExit === 0 ? answer.exitCode : w.gitExit,
+        stdout: answer.stdout,
+        stderr: '',
+        isStdoutTruncated: answer.isStdoutTruncated ?? false,
+        isStderrTruncated: false,
+      },
+    }
   })
   on('agent.list', () => ({ value: w.listed as never }))
   on('ui.open', (_$, e) => {
@@ -276,6 +348,16 @@ const drive = async <T>(clock: MockClock, work: Promise<T>): Promise<T> => {
 
   return tracked
 }
+
+// How many reads of the project git has served: each one starts with the call that names the branch.
+const reads = (w: World): number => w.runs.filter(run => run.argv.includes('--show-current')).length
+
+// The calls of tools that may change a file; the bottom ends each in 300 mock ms. An Edit whose new text starts with
+// `deny` is denied.
+const edit = (newString = 'b') =>
+  ({ tool: 'Edit', file_path: `${ROOT}/a.ts`, old_string: 'a', new_string: newString }) as const
+const write = () => ({ tool: 'Write', file_path: `${ROOT}/b.ts`, content: 'x' }) as const
+const readCall = () => ({ tool: 'Read', file_path: `${ROOT}/a.ts` }) as const
 
 // One model request through the hooks: the chunks that came out and what the stream returned.
 const runStep = async (
@@ -351,7 +433,7 @@ test('a cost reading that fails stops neither the timer, the store read nor the 
     expect(w.invalidated).toEqual(['ui.render']) // the timer is running
     const state = await readState($)
     expect(state.collapsed).toEqual({ log: true })
-    expect(state.project).toEqual({ name: 'online_shop', branch: 'master' })
+    expect(state.project).toEqual({ name: 'online_shop', branch: 'master', changes: null })
   })
 
 test('without a desktop the pane waits for the command; an attaching desktop opens it', async ($, on) => {
@@ -437,12 +519,13 @@ test('start-up reads project, branch, skills and MCP servers in the background',
 
   await clock.advance(1)
   const state = await readState($)
-  expect(state.project).toEqual({ name: 'online_shop', branch: 'master' })
+  expect(state.project).toEqual({ name: 'online_shop', branch: 'master', changes: null })
   // The app's own server (ccd_session) is not listed.
   expect(state.mcp).toEqual({ servers: [{ name: 'codebase-memory' }, { name: 'issue-hub' }] })
   expect(state.usage.skills).toBe(52)
   expect(w.breakdowns).toBe(1)
-  expect(w.runs).toEqual([{ argv: ['git', 'branch', '--show-current'], init: { cwd: ROOT, timeoutMs: 5000 } }])
+  // The branch, then the changes: a clean tree stops at the status.
+  expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN])
 })
 
 // The names of the MCP servers the panel lists after start-up, for a breakdown that holds a tool of each of `servers`.
@@ -484,25 +567,348 @@ test('a detached HEAD shows the short commit; a git that fails or cannot start l
     expect(w.runs.map(run => run.argv)).toEqual([
       ['git', 'branch', '--show-current'],
       ['git', 'rev-parse', '--short', 'HEAD'],
+      STATUS_RUN.argv,
     ])
     expect(w.runs[1]?.init).toEqual({ cwd: ROOT, timeoutMs: 5000 })
 
     w.gitExit = 128
     expect(await $.classic.CwdChanged({ old_cwd: ROOT, new_cwd: ROOT })).toEqual({})
     await clock.advance(1)
-    expect((await readState($)).project).toEqual({ name: 'online_shop', branch: null })
+    expect((await readState($)).project).toEqual({ name: 'online_shop', branch: null, changes: null })
 
     w.gitExit = 0
     w.branch = 'dev\n'
     await $.classic.CwdChanged({ old_cwd: ROOT, new_cwd: ROOT })
     await clock.advance(1)
-    expect((await readState($)).project).toEqual({ name: 'online_shop', branch: 'dev' })
+    expect((await readState($)).project).toEqual({ name: 'online_shop', branch: 'dev', changes: null })
 
-    // git cannot be started at all: the call rejects, the name stays and the branch goes.
+    // git cannot be started at all: the call rejects, the name stays and the branch and the changes go.
+    w.status = ok(' M a.ts\0')
     w.gitThrows = true
     await $.classic.CwdChanged({ old_cwd: ROOT, new_cwd: ROOT })
     await clock.advance(1)
-    expect((await readState($)).project).toEqual({ name: 'online_shop', branch: null })
+    expect((await readState($)).project).toEqual({ name: 'online_shop', branch: null, changes: null })
+  })
+
+test('the project has the changes: a modified file and a new file, counted by their lines', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0?? n.ts\0')
+    w.diff = ok('3\t1\ta.ts\n')
+    w.noIndex = () => ({ exitCode: 1, stdout: '5\t0\t/dev/null => n.ts\n' })
+
+    await $.session.start(START)
+    await clock.advance(1)
+
+    expect((await readState($)).project).toEqual({
+      name: 'online_shop', branch: 'master', changes: { files: 2, lines: { added: 8, removed: 1 } },
+    })
+    // The new file is diffed from the top of the repository, which is not the session root.
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, DIFF_RUN, TOPLEVEL_RUN, noIndexRun('n.ts', '/repo')])
+  })
+
+test('a clean tree has no changes, and no diff is run', WITH_READER, async ($, on) => {
+  const clock = mock.clock(on)
+  const w = bottom(on, clock)
+
+  await $.session.start(START)
+  await clock.advance(1)
+
+  expect((await readState($)).project.changes).toBeNull()
+  expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN])
+})
+
+test('outside a git repository, where every git call exits 128, there is no branch and no changes', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.gitExit = 128
+    w.status = ok(' M a.ts\0') // what a status that failed printed is no list
+
+    await $.session.start(START)
+    await clock.advance(1)
+
+    expect((await readState($)).project).toEqual({ name: 'online_shop', branch: null, changes: null })
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN])
+  })
+
+test('a status that is cut short gives no changes: a cut list cannot give an exact count', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = { ...ok(' M a.ts\0'), isStdoutTruncated: true }
+
+    await $.session.start(START)
+    await clock.advance(1)
+
+    expect((await readState($)).project).toEqual({ name: 'online_shop', branch: 'master', changes: null })
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN])
+  })
+
+// Reads where the files are counted and the lines are not: what git answers, and the calls made before the lines are
+// given up. The status lists a modified file and a new one.
+const LINES_UNKNOWN: Array<[what: string, answers: Partial<World>, runs: unknown[]]> = [
+  [
+    'an unborn HEAD, which has no HEAD to diff against',
+    { diff: { exitCode: 128, stdout: '' } },
+    [BRANCH_RUN, STATUS_RUN, DIFF_RUN],
+  ],
+  [
+    'a diff that is cut short',
+    { diff: { exitCode: 0, stdout: '3\t1\ta.ts\n', isStdoutTruncated: true } },
+    [BRANCH_RUN, STATUS_RUN, DIFF_RUN],
+  ],
+  [
+    'a top of the repository that cannot be had',
+    { toplevel: { exitCode: 128, stdout: '' } },
+    [BRANCH_RUN, STATUS_RUN, DIFF_RUN, TOPLEVEL_RUN],
+  ],
+]
+for (const [what, answers, runs] of LINES_UNKNOWN) {
+  test(`${what} leaves the files counted and the lines unknown, and no more git runs`, WITH_READER,
+    async ($, on) => {
+      const clock = mock.clock(on)
+      const w = Object.assign(bottom(on, clock), { status: ok(' M a.ts\0?? n.ts\0') }, answers)
+
+      await $.session.start(START)
+      await clock.advance(1)
+
+      expect((await readState($)).project.changes).toEqual({ files: 2, lines: null })
+      expect(w.runs).toEqual(runs)
+    })
+}
+
+test('only the first 50 new files are counted, one git call each, in the order of the status', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(Array.from({ length: 51 }, (_, i) => `?? n${i}.ts\0`).join(''))
+    w.gitLag = 10 // so that calls made together would overlap
+
+    await $.session.start(START)
+    await clock.advance(1000)
+
+    const counted = w.runs.filter(run => run.argv.includes('--no-index')).map(run => run.argv.at(-1))
+    expect(counted).toEqual(Array.from({ length: 50 }, (_, i) => `n${i}.ts`))
+    // The 51st is a changed file all the same; each of the 50 has one line, so the plus is a lower bound.
+    expect((await readState($)).project.changes).toEqual({ files: 51, lines: { added: 50, removed: 0 } })
+    expect(w.maxGitInFlight).toBe(1) // one after another
+  })
+
+test('a new file whose diff fails adds no lines, and the others still count', WITH_READER, async ($, on) => {
+  const clock = mock.clock(on)
+  const w = bottom(on, clock)
+  w.status = ok(['a', 'b', 'c', 'd', 'e', 'f', 'g'].map(name => `?? ${name}.ts\0`).join(''))
+  const answers: Record<string, GitAnswer> = {
+    'a.ts': { exitCode: 1, stdout: '5\t0\t/dev/null => a.ts\n' }, // the normal answer: exit 1, the files differ
+    'b.ts': { exitCode: 128, stdout: '9\t0\t/dev/null => b.ts\n' }, // a call that failed: what it printed is no count
+    'c.ts': { exitCode: 1, stdout: '0\t0\t/dev/null => c.ts\n' }, // an empty file, as git answers it: no lines
+    'd.ts': { exitCode: 1, stdout: '8\t0\t/dev/null => d.ts\n', isStdoutTruncated: true }, // a cut output is no count
+    'e.ts': ok('2\t0\t/dev/null => e.ts\n'), // exit 0 counts as well
+    'g.ts': { exitCode: 1, stdout: '' }, // a file that is gone: git says so on stderr, exits 1 and prints nothing
+  }
+  w.noIndex = path => {
+    if (path === 'f.ts') throw new Error('spawn git ENOENT') // a call that cannot be made
+    return answers[path] ?? ok('')
+  }
+
+  await $.session.start(START)
+  await clock.advance(1)
+
+  expect((await readState($)).project.changes).toEqual({ files: 7, lines: { added: 7, removed: 0 } })
+  expect(w.runs.filter(run => run.argv.includes('--no-index'))).toHaveLength(7) // each one was tried
+})
+
+test('a nested repository is a changed file with no lines: no git call counts it', WITH_READER, async ($, on) => {
+  const clock = mock.clock(on)
+  const w = bottom(on, clock)
+  w.status = ok('?? nested/\0')
+
+  await $.session.start(START)
+  await clock.advance(1)
+
+  expect((await readState($)).project.changes).toEqual({ files: 1, lines: { added: 0, removed: 0 } })
+  expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, DIFF_RUN])
+})
+
+test('a call that may change a file reads the project 1000 ms after it ends, and not before', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    w.runs.length = 0
+    w.status = ok(' M a.ts\0')
+    w.diff = ok('2\t1\ta.ts\n')
+
+    await drive(clock, $.tool.call(edit()))
+    await clock.advance(PROJECT_DELAY_MS - 1)
+    expect(w.runs).toEqual([])
+    expect((await readState($)).project.changes).toBeNull()
+
+    await clock.advance(1)
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, DIFF_RUN])
+    expect((await readState($)).project.changes).toEqual({ files: 1, lines: { added: 2, removed: 1 } })
+  })
+
+test('two calls inside the delay give one read, at the end of the first call plus the delay', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    w.runs.length = 0
+
+    await drive(clock, $.tool.call(edit())) // ends at 300 ms: the read is due at 1300
+    await clock.advance(400)
+    await drive(clock, $.tool.call(write())) // ends at 1000 ms, inside the delay: it adds nothing
+    await clock.advance(299)
+    expect(reads(w)).toBe(0)
+    await clock.advance(1)
+    expect(reads(w)).toBe(1)
+
+    await clock.advance(5 * PROJECT_DELAY_MS)
+    expect(reads(w)).toBe(1)
+  })
+
+test('a Read gives no read, and neither does an Edit that was denied: it never ran', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    w.runs.length = 0
+
+    await drive(clock, $.tool.call(readCall()))
+    expect(await $.tool.call(edit('deny it'))).toEqual({ deny: 'no' })
+    await clock.advance(5 * PROJECT_DELAY_MS)
+    expect(reads(w)).toBe(0)
+
+    // The same wait after an Edit that ran is long enough for a read.
+    await drive(clock, $.tool.call(edit()))
+    await clock.advance(PROJECT_DELAY_MS)
+    expect(reads(w)).toBe(1)
+  })
+
+test('a subagent\'s Bash gives one read, and so does a call that failed: it may have changed a file first',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    w.runs.length = 0
+
+    await drive(clock, $.tool.call({ tool: 'Bash', command: 'sed -i s/a/b/ a.ts', agentId: 'a1' } as never))
+    await clock.advance(PROJECT_DELAY_MS)
+    expect(reads(w)).toBe(1)
+    await clock.advance(5 * PROJECT_DELAY_MS)
+    expect(reads(w)).toBe(1)
+
+    await $.tool.call({ tool: 'Bash', command: 'fail it' })
+    await clock.advance(PROJECT_DELAY_MS)
+    expect(reads(w)).toBe(2)
+  })
+
+test('a request while a read runs gives one more read after it, and the two never overlap', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    w.runs.length = 0
+    w.maxGitInFlight = 0
+    w.gitLag = 300 // a read is two calls, so it takes 600 ms
+    const ask = () => $.classic.CwdChanged({ old_cwd: ROOT, new_cwd: ROOT })
+
+    await ask()
+    await clock.advance(1)
+    expect(w.runs).toEqual([BRANCH_RUN]) // the read is under way
+    // Three more requests come while it runs. They ask for one read, and it is not started yet.
+    await clock.advance(100)
+    await ask()
+    await ask()
+    await ask()
+    await clock.advance(1)
+    expect(w.runs).toEqual([BRANCH_RUN])
+
+    await clock.advance(5000)
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, BRANCH_RUN, STATUS_RUN])
+    expect(w.maxGitInFlight).toBe(1)
+  })
+
+// The other things that ask for a read of the project. Whoever asks, a request that comes while a read runs waits for
+// it: they all go through the one runner. The Edit asks 1000 ms after it ends.
+const REQUESTS: Array<[what: string, ask: ($: Engine, clock: MockClock) => Promise<unknown>]> = [
+  [
+    'the end of a main turn',
+    $ => $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, turnId: 't0', reason: 'answer' }),
+  ],
+  ['a call of Edit', ($, clock) => drive(clock, $.tool.call(edit()))],
+]
+for (const [what, ask] of REQUESTS) {
+  test(`a read asked for by ${what} while one runs waits for it, and the two never overlap`, WITH_READER,
+    async ($, on) => {
+      const clock = mock.clock(on)
+      const w = bottom(on, clock)
+      await $.session.start(START)
+      await clock.advance(1)
+      w.runs.length = 0
+      w.maxGitInFlight = 0
+      w.gitLag = 1000 // a read is two calls, so it takes 2 s
+
+      await $.classic.CwdChanged({ old_cwd: ROOT, new_cwd: ROOT })
+      await clock.advance(1)
+      expect(w.runs).toEqual([BRANCH_RUN])
+      await ask($, clock)
+      await clock.advance(10_000)
+
+      expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, BRANCH_RUN, STATUS_RUN])
+      expect(w.maxGitInFlight).toBe(1)
+    })
+}
+
+test('the read that the start of the session asks for goes through the runner too', WITH_READER, async ($, on) => {
+  const clock = mock.clock(on)
+  const w = bottom(on, clock)
+  w.gitLag = 300
+
+  await $.session.start(START)
+  await clock.advance(1)
+  expect(w.runs).toEqual([BRANCH_RUN])
+  await $.classic.CwdChanged({ old_cwd: ROOT, new_cwd: ROOT })
+  await clock.advance(101)
+  expect(w.runs).toEqual([BRANCH_RUN])
+
+  await clock.advance(5000)
+  expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, BRANCH_RUN, STATUS_RUN])
+  expect(w.maxGitInFlight).toBe(1)
+})
+
+test('a read that fails does not stop the next one: a request that came meanwhile is served, and so is a later one',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    w.runs.length = 0
+    w.rootLag = 300
+    w.rootFailures = 1 // the first read fails, after 300 ms
+    const ask = () => $.classic.CwdChanged({ old_cwd: ROOT, new_cwd: ROOT })
+
+    await ask()
+    await clock.advance(101)
+    await ask()
+    await clock.advance(1)
+    expect(w.runs).toEqual([])
+
+    await clock.advance(5000)
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN]) // the second read, whole: the first one never reached git
+
+    w.runs.length = 0
+    await ask()
+    await clock.advance(5000)
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN])
   })
 
 test('session.measure fills usage, resetsAt becomes epoch ms and skills survive', WITH_READER, async ($, on) => {
@@ -798,7 +1204,7 @@ test('a long command is cut to 64 characters, and its outcome stays whole', SLOW
   expect(lines.map(([text]) => text.length)).toEqual([64, 64, 64])
 })
 
-test('a turn the mod did not see start leaves lastTurn alone; the branch is read again when a turn ends', WITH_READER,
+test('a turn the mod did not see start leaves lastTurn alone; the project is read again when a turn ends', WITH_READER,
   async ($, on) => {
     const clock = mock.clock(on)
     const w = bottom(on, clock)
@@ -813,7 +1219,7 @@ test('a turn the mod did not see start leaves lastTurn alone; the branch is read
 
     expect(done).toEqual({ text: 'done' })
     expect((await readState($)).lastTurn).toBeUndefined()
-    expect(w.runs).toEqual([{ argv: ['git', 'branch', '--show-current'], init: { cwd: ROOT, timeoutMs: 5000 } }])
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN])
   })
 
 test('a turn that ends before any response leaves the last turn shown, and the next one replaces it', SLOW_READER,

@@ -235,6 +235,47 @@ export function toolLabel(tool: string, input: Record<string, unknown>, root: st
   }
 }
 
+// The entries of `git status --porcelain -z`: `XY path`, the two status letters, a space and the path, each ended by a
+// NUL. A rename or a copy (an R or a C in either letter) is followed by a field that is not an entry: the path it came
+// from. `files` counts the entries; `newFiles` are the untracked ones (`??`), less a nested repository, which git lists
+// as a folder (`dir/`) and which has no lines to count.
+export function parseStatus(stdout: string): { files: number; newFiles: string[] } {
+  const fields = stdout.split('\0')
+  const newFiles: string[] = []
+  let files = 0
+  for (let i = 0; i < fields.length; i += 1) {
+    const field = fields[i] ?? ''
+    // The output ends with a NUL, so the last field is empty; any other empty one is no entry either.
+    if (field !== '') {
+      files += 1
+      const status = field.slice(0, 2)
+      const path = field.slice(3)
+      if (/[RC]/.test(status)) i += 1 // the next field is the original path
+      else if (status === '??' && !path.endsWith('/')) newFiles.push(path)
+    }
+  }
+
+  return { files, newFiles }
+}
+
+// The lines of `git diff --numstat`, one per file: `added<TAB>removed<TAB>path`, a rename as `a => b`. The first two
+// fields are summed. A binary file has a `-` for each, and a line that is not of this form has no fields to read: they
+// add nothing, and neither does any count that is not a whole number.
+export function sumNumstat(stdout: string): { added: number; removed: number } {
+  const count = (field: string | undefined): number => (field !== undefined && /^\d+$/.test(field) ? Number(field) : 0)
+  let added = 0
+  let removed = 0
+  for (const line of stdout.split('\n')) {
+    const fields = line.split('\t')
+    if (fields.length >= 3) {
+      added += count(fields[0])
+      removed += count(fields[1])
+    }
+  }
+
+  return { added, removed }
+}
+
 export function fmtUsd(x: number): string {
   if (x === 0) return '$0'
   if (x < 0.001) return '<$0.001'

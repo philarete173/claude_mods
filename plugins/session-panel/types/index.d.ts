@@ -61,7 +61,22 @@ export type PanelUsage = {
   rateLimits: PanelRateLimit[]
   skills?: number
 }
-export type PanelProject = { name: string; branch: string | null }
+// What differs from HEAD in the working tree, as `git status` and `git diff` report it.
+export type PanelChanges = {
+  // The files that changed: modified, added, deleted, renamed and new ones, each counted once.
+  files: number
+  // The lines added and removed, those of the new files included (the first 50 of them); null when the counts are
+  // unknown, as on an unborn HEAD or after a diff that failed.
+  lines: { added: number; removed: number } | null
+}
+export type PanelProject = {
+  // The folder of the session root.
+  name: string
+  // The branch; the short commit on a detached HEAD; null outside a git repository or when git fails.
+  branch: string | null
+  // Null when there is nothing to show: outside a git repository, on a clean tree, or when git failed.
+  changes: PanelChanges | null
+}
 export type PanelMcp = { servers: { name: string }[] }
 
 declare module 'claude-code' {

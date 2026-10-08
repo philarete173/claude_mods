@@ -340,7 +340,7 @@ const onSurface = (data: PaneData, surface: Surface): PaneData => ({ ...data, su
 
 const EMPTY: PaneData = {
   usage: { rateLimits: [] },
-  project: { name: '', branch: null },
+  project: { name: '', branch: null, changes: null },
   mcp: null,
   lastTurn: null,
   agents: {},
@@ -389,7 +389,7 @@ const FULL: PaneData = {
       { kind: 'some_new_window', percentUsed: 5 },
     ],
   },
-  project: { name: PROJECT, branch: BRANCH },
+  project: { name: PROJECT, branch: BRANCH, changes: null },
   mcp: {
     servers: [
       { name: 'Claude_Browser' },
@@ -1018,7 +1018,8 @@ const ruleCount = (tree: unknown): number => flat(tree).filter(({ node }) => isR
 
 test('no row can outgrow the pane: every cell is fixed or flexible, and cut text sits in a clipping cell', () => {
   const folded = Object.fromEntries(SECTIONS.map(id => [id, true]))
-  const bare = { ...FULL, usage: { ...FULL.usage, costUsd: undefined }, project: { name: 'repo', branch: null } }
+  const project = { name: 'repo', branch: null, changes: null }
+  const bare = { ...FULL, usage: { ...FULL.usage, costUsd: undefined }, project }
 
   for (const surface of SURFACES) {
     for (const bodyColumns of [8, 12, 30, 45, 120]) {
@@ -1761,9 +1762,9 @@ test('partial states draw what they have and leave the rest out', () => {
     expect(dash?.parent?.props, surface).toMatchObject({ width: 7, justifyContent: 'flex-end' })
 
     // No project name: no project row, though there is a branch. No branch: the folder alone.
-    const noName = draw(onSurface({ ...FULL, project: { name: '', branch: 'main' } }, surface))
+    const noName = draw(onSurface({ ...FULL, project: { name: '', branch: 'main', changes: null } }, surface))
     expect(textsOf(noName).some(text => text.endsWith('main')), surface).toBe(false)
-    const noBranch = draw(onSurface({ ...FULL, project: { name: 'repo', branch: null } }, surface))
+    const noBranch = draw(onSurface({ ...FULL, project: { name: 'repo', branch: null, changes: null } }, surface))
     const folder = flat(noBranch).find(({ node }) => isFlex(node) && textsOf(node)[0]?.endsWith('repo') === true)
     expect(childrenOf(folder?.parent), surface).toHaveLength(1)
   }

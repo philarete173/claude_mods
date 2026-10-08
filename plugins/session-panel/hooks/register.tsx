@@ -5,18 +5,25 @@
 // sits here, the presses of the pane included. The atoms are declared here too: read() and update() refuse a
 // reference written in another file.
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, SessionContextUsage, SessionCost, SessionRateLimit } from 'claude-code'
+import type {
+  EngineInterface, PluginState, Register, SessionContextUsage, SessionCost, SessionRateLimit,
+} from 'claude-code'
 
 import {
-  addAgentCost, attributeCost, computeTurnStats, fmtDuration, fmtTokens, fmtUsd, pushLog, redact, shortType, shorten,
-  toolLabel,
+  addAgentCost, attributeCost, computeTurnStats, fmtDuration, fmtTokens, fmtUsd, parseStatus, pushLog, redact,
+  shortType, shorten, sumNumstat, toolLabel,
 } from './stats'
 import type { AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, Usage } from './stats'
 import { renderPane } from './view'
 import type { PaneData, SectionId } from './view'
 
+// The changes of the working tree, as the project value keeps them.
+type Changes = PluginState['session-panel']['project']['changes']
+
 const usageAtom = atom({ plugin: 'session-panel', key: 'usage' } as const, { rateLimits: [] })
-const projectAtom = atom({ plugin: 'session-panel', key: 'project' } as const, { name: '', branch: null })
+const projectAtom = atom(
+  { plugin: 'session-panel', key: 'project' } as const, { name: '', branch: null, changes: null },
+)
 const mcpAtom = atom({ plugin: 'session-panel', key: 'mcp' } as const, null)
 const turnAtom = atom({ plugin: 'session-panel', key: 'turn' } as const, null)
 const lastTurnAtom = atom({ plugin: 'session-panel', key: 'lastTurn' } as const, null)
@@ -37,6 +44,20 @@ const SPAWN_TOOLS: string[] = ['Agent', 'Task']
 // literal: the engine's types do not list it, and comparing `e.tool` with a literal they lack is an error.
 const HANDBACK_TOOL: string = 'SubagentHandback'
 
+// The tools whose call may have changed a file, whichever agent made it: the project is read again after one.
+const WRITE_TOOLS: string[] = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash']
+
+// How long after such a call the project is read, in ms: its change has landed by then, and a burst of calls is read
+// once.
+const PROJECT_DELAY_MS = 1000
+
+// How long each git call that reads the changes may run, in ms.
+const CHANGES_TIMEOUT_MS = 10_000
+
+// How many new files have their lines counted. A new file is in no diff against HEAD, so each takes a git call of its
+// own; the files past this many add no lines, so past it the plus is a lower bound.
+const NEW_FILES_MAX = 50
+
 // The cost.usd reading that the next request is charged against. It is null until a reading sets it: the first one
 // after the module loads (the start of the session), and the first one after a /clear.
 let lastUsd: number | null = null
@@ -52,6 +73,18 @@ let lastModelWindow: number | null = null
 
 // The cost readings run one after another, each against the one before it: none overtakes another.
 let costQueue: Promise<void> = Promise.resolve()
+
+// Whether a read of the project is under way. The reads run one at a time: two never overlap, and git is not asked for
+// the same thing twice at once.
+let isProjectBusy = false
+
+// Whether the project was asked for while a read was under way. The read that ends then starts one more, so the last
+// request is always served.
+let isProjectStale = false
+
+// Whether a read of the project waits on the timer that a call of WRITE_TOOLS set. A call that comes meanwhile adds
+// nothing: that read sees the tree as it is when it runs.
+let isProjectWaiting = false
 
 // ISO 8601 to epoch ms, which is what the `usage` value keeps; undefined when there is none or it does not parse.
 const toMs = (iso: string | undefined): number | undefined => {
@@ -172,11 +205,92 @@ async function gitBranch($: EngineInterface, root: string): Promise<string | nul
   }
 }
 
-// Reads the project name (the folder of the session root) and its branch.
+// The stdout of a git call that reads the changes: null unless it ended with one of `exits` and was not cut, or when
+// it could not be started. A call that reads the tree passes `--no-optional-locks`: a plain one may refresh the index
+// and take index.lock, which makes the git commands of the person or the agent fail.
+async function gitOut($: EngineInterface, argv: string[], cwd: string, exits: number[]): Promise<string | null> {
+  try {
+    const ran = await $.process.run(argv, { cwd, timeoutMs: CHANGES_TIMEOUT_MS })
+
+    return exits.includes(ran.exitCode) && !ran.isStdoutTruncated ? ran.stdout : null
+  } catch {
+    return null
+  }
+}
+
+// What differs from HEAD in the working tree: the files that changed, and the lines added and removed. Null when there
+// is nothing to show: outside a git repository, on a clean tree, or when the list of files cannot be had whole. The
+// lines are null when they cannot be had (an unborn HEAD has no HEAD to diff against).
+async function gitChanges($: EngineInterface, root: string): Promise<Changes> {
+  const status = await gitOut($, ['git', '--no-optional-locks', 'status', '--porcelain', '-z', '-uall'], root, [0])
+  if (status === null) return null
+  const { files, newFiles } = parseStatus(status)
+  if (files === 0) return null
+  // The tracked files, net against HEAD. --no-textconv and --no-ext-diff count the files themselves, and run no program
+  // that the person configured.
+  const diff = await gitOut(
+    $, ['git', '--no-optional-locks', 'diff', '--numstat', '--no-textconv', '--no-ext-diff', 'HEAD'], root, [0],
+  )
+  if (diff === null) return { files, lines: null }
+  let { added, removed } = sumNumstat(diff)
+  if (newFiles.length > 0) {
+    // The paths of the status are relative to the top of the repository, which may not be the session root.
+    const toplevel = await gitOut($, ['git', 'rev-parse', '--show-toplevel'], root, [0])
+    if (toplevel === null) return { files, lines: null }
+    const top = toplevel.trim()
+    // A new file is in no diff against HEAD, so it is diffed against nothing, one file at a time. --no-index exits 1
+    // when the sides differ, an empty new file included, and 0 when they do not; any other end adds nothing.
+    for (const path of newFiles.slice(0, NEW_FILES_MAX)) {
+      const argv = [
+        'git', '--no-optional-locks', 'diff', '--no-index', '--numstat', '--no-textconv', '--no-ext-diff', '--',
+        '/dev/null', path,
+      ]
+      const counted = await gitOut($, argv, top, [0, 1])
+      if (counted !== null) {
+        const lines = sumNumstat(counted)
+        added += lines.added
+        removed += lines.removed
+      }
+    }
+  }
+
+  return { files, lines: { added, removed } }
+}
+
+// Reads the project: the name (the folder of the session root), its branch, then the changes of its working tree.
 async function refreshProject($: EngineInterface): Promise<void> {
   const root = await $.session.root()
   const branch = await gitBranch($, root)
-  await update($, projectAtom, () => ({ name: root.replace(/^.*[\\/]/, ''), branch }))
+  const changes = await gitChanges($, root)
+  await update($, projectAtom, () => ({ name: root.replace(/^.*[\\/]/, ''), branch, changes }))
+}
+
+// Asks for a read of the project. The reads run one at a time: one asked for while another is under way only marks the
+// project stale, and the read that ends, whether it succeeded or failed, starts one more at once. So no two reads
+// overlap, and the last request is always served.
+async function requestProject($: EngineInterface): Promise<void> {
+  if (isProjectBusy) {
+    isProjectStale = true
+
+    return
+  }
+  isProjectBusy = true
+  do {
+    isProjectStale = false
+    await refreshProject($).catch(() => undefined)
+  } while (isProjectStale)
+  isProjectBusy = false
+}
+
+// Asks for a read of the project PROJECT_DELAY_MS from now, which the call of a tool that may have changed a file does.
+// One timer waits at most: a call that comes while it waits adds nothing.
+function requestProjectLater($: EngineInterface): void {
+  if (isProjectWaiting) return
+  isProjectWaiting = true
+  $.clock.after(PROJECT_DELAY_MS, () => {
+    isProjectWaiting = false
+    requestProject($).catch(() => undefined)
+  })
 }
 
 // Takes how a subagent ended from the engine's own list, for a row that is still running: our events missed it.
@@ -255,7 +369,7 @@ export const register: Register = on => {
     const saved = await $.store.get('collapsed')
     if (isFoldedMap(saved)) await update($, collapsedAtom, () => saved)
     inBackground($, () => refreshUsage($))
-    inBackground($, () => refreshProject($))
+    inBackground($, () => requestProject($))
     let ticks = 0
     $.clock.every(TICK_MS, () => {
       ticks += 1
@@ -375,6 +489,9 @@ export const register: Register = on => {
     const t0 = await $.clock.now()
     const ran = await next(e)
     const t1 = await $.clock.now()
+    // A call that may have changed a file asks for a read of the project, whatever its outcome (a command that failed
+    // may have changed some first); a denied one never ran.
+    if (ran.deny === undefined && WRITE_TOOLS.includes(e.tool)) requestProjectLater($)
     if (e.agentId === undefined) {
       const interval: Interval = [t0, t1]
       await update($, turnAtom, acc => acc && { ...acc, toolIntervals: [...acc.toolIntervals, interval] })
@@ -413,7 +530,7 @@ export const register: Register = on => {
         }
         await update($, turnAtom, () => null)
       }
-      inBackground($, () => refreshProject($))
+      inBackground($, () => requestProject($))
 
       return done
     }
@@ -477,7 +594,7 @@ export const register: Register = on => {
 
   on('classic.CwdChanged', async ($, e, next) => {
     const changed = await next(e)
-    inBackground($, () => refreshProject($))
+    inBackground($, () => requestProject($))
 
     return changed
   })

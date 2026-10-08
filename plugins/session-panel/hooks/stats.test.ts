@@ -14,11 +14,13 @@ import {
   fmtUsd,
   mergedLength,
   orderAgents,
+  parseStatus,
   pushLog,
   redact,
   shortType,
   shorten,
   splitCost,
+  sumNumstat,
   sumUsage,
   toolLabel,
 } from './stats'
@@ -246,6 +248,54 @@ test('toolLabel', () => {
     ['TodoWrite', { todos: [] }, 'TodoWrite'],
   ]
   for (const [tool, input, want] of cases) expect(toolLabel(tool, input, '/r'), `toolLabel(${tool})`).toBe(want)
+})
+
+test('parseStatus counts the entries and lists the new files', () => {
+  const cases: Array<[stdout: string, files: number, newFiles: string[]]> = [
+    [' M a.ts\0M  b.ts\0?? c.ts\0?? dir/d.ts\0UU e.ts\0', 5, ['c.ts', 'dir/d.ts']],
+    ['', 0, []],
+    // A path keeps its spaces.
+    ['?? a b.ts\0', 1, ['a b.ts']],
+    // A field that is empty is no entry.
+    [' M a.ts\0\0 M b.ts\0', 2, []],
+    // A nested repository is one file, and has no lines of its own: git lists it as a folder.
+    ['?? nested/\0', 1, []],
+    ['?? nested/\0?? n.ts\0', 2, ['n.ts']],
+  ]
+  for (const [stdout, files, newFiles] of cases) {
+    expect(parseStatus(stdout), JSON.stringify(stdout)).toEqual({ files, newFiles })
+  }
+})
+
+test('parseStatus skips the original path of a rename or a copy, in either column', () => {
+  const cases: Array<[stdout: string, files: number, newFiles: string[]]> = [
+    ['R  new.ts\0old.ts\0 M x.ts\0', 2, []],
+    ['C  new.ts\0old.ts\0 M x.ts\0', 2, []],
+    [' R new.ts\0old.ts\0 M x.ts\0', 2, []],
+    [' C new.ts\0old.ts\0 M x.ts\0', 2, []],
+    ['RM new.ts\0old.ts\0 M x.ts\0', 2, []],
+    // The field after a rename is a path, whatever it looks like: it is not read as an entry.
+    ['R  new.ts\0?? old.ts\0 M x.ts\0', 2, []],
+    // The entries after it count as before.
+    ['R  new.ts\0old.ts\0?? n.ts\0', 2, ['n.ts']],
+  ]
+  for (const [stdout, files, newFiles] of cases) {
+    expect(parseStatus(stdout), JSON.stringify(stdout)).toEqual({ files, newFiles })
+  }
+})
+
+test('sumNumstat adds the first two fields of each line', () => {
+  expect(sumNumstat('3\t1\ta.ts\n-\t-\tlogo.png\n10\t0\tdir/{a => b}.ts\n')).toEqual({ added: 13, removed: 1 })
+  expect(sumNumstat('')).toEqual({ added: 0, removed: 0 })
+  expect(sumNumstat('5\t0\t/dev/null => n.ts\n')).toEqual({ added: 5, removed: 0 })
+})
+
+test('sumNumstat: a binary file, a line with no tabs and a count that is no whole number add 0', () => {
+  expect(sumNumstat('-\t-\tlogo.png\n')).toEqual({ added: 0, removed: 0 })
+  expect(sumNumstat('no tabs here\n3\t1\ta.ts\n')).toEqual({ added: 3, removed: 1 })
+  // A bare number is no line of the form either.
+  expect(sumNumstat('7\n')).toEqual({ added: 0, removed: 0 })
+  expect(sumNumstat('x\t2\ta\n1.5\t-3\tb\n 4\t5\tc\n')).toEqual({ added: 0, removed: 7 })
 })
 
 test('fmtUsd', () => {
