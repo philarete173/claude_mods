@@ -73,9 +73,10 @@ const usageFields = (
 })
 
 // The log line of a subagent that has ended: its text, and its outcome, the time it took behind a mark (✓ for an
-// answer, ✗ for a failure; a stop is no fault, so it has no mark).
+// answer, ✗ for a failure; a stop is no fault, so it has no mark). One that still runs has no outcome, so its status
+// is not a parameter.
 const agentOutcome = (
-  status: AgentStatus, row: AgentRow, durationMs: number, answer: string,
+  status: 'done' | 'failed' | 'stopped', row: AgentRow, durationMs: number, answer: string,
 ): { text: string; outcome: string } => {
   const took = fmtDuration(durationMs)
   if (status === 'stopped') return { text: status, outcome: took }

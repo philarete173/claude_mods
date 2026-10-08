@@ -69,6 +69,7 @@ const RULE_PX = 1600 // the divider image; the Box around it cuts it to the pane
 const MAX_AGENT_ROWS = 8
 const MAX_LOG_ROWS = 15
 const MIN_LOG_TEXT_CELLS = 8 // the least text a log line keeps before its outcome column gives way
+const LOG_GAP_CELLS = 1 // the gap between the cells of a log row
 
 // The meter, the ring and the icons are images, so their colours are raw and the same in both themes.
 const BLUE = '#2f7de1'
@@ -597,10 +598,10 @@ function logSection(d: Draw): RenderElement | null {
   const longestOutcome = Math.max(...lines.map(line => line.outcome?.length ?? 0))
   const outcomeCells = longestOutcome === 0 ? 0 : longestOutcome + (Svg === undefined ? 0 : 1)
   // The cells the text keeps: the body less the time, `who` and outcome cells and the 3 gaps of a row of four.
-  const textCells = d.cols - TIME_CELLS - whoCells - outcomeCells - 3
+  const textCells = d.cols - TIME_CELLS - whoCells - outcomeCells - 3 * LOG_GAP_CELLS
   const hasOutcomeColumn = outcomeCells > 0 && textCells >= MIN_LOG_TEXT_CELLS
   const rows = lines.map(line => (
-    <Box flexDirection="row" columnGap={1}>
+    <Box flexDirection="row" columnGap={LOG_GAP_CELLS}>
       <Box flexDirection="row" width={TIME_CELLS} flexShrink={0}>
         <Text dimColor>{fmtClock(line.at)}</Text>
       </Box>

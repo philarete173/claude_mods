@@ -1288,6 +1288,36 @@ test('with no outcome among the lines drawn the log has no outcome column: the t
   }
 })
 
+test('a line written before the outcome was a field keeps its suffix in its text, alone or among new lines', () => {
+  // The old shape: how the action went is the end of the text, and there is no `outcome` key at all.
+  const olds: LogEntry[] = [
+    { at: NOW - 1000, who: 'main', text: 'Bash ls ✓ 0.3s', kind: 'ok' },
+    { at: NOW - 2000, who: 'main', text: 'Bash false ✗', kind: 'error' },
+  ]
+  const fresh = (text: string, outcome: string, at: number): LogEntry => (
+    { at, who: 'main', text, kind: 'ok', outcome }
+  )
+  const among = [fresh('Read a.py', '✓ 0.3s', NOW), ...olds, fresh('Bash x', '✗ 1m 12s', NOW - 3000)]
+  const textsIn = (tree: unknown): string[][] => logRows(tree).map(row => textsOf(childrenOf(row)[2]))
+
+  for (const surface of SURFACES) {
+    // Alone, no line drawn has an outcome: the three cells of a row, and the text as it is.
+    const alone = draw(onSurface({ ...EMPTY, log: olds }, surface))
+    expect(logColumns(alone).map(row => row.cells), surface).toEqual([3, 3])
+    expect(textsIn(alone), surface).toEqual([['Bash ls ✓ 0.3s'], ['Bash false ✗']])
+    // Among lines with outcomes there is the column. The old lines keep their text, an error one as well as an ok one,
+    // and have the cell empty: no Text of an outcome that is not there.
+    const mixed = draw(onSurface({ ...EMPTY, log: among }, surface))
+    const rows = logColumns(mixed)
+    expect(rows.map(row => row.cells), surface).toEqual([4, 4, 4, 4])
+    expect(textsIn(mixed), surface).toEqual([['Read a.py'], ['Bash ls ✓ 0.3s'], ['Bash false ✗'], ['Bash x']])
+    expect(rows.map(row => textsOf(row.outcomeCell)), surface).toEqual([['✓ 0.3s'], [], [], ['✗ 1m 12s']])
+    expect(rows.map(row => childrenOf(row.outcomeCell).length), surface).toEqual([1, 0, 0, 1])
+    // Nothing of the missing field is drawn as a word: no `undefined` in any text.
+    for (const tree of [alone, mixed]) expect(JSON.stringify(tree), surface).not.toContain('undefined')
+  }
+})
+
 // The narrowest body that draws the outcome column, by surface, `who` and longest outcome. The text keeps the body
 // less the time (8), `who`, the outcome and 3 gaps, and the column is drawn from 8 cells of text. The desktop's `who`
 // is 13 whatever the name, and its outcome has a cell more: `✗ 1m 12s` is 9 cells, `✓ 0.3s` is 7, so 8 + 13 + 9 + 3 +
@@ -1321,8 +1351,10 @@ test('the outcome column is drawn while the text beside it keeps 8 cells; narrow
       expect(texts, where).toEqual(log.map(line => [
         isColumn || line.outcome === undefined ? line.text : `${line.text} ${line.outcome}`,
       ]))
-      // The text is a cell that gives way and is cut, with the column and without it.
+      // The cells of a row are one cell apart, and the 3 gaps of the sum are three of those. The text is a cell that
+      // gives way and is cut, with the column and without it.
       for (const row of logRows(tree)) {
+        expect(row.props?.columnGap, where).toBe(1)
         const text = childrenOf(row)[2]
         expect(text?.props, where).toMatchObject({ flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden' })
         expect(childrenOf(text)[0]?.props?.wrap, where).toBe('truncate')
