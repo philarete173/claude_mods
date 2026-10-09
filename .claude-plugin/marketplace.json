@@ -1,5 +1,5 @@
 {
-  "name": "claude-mods",
+  "name": "philarete-mods",
   "description": "Claude Code mods by Philipp Ulanovskiy",
   "owner": {
     "name": "Philipp Ulanovskiy"
@@ -8,7 +8,6 @@
     {
       "name": "session-panel",
       "source": "./plugins/session-panel",
-      "version": "0.3.1",
       "description": "Live session stats side pane for the Claude desktop Code tab",
       "author": {
         "name": "Philipp Ulanovskiy"
