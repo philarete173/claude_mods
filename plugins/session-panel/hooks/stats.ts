@@ -228,14 +228,16 @@ export function redact(s: string): string {
 }
 
 // Takes the markdown marks out of a text that the pane shows as it is: a pair of `**` around text on one line, which is
-// kept (its first and last characters are no spaces) and which no letter or digit touches on the outside; backticks
-// (code); and the `#` marks of a heading at the start of a line, with the space after them. A `**` that stands alone,
-// has a space beside it or is glued to a word stays (`x ** 2`; the `**` of `2**10 and 3**4` are exponents, no pair),
-// and so does `__`: `__init__.py` is a file, not bold.
+// kept (its first and last characters are no spaces) and which no ASCII letter, digit or `_` touches on the outside;
+// backticks (code); and the `#` marks of a heading at the start of a line, with the space after them. A `**` that
+// stands alone, has a space beside it or is glued to an ASCII word stays (`x ** 2`; the `**` of `2**10 and 3**4` are
+// exponents, no pair), and so does `__`: `__init__.py` is a file, not bold. Only ASCII keeps a pair, for exponents in
+// code are ASCII: in scripts written without spaces (Chinese, Japanese, Thai) and inside words of other scripts
+// (Cyrillic, Hindi) bold is glued to letters, and markdown reads it as bold, so its marks go.
 export function plainText(s: string): string {
   // The group inside the pair is lazy (`??`): a body of one character closes at its own `**`, not at the next pair's.
-  // The lookbehind and the lookahead keep out a `**` that a letter or a digit touches on the outside of the pair.
-  const pair = /(?<![\p{L}\p{N}])\*\*(\S(?:.*?\S)??)\*\*(?![\p{L}\p{N}])/gu
+  // The lookbehind and the lookahead keep out a `**` that an ASCII word character (`\w`) touches on the outside of it.
+  const pair = /(?<!\w)\*\*(\S(?:.*?\S)??)\*\*(?!\w)/gu
 
   return s.replace(pair, '$1').replace(/`/g, '').replace(/^#+ /gm, '')
 }

@@ -425,6 +425,16 @@ test('plainText takes the `**` of a pair, backticks and the `#` marks of a headi
     ['**Note**, **this**.', 'Note, this.'],
     ['**bold** and 2**10 and **again**', 'bold and 2**10 and again'], // the pair goes, the exponent stays
     ['**bold with spaces inside**', 'bold with spaces inside'], // the spaces inside stay: only the pair goes
+    // A letter of another script outside a pair keeps it no more than a space does: only an ASCII letter, digit or `_`
+    // does. In scripts written without spaces, and inside words of other scripts, bold is glued to letters, and
+    // markdown reads it as bold.
+    ['这是**重要**的', '这是重要的'],
+    ['日本語の**太字**です', '日本語の太字です'],
+    ['คำ**หนา**ไทย', 'คำหนาไทย'],
+    ['**Итог:** готово', 'Итог: готово'],
+    ['слово**жирный** текст', 'словожирный текст'],
+    ['नम**स्ते** y', 'नमस्ते y'],
+    ['नमस्ते**x** y', 'नमस्तेx y'], // the word ends in a vowel sign, a mark and no letter: it keeps nothing either
     ['`a`', 'a'],
     ['run `git status` now', 'run git status now'],
     ['```\ncode\n```', '\ncode\n'],
@@ -438,16 +448,16 @@ test('plainText takes the `**` of a pair, backticks and the `#` marks of a headi
   for (const [markdown, plain] of cases) expect(plainText(markdown), JSON.stringify(markdown)).toBe(plain)
 })
 
-test('plainText leaves `__`, a `**` with no pair, a space or a word beside it, and a `#` that is no heading', () => {
+test('plainText leaves `__`, a lone `**`, one beside a space or an ASCII word, and a `#` that is no heading', () => {
   const kept = [
     // Never `__`: a dunder is a name, not bold.
     '__init__.py', '__Verdict:__ ok', 'def __init__(self): pass', 'snake__case',
     // A `**` that stands alone or has a space beside it is an exponent, not bold.
     'x ** 2', '2**10', 'a ** b ** c', '2 ** 10 and 3 ** 4', '**', '****', '** spaced **', '**bold **', '** bold**',
-    // Two exponents are a pair of `**` with text between them, but a digit or a letter touches each on the outside.
-    '2**10 and 3**4', 'x**2 and y**3', 'π**2 and e**x', '2**n and 2**(n+1)',
-    // A pair that a letter or a digit touches on either side is no pair: the `**` is inside a word.
-    '**a**b', 'a**b**', 'x**y**z', '**1**2',
+    // Two exponents are a pair of `**` with text between them, but an ASCII letter or a digit touches an end of it.
+    '2**10 and 3**4', 'x**y and z**w', 'x**2 and y**3', 'π**2 and e**x', '2**n and 2**(n+1)',
+    // A pair that an ASCII letter, a digit or `_` touches on either side is no pair: the `**` is inside a word.
+    '**a**b', 'a**b**', 'x**y**z', '**1**2', 'a_**b**', '**a**_b',
     // A pair has to be on one line.
     '**one\ntwo**',
     // A `#` that is no heading: no space after it, or not at the start of a line.

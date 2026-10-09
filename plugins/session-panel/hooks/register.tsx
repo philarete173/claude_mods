@@ -431,9 +431,10 @@ async function readChanges($: EngineInterface, root: string, read: ChangesRead):
     // reads no object, so that call runs without GIT_READ_ENV.
     const toplevel = await gitOut($, ['git', 'rev-parse', '--show-toplevel'], root, [0], read)
     if (toplevel === null) {
-      // A top that cannot be had leaves the lines unknown. One that was not asked for, as none was left of the budget,
-      // is no failure: the new files are left uncounted, as a count that was not made leaves them.
-      if (!read.isSpent) return { files, lines: null }
+      // A top that cannot be had (the call was not made, as none was left of the budget; it was killed by the little
+      // that was left; or it exited with anything but 0) leaves the new files uncounted, as a count that failed leaves
+      // them: the lines of the diff stand, as a lower bound. Inside a repository whose status and diff worked, it
+      // cannot fail otherwise.
       hasMoreAdded = true
     } else {
       const top = toplevel.trim()

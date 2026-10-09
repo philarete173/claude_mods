@@ -71,13 +71,15 @@ export type PanelChanges = {
   // only, so it is a lower bound, and `lines` is null. Absent when `files` is exact.
   hasMoreFiles?: true
   // The lines added and removed, those of the new files included up to the limit that NEW_FILES_MAX in register.tsx
-  // sets; null when the counts are unknown, as on an unborn HEAD, after a diff that failed or was not made (the budget
-  // of the read, READ_BUDGET_MS, was spent) or after a cut status.
+  // sets, and as far as they can be counted (hasMoreAdded); null when the counts are unknown, as on an unborn HEAD,
+  // after a diff that failed or was not made (the budget of the read, READ_BUDGET_MS, was spent) or after a cut status.
+  // The new files alone never make them null: when they cannot be counted, the lines of the diff stand.
   lines: {
     added: number
     removed: number
-    // True when new files past that limit, a new file whose count failed, or new files that the budget of the read left
-    // no time to count, add no lines: `added` is then a lower bound. Absent when `added` is exact.
+    // True when new files past that limit, a new file whose count failed, new files that the budget of the read left no
+    // time to count, or all of them, as the top of the repository could not be had, add no lines: `added` is then a
+    // lower bound. Absent when `added` is exact.
     hasMoreAdded?: true
   } | null
 }

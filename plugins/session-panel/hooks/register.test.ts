@@ -296,6 +296,7 @@ type World = {
   noIndex: (path: string) => GitAnswer // `git diff --no-index` of a new file: exit 1, as git does when the files differ
   gitLag: number // how long each git call takes, in mock ms
   lags: Record<string, number> // how long a kind of git call takes besides: `status`, `diff`, `rev-parse`, `no-index`
+  suspends: Record<string, number> // how far the wall clock jumps in a kind of git call, as when the machine sleeps
   gitInFlight: number
   maxGitInFlight: number
   rootLag: number // how long session.root() takes, in mock ms
@@ -379,6 +380,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     noIndex: path => ({ exitCode: 1, stdout: `1\t0\t/dev/null => ${path}\n` }),
     gitLag: 0,
     lags: {},
+    suspends: {},
     gitInFlight: 0,
     maxGitInFlight: 0,
     rootLag: 0,
@@ -517,8 +519,16 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     w.maxGitInFlight = Math.max(w.maxGitInFlight, w.gitInFlight)
     const kind = gitKind(e.argv)
     const lag = w.gitLag + (kind === undefined ? 0 : (w.lags[kind] ?? 0))
-    if (lag > 0) await clock.sleep(lag)
+    // As in the engine, a call that is still running at its timeout is killed, and rejects with `aborted: still running
+    // after …ms`. A suspend is no slow call: the wall clock jumps while the call runs, the call itself stays short, and
+    // it is not killed. The timers of the mock clock run through the jump, unlike through that of SUSPENDER.
+    const timeoutMs = e.init?.timeoutMs ?? Number.POSITIVE_INFINITY
+    const isKilled = lag > timeoutMs
+    const jump = kind === undefined ? 0 : (w.suspends[kind] ?? 0)
+    const lasts = (isKilled ? timeoutMs : lag) + jump
+    if (lasts > 0) await clock.sleep(lasts)
     w.gitInFlight -= 1
+    if (isKilled) throw new Error(`aborted: still running after ${timeoutMs}ms`)
     if (doesGitThrow(w, e.argv)) throw new Error('spawn git ENOENT')
     const answer = gitAnswer(w, e.argv)
 
@@ -1306,11 +1316,6 @@ const LINES_UNKNOWN: Array<[what: string, answers: Partial<World>, runs: unknown
     { diff: { exitCode: 0, stdout: '3\t1\ta.ts\n', isStdoutTruncated: true } },
     [BRANCH_RUN, STATUS_RUN, DIFF_RUN],
   ],
-  [
-    'a top of the repository that cannot be had',
-    { toplevel: { exitCode: 128, stdout: '' } },
-    [BRANCH_RUN, STATUS_RUN, DIFF_RUN, TOPLEVEL_RUN],
-  ],
 ]
 for (const [what, answers, runs] of LINES_UNKNOWN) {
   test(`${what} leaves the files counted and the lines unknown, and no more git runs`, WITH_READER,
@@ -1326,6 +1331,25 @@ for (const [what, answers, runs] of LINES_UNKNOWN) {
       expect(w.runs).toEqual(runs)
     })
 }
+
+// A top of the repository that exits with an error leaves the new files uncounted, and the lines of the diff stand as a
+// lower bound: they are not unknown, as they are when the diff itself fails.
+test('a top of the repository that exits with an error leaves the lines of the diff as a lower bound, and counts no '
+  + 'new file', WITH_READER, async ($, on) => {
+  const clock = mock.clock(on)
+  const w = Object.assign(bottom(on, clock), {
+    status: ok(' M a.ts\0?? n.ts\0'), diff: ok('3\t1\ta.ts\n'), toplevel: { exitCode: 128, stdout: '' },
+  })
+
+  await $.session.start(START)
+  await clock.advance(1)
+  await openTree($, clock, w)
+
+  expect((await readState($)).project.changes).toEqual({
+    files: 2, lines: { added: 3, removed: 1, hasMoreAdded: true },
+  })
+  expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, DIFF_RUN, TOPLEVEL_RUN])
+})
 
 // The paths that the --no-index calls were made for, in the order of the calls.
 const countedPaths = (w: World): unknown[] =>
@@ -1796,20 +1820,22 @@ test('a new file whose count throws is no throw for the root: the reads of the r
   })
 
 // The calls of one read share READ_BUDGET_MS, counted from the start of its changes: each call has what is left of it
-// when that is less than CHANGES_TIMEOUT_MS. `lags` makes the clock move on in a kind of call, as a slow call does.
-test('a slow status leaves the next call the rest of the budget as its timeout, and every call after it', WITH_READER,
-  async ($, on) => {
+// when that is less than CHANGES_TIMEOUT_MS. The mock kills a call that takes longer than its timeout, as the engine
+// does, and `lags` is how long a kind of call takes. A jump of the wall clock, as when the machine sleeps, is no slow
+// call: `suspends` makes it in a kind of call, and the call is not killed for it.
+test('a suspend in the status leaves the next call the rest of the budget as its timeout, and every call after it',
+  WITH_READER, async ($, on) => {
     const clock = mock.clock(on)
     const w = bottom(on, clock)
     w.status = ok(' M a.ts\0?? n.ts\0')
     w.diff = ok('3\t1\ta.ts\n')
-    w.lags = { status: 25_000 } // the clock is 25 s on when the status ends
+    w.suspends = { status: 25_000 } // the clock is 25 s on when the status ends
     await $.session.start(START)
     await clock.advance(1)
     await openTree($, clock, w)
     await clock.advance(30_000)
 
-    // The status had the whole budget, which its own timeout is under; the calls after it have what it left.
+    // The status had the whole budget, which its own timeout is under; the calls after it have what the suspend left.
     expect(w.runs.map(run => [gitKind(run.argv), timeoutOf(run)])).toEqual([
       ['branch', 5000],
       ['status', CHANGES_TIMEOUT_MS],
@@ -1822,14 +1848,14 @@ test('a slow status leaves the next call the rest of the budget as its timeout, 
 
 // The host takes a whole number of ms as a timeout, and refuses any other: a clock that reads a fraction of a ms leaves
 // a fraction of the budget, which is rounded up, so every call of the read is made and has a whole timeout. A call has
-// its own timeout until less than that is left, so the status is slow here: the calls after it have what it left.
+// its own timeout until less than that is left, so a suspend in the status leaves the calls after it the rest of it.
 test('a clock that reads a fraction of a ms still gives each call a whole number of ms as its timeout',
   WITH_FRACTIONAL_CLOCK, async ($, on) => {
     const clock = mock.clock(on)
     const w = bottom(on, clock)
     w.status = ok(' M a.ts\0?? n.ts\0')
     w.diff = ok('3\t1\ta.ts\n')
-    w.lags = { status: 25_000 }
+    w.suspends = { status: 25_000 }
     await $.session.start(START)
     await clock.advance(1)
     await openTree($, clock, w)
@@ -1842,21 +1868,31 @@ test('a clock that reads a fraction of a ms still gives each call a whole number
   })
 
 // The timeouts of a status, a diff, the top of the repository and a count of one new file, by how long the status and
-// the diff took: the timeout of a call is CHANGES_TIMEOUT_MS until less than that is left.
-const BUDGET_TIMEOUTS: Array<[what: string, lags: Record<string, number>, timeouts: number[]]> = [
-  ['no time', {}, [10_000, 10_000, 10_000, 10_000]],
-  ['5 s each', { status: 5000, diff: 5000 }, [10_000, 10_000, 10_000, 10_000]], // 20 s are left for the last two
-  ['12 s each', { status: 12_000, diff: 12_000 }, [10_000, 10_000, 6000, 6000]], // 6 s are left after them
-  ['20 s and 9 s', { status: 20_000, diff: 9000 }, [10_000, 10_000, 1000, 1000]],
+// the diff took: the timeout of a call is CHANGES_TIMEOUT_MS until less than that is left. A status or a diff takes its
+// timeout at most, so the last two get less only after a suspend, where the wall clock jumps in a call.
+const BUDGET_TIMEOUTS: Array<[what: string, world: Partial<World>, timeouts: number[]]> = [
+  ['after a status and a diff that took no time', {}, [10_000, 10_000, 10_000, 10_000]],
+  [
+    'after a status and a diff that took 5 s each', { lags: { status: 5000, diff: 5000 } },
+    [10_000, 10_000, 10_000, 10_000], // 20 s are left for the last two
+  ],
+  [
+    'after a suspend of 12 s in the status and in the diff', { suspends: { status: 12_000, diff: 12_000 } },
+    [10_000, 10_000, 6000, 6000], // 6 s are left after them
+  ],
+  [
+    'after a suspend of 20 s in the status and a diff that took 9 s',
+    { suspends: { status: 20_000 }, lags: { diff: 9000 } }, [10_000, 10_000, 1000, 1000],
+  ],
 ]
-for (const [what, lags, timeouts] of BUDGET_TIMEOUTS) {
-  test(`after a status and a diff that took ${what}, the four calls have the timeouts ${timeouts.join(', ')} ms`,
+for (const [what, world, timeouts] of BUDGET_TIMEOUTS) {
+  test(`${what}, the four calls have the timeouts ${timeouts.join(', ')} ms`,
     WITH_READER, async ($, on) => {
       const clock = mock.clock(on)
       const w = bottom(on, clock)
       w.status = ok(' M a.ts\0?? n.ts\0')
       w.diff = ok('3\t1\ta.ts\n')
-      w.lags = lags
+      Object.assign(w, world)
       await $.session.start(START)
       await clock.advance(1)
       await openTree($, clock, w)
@@ -1868,7 +1904,8 @@ for (const [what, lags, timeouts] of BUDGET_TIMEOUTS) {
 
 // Where the budget of a read runs out, the calls that were made, and what the read gives: the next call is not made,
 // and the read ends as that call's failure would. The status lists a modified file and five new files of one line each,
-// the diff has 3 lines added and 1 removed; a folder in the status brings the second status.
+// the diff has 3 lines added and 1 removed; a folder in the status brings the second status. A call takes its timeout
+// at most, so the budget runs out in one call only through a suspend; otherwise it takes the calls of several.
 const NEW_FILES = ['n1.ts', 'n2.ts', 'n3.ts', 'n4.ts', 'n5.ts']
 const WITH_NEW_FILES: Partial<World> = {
   status: ok(` M a.ts\0${NEW_FILES.map(name => `?? ${name}\0`).join('')}`), diff: ok('3\t1\ta.ts\n'),
@@ -1879,16 +1916,16 @@ const BUDGET_ENDS: Array<[
   what: string, world: Partial<World>, kinds: string[], changes: Record<string, unknown> | null,
 ]> = [
   [
-    'after the first status, so no second status is run',
-    { ...WITH_A_FOLDER, lags: { status: 30_000 } }, ['status'], null,
+    'by a suspend in the first status, so no second status is run',
+    { ...WITH_A_FOLDER, suspends: { status: 30_000 } }, ['status'], null,
   ],
   [
-    'after both statuses, so no diff is run',
-    { ...WITH_A_FOLDER, lags: { status: 15_000 } }, ['status', 'status'], { files: 2, lines: null },
+    'by a suspend in each status, so no diff is run',
+    { ...WITH_A_FOLDER, suspends: { status: 15_000 } }, ['status', 'status'], { files: 2, lines: null },
   ],
   [
-    'after the diff, so the top of the repository is not asked for',
-    { ...WITH_NEW_FILES, lags: { status: 15_000, diff: 15_000 } }, ['status', 'diff'], LOWER_BOUND,
+    'by a suspend in the status and the diff, so the top of the repository is not asked for',
+    { ...WITH_NEW_FILES, suspends: { status: 15_000, diff: 15_000 } }, ['status', 'diff'], LOWER_BOUND,
   ],
   [
     'after the top of the repository, so no new file is counted',
@@ -1897,7 +1934,7 @@ const BUDGET_ENDS: Array<[
   ],
   [
     'in the loop over the new files, after the third',
-    { ...WITH_NEW_FILES, lags: { 'no-index': 12_000 } },
+    { ...WITH_NEW_FILES, lags: { 'no-index': 10_000 } },
     ['status', 'diff', 'rev-parse', 'no-index', 'no-index', 'no-index'],
     { files: 6, lines: { added: 6, removed: 1, hasMoreAdded: true } },
   ],
@@ -1916,14 +1953,60 @@ for (const [what, world, kinds, changes] of BUDGET_ENDS) {
   })
 }
 
-// A call that is not made is no throw: it ran out of the clock, not of its timeout. Here the clock is a whole budget on
-// when each status ends, as after a suspend, so the diff is never made, and no read counts a throw.
+// What real use gives, where no call outlasts its timeout: a status and a diff of 9 s each (the top of the repository
+// takes no time), then new files of 5 s each. The first is counted in 5 s of the 12 s left, the second in 5 s of the
+// 7 s left, and the third has 2 s: it is killed at them, its count is lost, and the lines before it stand as a lower
+// bound.
+test('new files of 5 s each, after a status and a diff of 9 s: the third has the 2 s left, is killed, and the plus is '
+  + 'a lower bound', WITH_READER, async ($, on) => {
+  const clock = mock.clock(on)
+  const w = Object.assign(bottom(on, clock), WITH_NEW_FILES, { lags: { status: 9000, diff: 9000, 'no-index': 5000 } })
+  await $.session.start(START)
+  await clock.advance(1)
+  await openTree($, clock, w)
+  await clock.advance(60_000)
+
+  expect(w.runs.slice(1).map(run => [gitKind(run.argv), timeoutOf(run)])).toEqual([
+    ['status', 10_000], ['diff', 10_000], ['rev-parse', 10_000],
+    ['no-index', 10_000], ['no-index', 7000], ['no-index', 2000],
+  ])
+  // The diff has 3 lines added, and the two counts that ended have one each.
+  expect((await readState($)).project.changes).toEqual({
+    files: 6, lines: { added: 5, removed: 1, hasMoreAdded: true },
+  })
+})
+
+// The top of the repository that the budget kills: two statuses and a diff of 9 s each leave it 3 s, and it would take
+// 5. The call was made and failed, yet the lines of the diff stand.
+test('a top of the repository that the 3 s left of the budget kill leaves the lines of the diff as a lower bound',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0?? dir/\0')
+    w.statusAll = ok(' M a.ts\0?? dir/x.ts\0?? dir/y.ts\0')
+    w.diff = ok('3\t1\ta.ts\n')
+    w.lags = { status: 9000, diff: 9000, 'rev-parse': 5000 }
+    await $.session.start(START)
+    await clock.advance(1)
+    await openTree($, clock, w)
+    await clock.advance(60_000)
+
+    expect(w.runs.slice(1).map(run => [gitKind(run.argv), timeoutOf(run)])).toEqual([
+      ['status', 10_000], ['status', 10_000], ['diff', 10_000], ['rev-parse', 3000], // no new file is counted
+    ])
+    expect((await readState($)).project.changes).toEqual({
+      files: 3, lines: { added: 3, removed: 1, hasMoreAdded: true },
+    })
+  })
+
+// A call that is not made is no throw: it ran out of the clock, not of its timeout. Here a suspend in each status puts
+// the clock a whole budget on when it ends, so the diff is never made, and no read counts a throw.
 test('a call that was not made, for the budget was spent, is no throw: the reads of the root are not stopped',
   WITH_READER, async ($, on) => {
     const clock = mock.clock(on)
     const w = bottom(on, clock)
     w.status = ok(' M a.ts\0')
-    w.lags = { status: READ_BUDGET_MS }
+    w.suspends = { status: READ_BUDGET_MS }
     await $.session.start(START)
     await clock.advance(1)
     await startTurn($)
