@@ -1874,8 +1874,9 @@ test('a wait set after a read of an hour does not outlive the fast read that fol
     const HOUR = 3_600_000
     const clock = mock.clock(on)
     const w = bottom(on, clock)
-    // The session does not start: its timer would ask for a read every minute of that hour, and each ask would mark the
-    // read under way stale. The attach arms the timer of TICKER, so that the clock moves fast.
+    // The session does not start: its timer would ask for a read every minute of that hour, with the pane shown, and
+    // each ask would mark the read under way stale. The attach arms the timer of TICKER, so that the clock moves
+    // fast.
     await $.session.attach({ surface: 'terminal', clientId: 'terminal:default' })
     w.rootLag = HOUR // the read that the first turn asks for takes an hour: a suspend in the middle of it
     await startTurn($)

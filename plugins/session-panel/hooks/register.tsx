@@ -51,9 +51,11 @@ const WRITE_TOOLS: string[] = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Ba
 // is read once.
 const PROJECT_DELAY_MS = 1000
 
-// A delayed read of the project waits at least four times as long as the last read took. So git takes at most about a
-// quarter of the time, for the reads after tool calls, even in a big repository (the timer starts at the call, which
-// may come during the read before), and a read that ran into its timeouts is not retried at once.
+// A delayed read of the project waits at least four times as long as the last read took, which counts
+// READ_MS_MAX at most. So git takes at most about a quarter of the time, for the reads after tool calls
+// and the minute read, even in a big repository (the timer starts at the call, which may come during the
+// read before), as long as a read takes a minute at most; and a read that ran into its timeouts is not
+// retried at once.
 const PROJECT_GAP_FACTOR = 4
 
 // The most one read counts for in lastReadMs, in ms, so the gap rule waits four minutes at most. A read is timed by the
@@ -521,11 +523,12 @@ export const register: Register = on => {
       syncAgents($).catch(() => undefined)
       if (ticks % 2 === 0) {
         refreshUsage($).catch(() => undefined)
-        // A file that changed outside Claude's tools (an editor, a terminal, a background command that ended after its
-        // call returned) shows without a new turn. The gap rule keeps git to a quarter of the time. The tick asks only
-        // while the pane is shown: until 0.3.0 an idle session ran no git, and a closed pane has no one to show the
-        // count to. The reads that follow the person's or the agent's work (turn ends, write calls, CwdChanged) are
-        // unchanged, and a pane that opens asks for one itself. A list of panes that cannot be read asks for nothing.
+        // A file that changed outside Claude's tools (an editor, a terminal, a background command that ended after
+        // its call returned) shows without a new turn. The gap rule keeps git to about a quarter of the time
+        // (PROJECT_GAP_FACTOR). The tick asks only while the pane is shown: until 0.3.0 an idle session ran no git,
+        // and a closed pane has no one to show the count to. The reads that follow the person's or the agent's work
+        // (turn ends, write calls, CwdChanged) are unchanged, and a pane that opens asks for one itself. A list of
+        // panes that cannot be read asks for nothing.
         $.clock.now()
           .then(async now => {
             if ((await $.ui.panes()).some(pane => pane.id === PANE && pane.isPlaced)) requestProjectLater($, now)
