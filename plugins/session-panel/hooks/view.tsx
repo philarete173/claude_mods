@@ -665,9 +665,9 @@ function sourcesSection(d: Draw): RenderElement | null {
   return section(d, 'sources', 'Context sources', parts.join(' · '), rows)
 }
 
-// The Log, as the parts of the pane's root: its rule, its header and its lines, with no Box around them. Folded, it is
-// the rule and the header; with no lines, nothing. That is the layout the live desktop has verified, and it needs no
-// chain of Boxes that grow (the visual spec, §6.12 Log height).
+// The Log, as the parts of the pane's root: its rule, its header and its lines, with no Box around them. That is the
+// layout the live desktop has verified, and it needs no chain of Boxes that grow (the visual spec, §6.12 Log height).
+// Folded, it is the rule and the header; with no lines, nothing.
 // The newest log lines: time, who, what, and how it went. Time and `who` are dim fixed columns, so every text starts
 // at the same x; the text is cut to one line. On the desktop `who` has a width of its own, so the text column does not
 // jump with the longest `who`; on the terminal it is the longest one there is, up to the most shortType keeps. The
@@ -681,7 +681,8 @@ function sourcesSection(d: Draw): RenderElement | null {
 // the lines drawn there is no outcome cell, and a line shows its text alone.
 // Where `who` has no cell, a line of the person (`you`) or of the engine (`engine`) shows it in front of its text, as
 // `you › …`, for its text alone does not say whose it is; the other lines have no label. It comes after the outcome,
-// where a line shows that in front too.
+// where a line shows that in front too. MIN_LOG_TEXT_CELLS counts the text alone, not the label: at the edge of a
+// layout an engine line shows its label and none of its text.
 // The height: the lines drawn are the body's rows, MIN_LOG_ROWS at least, for a line past them could never show. The
 // first MIN_LOG_ROWS are the head, a Box that holds its height, so they always show. The rest are the tail, a Box with
 // no height of its own that grows into the rows the root leaves free (it is at least the body's height) and clips at

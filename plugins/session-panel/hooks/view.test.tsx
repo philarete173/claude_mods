@@ -998,7 +998,7 @@ test('the mounted pane splits its Log by the rows of its body, and draws one Box
       // `minHeight`, which the engine has to take left out, and the Log is the 15 lines in one Box. A pane may well
       // draw first with such a body.
       for (const bodyRows of [0, Number.NaN]) {
-        const where = `${surface} ${bodyRows} rows`
+        const where = `${surface} ${Number.isNaN(bodyRows) ? 'NaN (arrives as null)' : bodyRows} rows`
         await ui.redraw({ ...PANE_PROPS, scroll: { offset: 0, bodyRows } })
         const tree: Node = await ui.drawn()
         expect(tree.props?.minHeight, where).toBeUndefined()
@@ -1604,8 +1604,9 @@ test('with no outcome drawn the row is [time, who, text] while the text keeps 8 
 })
 
 // The lines that a row with no cell for `who` labels, and those it leaves alone: a tool's line, a subagent's
-// (`engineer` starts like `engine`), and one whose type is the longest the terminal keeps. The last line is not one
-// that the mod writes (a prompt has no outcome): it fixes the order of the outcome and the label.
+// (`engineer` starts like `engine`, `young-dev` like `you`), and one whose type is the longest the terminal keeps. The
+// `you` line with an outcome is not one that the mod writes (a prompt has no outcome): it fixes the order of the
+// outcome and the label.
 const LABEL_LINES: LogEntry[] = [
   { at: NOW, who: 'you', text: 'fix the order qty', kind: 'info' },
   { at: NOW - 1000, who: 'engine', text: 'the build is done', kind: 'info' },
@@ -1613,19 +1614,22 @@ const LABEL_LINES: LogEntry[] = [
   { at: NOW - 3000, who: 'engineer', text: 'Edit a.py', kind: 'error', outcome: '✗ 1m 12s' },
   { at: NOW - 4000, who: 'minimal-change', text: 'Read b.py', kind: 'ok', outcome: '✓ 0.1s' },
   { at: NOW - 5000, who: 'you', text: 'a prompt that ran', kind: 'info', outcome: '27.4s' },
+  { at: NOW - 6000, who: 'young-dev', text: 'Grep c', kind: 'ok', outcome: '✓ 0.2s' },
 ]
 
 test('with no cell for `who` a row labels a prompt `you › …` and an engine message `engine › …`, and no other', () => {
   // The text of each line in each layout. In [time, text] the outcome leads, and the label comes after it.
   const textOnly = [
     'you › fix the order qty', 'engine › the build is done', '✓ 0.3s Bash ls', '✗ 1m 12s Edit a.py',
-    '✓ 0.1s Read b.py', '27.4s you › a prompt that ran',
+    '✓ 0.1s Read b.py', '27.4s you › a prompt that ran', '✓ 0.2s Grep c',
   ]
   const bare = [
     'you › fix the order qty', 'engine › the build is done', 'Bash ls', 'Edit a.py', 'Read b.py',
-    'you › a prompt that ran',
+    'you › a prompt that ran', 'Grep c',
   ]
-  const withWho = ['fix the order qty', 'the build is done', 'Bash ls', 'Edit a.py', 'Read b.py', 'a prompt that ran']
+  const withWho = [
+    'fix the order qty', 'the build is done', 'Bash ls', 'Edit a.py', 'Read b.py', 'a prompt that ran', 'Grep c',
+  ]
   // The edges are 41 and 27 on the desktop, 41 and 26 on the terminal (`✗ 1m 12s` is the longest outcome and
   // `minimal-change` the longest name): [time, who, text, outcome] from 41, [time, text, outcome] from 27 or 26, and
   // [time, text] below.
