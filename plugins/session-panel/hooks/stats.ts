@@ -34,7 +34,8 @@ export type TurnStats = {
   ttftMs: number | null
   wholeTurnRate: number | null
   responseRate: number | null
-  // All the input the turn sent: what was not cached, what was read from the cache and what was written to it.
+  // The input the turn sent at full price or more: what was not cached and what was written to the cache. What it read
+  // from the cache is cheap, so it is left out (cachePct still counts it).
   tokensIn: number
   tokensOut: number
   cachePct: number | null
@@ -89,6 +90,12 @@ function inputTokens(u: Usage): number {
   return (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
 }
 
+// The input that was sent at full price or more: the tokens that were not cached and those written to the cache (a
+// write costs more than a plain token). What was read from the cache is cheap and is left out.
+function fullPriceTokens(u: Usage): number {
+  return (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
+}
+
 // Share of the input served from the cache, in percent; null when there was no input at all.
 // Cache formula after OpenChamber (MIT, © 2025 Bohdan Triapitsyn).
 export function cacheHitPct(u: Usage): number | null {
@@ -129,7 +136,7 @@ export function computeTurnStats(
       last !== undefined && !last.hasTool && last.hasText
         ? rate(last.usage.output_tokens ?? 0, last.tEnd - last.tStart)
         : null,
-    tokensIn: inputTokens(total),
+    tokensIn: fullPriceTokens(total),
     tokensOut: total.output_tokens ?? 0,
     cachePct: cacheHitPct(total),
     costUsd: costNow !== null && acc.costAtStart !== null ? costNow - acc.costAtStart : null,
@@ -189,11 +196,29 @@ const SECRETS: [RegExp, string][] = [
   [/(\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s@]+@/gi, '$1•••@'],
 ]
 
+// Whether the character beside a joiner holds it: one above U+007F that is no space. A space is what `\s` says, as in
+// the patterns of redact, so the no-break space and the wide ones are spaces. The character is read as one UTF-16 unit:
+// every unit of an astral code point is above U+007F (a surrogate), so the unit beside a joiner tells what the
+// character is. No unit, past an end of the text, holds nothing.
+const holdsJoiner = (char: string | undefined): boolean =>
+  char !== undefined && char.charCodeAt(0) > 0x7f && !/\s/.test(char)
+
 // Takes out the Unicode format characters (category Cf): the bidi controls (U+202A to U+202E, U+2066 to U+2069), the
-// zero-width spaces and joiners, the byte order mark. They draw nothing, so a U+202E in a branch or a file name would
-// reorder what the pane shows after it, and the name would read as another.
+// zero-width space, the byte order mark and the rest. They draw nothing, so a U+202E in a branch or a file name would
+// reorder what the pane shows after it, and the name would read as another. Two stay, but only between two characters
+// that are neither ASCII nor spaces: the zero-width joiner (U+200D) holds an emoji sequence together (a family is three
+// emoji with a joiner between each two), and the non-joiner (U+200C) sits inside Persian words; both shape letters of
+// Indic scripts. Beside an ASCII character, a space of any kind or an end of the text, a joiner joins nothing and draws
+// nothing, and it would hide a character of a branch or a folder name, or split a secret so that no pattern of redact
+// matches it (a key and its value have `\s*` between them, and a joiner between two no-break spaces there would end the
+// value before it starts): it goes. Its neighbours are those that remain once the rest of Cf is gone (a zero-width
+// space beside it does not make it stay), and a run of joiners stays or goes as a whole. The run is matched once and
+// judged by what is round it: a lookbehind and lookahead pair would read the run again from each of its joiners.
 export function stripFormat(s: string): string {
-  return s.replace(/\p{Cf}/gu, '')
+  const rest = s.replace(/(?![\u200C\u200D])\p{Cf}/gu, '')
+
+  return rest.replace(/[\u200C\u200D]+/g, (run, at: number) =>
+    holdsJoiner(rest[at - 1]) && holdsJoiner(rest[at + run.length]) ? run : '')
 }
 
 // The format characters go first, as shorten takes them out too: one inside a secret would keep a pattern from
@@ -203,12 +228,16 @@ export function redact(s: string): string {
 }
 
 // Takes the markdown marks out of a text that the pane shows as it is: a pair of `**` around text on one line, which is
-// kept (its first and last characters are no spaces); backticks (code); and the `#` marks of a heading at the start of
-// a line, with the space after them. A `**` that stands alone or has a space beside it stays (`x ** 2`, `2**10`), and
-// so does `__`: `__init__.py` is a file, not bold.
+// kept (its first and last characters are no spaces) and which no letter or digit touches on the outside; backticks
+// (code); and the `#` marks of a heading at the start of a line, with the space after them. A `**` that stands alone,
+// has a space beside it or is glued to a word stays (`x ** 2`; the `**` of `2**10 and 3**4` are exponents, no pair),
+// and so does `__`: `__init__.py` is a file, not bold.
 export function plainText(s: string): string {
   // The group inside the pair is lazy (`??`): a body of one character closes at its own `**`, not at the next pair's.
-  return s.replace(/\*\*(\S(?:.*?\S)??)\*\*/g, '$1').replace(/`/g, '').replace(/^#+ /gm, '')
+  // The lookbehind and the lookahead keep out a `**` that a letter or a digit touches on the outside of the pair.
+  const pair = /(?<![\p{L}\p{N}])\*\*(\S(?:.*?\S)??)\*\*(?![\p{L}\p{N}])/gu
+
+  return s.replace(pair, '$1').replace(/`/g, '').replace(/^#+ /gm, '')
 }
 
 // Takes out the format characters (stripFormat), collapses whitespace runs and cuts to `max` characters, the last one

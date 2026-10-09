@@ -60,19 +60,28 @@ const PROJECT_GAP_FACTOR = 4
 
 // The most one read counts for in lastReadMs, in ms, so the gap rule waits four minutes at most. A read is timed by the
 // wall clock: a suspend in the middle of one would count the whole sleep, and stop the minute read for four times as
-// long. A real read that long already has git near its timeouts.
+// long. A real read is well under that: READ_BUDGET_MS bounds its changes and the branch has its own 5 s for each of
+// its calls, so only a suspend makes a read count longer.
 const READ_MS_MAX = 60_000
 
-// How long each git call that reads the changes may run, in ms.
+// How long each git call that reads the changes may run, in ms; the budget of the read may leave a call less.
 const CHANGES_TIMEOUT_MS = 10_000
 
-// The start of every git call that reads the tree; gitOut says why each option is there.
+// How long the changes of one read may take in all, in ms, counted from the start of gitChanges. Every git call that
+// reads them runs with CHANGES_TIMEOUT_MS or with the time left of this, whichever is less, and once none is left the
+// next call is not made. Each call alone keeps to its timeout, yet the calls of one read add up: 50 new files that take
+// 9 s each are minutes.
+const READ_BUDGET_MS = 30_000
+
+// The start of every git call that reads the tree; gitRun says why each option is there.
 const GIT_READ: string[] = [
   'git', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'diff.autoRefreshIndex=false',
 ]
 
 // The variables that such a call runs with, set over the process's own. git 2.44 and later, and some distributions'
-// 2.43 builds (a backport), honour GIT_NO_LAZY_FETCH; other git ignores it.
+// 2.43 builds (a backport), honour GIT_NO_LAZY_FETCH; other git ignores it. GIT_CEILING_DIRECTORIES is not set: the mod
+// reads no env, so it cannot know $HOME, and a ceiling at the session root would hide the repository of a session that
+// starts in one of its folders.
 const GIT_READ_ENV: Record<string, string> = { GIT_NO_LAZY_FETCH: '1' }
 
 // git's empty tree. As the source of attributes (GIT_ATTR_SOURCE) it leaves no .gitattributes in force, so no
@@ -85,8 +94,9 @@ const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 // What every --no-index call runs with: GIT_READ_ENV, and the empty tree as the source of attributes.
 const NO_INDEX_ENV: Record<string, string> = { ...GIT_READ_ENV, GIT_ATTR_SOURCE: EMPTY_TREE }
 
-// How many `git status` calls in a row may throw for one root before its changes are no longer read (statusThrows).
-const STATUS_THROWS_MAX = 2
+// How many reads in a row may have a status, or a diff against HEAD, that threw, for one root, before its changes are
+// no longer read (readThrows).
+const READ_THROWS_MAX = 2
 
 // How many new files have their lines counted. A new file is in no diff against HEAD, so each takes a git call of its
 // own; the files past this many add no lines, so past it the plus is a lower bound.
@@ -138,12 +148,14 @@ let lastReadMs = 0
 // not read again until the next turn.
 let hasMainTurn = false
 
-// The root whose `git status` calls threw, and how many in a row. A throw is a timeout or a git that cannot be
-// started; a non-zero exit, as outside a repository, is none. Past STATUS_THROWS_MAX the changes of that root are not
-// read again while the module lives, and the branch still is: a session inside a huge tree, such as a dotfiles
-// repository in $HOME, would otherwise spend the whole timeout on every read. A status that does not throw resets the
-// count, and so does a read for another root.
-let statusThrows: { root: string; count: number } | null = null
+// For each root, how many reads in a row had a status, or a diff against HEAD, that threw. A throw is a timeout or a
+// git that cannot be started; a non-zero exit, as outside a repository, is none. The count of a root rises by one for
+// each read that had a throw, and a read whose status and diff both ended without one starts it over. Past
+// READ_THROWS_MAX the changes of that root are not read again while the module lives, and the branch still is: a
+// session inside a huge tree, such as a dotfiles repository in $HOME, would otherwise spend the whole timeout on every
+// read. A read of another root leaves the count of this one as it is. A call also throws when the hook's signal
+// aborts, as when the module unloads, and that counts too; it is harmless, since a new module starts its counts over.
+const readThrows = new Map<string, number>()
 
 // ISO 8601 to epoch ms, which is what the `usage` value keeps; undefined when there is none or it does not parse.
 const toMs = (iso: string | undefined): number | undefined => {
@@ -275,56 +287,121 @@ async function gitBranch($: EngineInterface, root: string): Promise<string | nul
   }
 }
 
-// Runs a git call that reads the changes; null when it threw: it ran past CHANGES_TIMEOUT_MS and was killed, or git
-// could not be started. A call that reads the tree (GIT_READ) passes `--no-optional-locks`: a plain one may refresh
-// the index and take index.lock, which makes the git commands of the person or the agent fail. It passes
-// `-c core.fsmonitor=false` too, or git may run the fsmonitor hook that the person configured, or start its own daemon,
-// and `-c diff.autoRefreshIndex=false`, or a diff of the tree refreshes the index all the same, taking index.lock and
-// rewriting .git/index. The `env` it is given, GIT_READ_ENV or, for a `--no-index` call, NO_INDEX_ENV, keeps a partial
-// clone from fetching the objects it lacks from its remote, which is network.
+// One read of the changes (gitChanges): when its budget ends by the clock, whether a call found none of it left and was
+// not made, and whether a status, or the diff against HEAD, threw.
+type ChangesRead = { endsAt: number; isSpent: boolean; hasThrown: boolean }
+
+// Runs a git call that reads the changes; null when it was not made or threw. It is not made when none is left of the
+// budget of its read (READ_BUDGET_MS), and the read goes on as it does after a call that failed. Otherwise it runs with
+// CHANGES_TIMEOUT_MS, or with the time left of the budget when that is less, and it throws when it ran past that and
+// was killed, or git could not be started, or the hook's signal aborted (as when the module unloads): for a status or
+// the diff against HEAD that counts toward the stop all the same, and it is harmless, since a new module starts its
+// counts over. A call that reads the tree (GIT_READ) passes `--no-optional-locks`: a plain one may refresh the index
+// and take index.lock, which makes the git commands of the person or the agent fail. So the index is never refreshed,
+// and a status and a diff each hash again the files whose stat data changed, on every read; the budget and the gap rule
+// (PROJECT_GAP_FACTOR) bound that. It passes `-c core.fsmonitor=false` too, or git may run the fsmonitor hook that the
+// person configured, or start its own daemon, and `-c diff.autoRefreshIndex=false`, or a diff of the tree refreshes the
+// index all the same, taking index.lock and rewriting .git/index. The `env` it is given, GIT_READ_ENV or, for a
+// `--no-index` call, NO_INDEX_ENV, keeps a partial clone from fetching the objects it lacks from its remote, which is
+// network.
 async function gitRun(
-  $: EngineInterface, argv: string[], cwd: string, env?: Record<string, string>,
+  $: EngineInterface, argv: string[], cwd: string, read: ChangesRead, env?: Record<string, string>,
 ): Promise<ProcessRunResult | null> {
+  const left = read.endsAt - (await $.clock.now())
+  if (left <= 0) {
+    read.isSpent = true
+
+    return null
+  }
   try {
-    return await $.process.run(argv, { cwd, timeoutMs: CHANGES_TIMEOUT_MS, ...(env === undefined ? {} : { env }) })
+    // The host takes a whole number of ms for a timeout, and the clock may not give one: `left` is rounded up.
+    return await $.process.run(argv, {
+      cwd, timeoutMs: Math.min(CHANGES_TIMEOUT_MS, Math.ceil(left)), ...(env === undefined ? {} : { env }),
+    })
   } catch {
     return null
   }
 }
 
-// The stdout of such a call: null unless it ended with one of `exits` and was not cut, or when it threw.
-async function gitOut(
-  $: EngineInterface, argv: string[], cwd: string, exits: number[], env?: Record<string, string>,
-): Promise<string | null> {
-  const ran = await gitRun($, argv, cwd, env)
+// A call that walks the tree, a status or the diff against HEAD: the calls whose throw counts toward the stop of the
+// root (readThrows). A call that was not made, for none was left of the budget, threw nothing.
+async function gitWalk(
+  $: EngineInterface, argv: string[], cwd: string, read: ChangesRead,
+): Promise<ProcessRunResult | null> {
+  const ran = await gitRun($, argv, cwd, read, GIT_READ_ENV)
+  if (ran === null && !read.isSpent) read.hasThrown = true
 
-  return ran !== null && exits.includes(ran.exitCode) && !ran.isStdoutTruncated ? ran.stdout : null
+  return ran
+}
+
+// The stdout of a call that ended with one of `exits` and was not cut; null for any other end, and when it threw or was
+// not made (`ran` is null).
+const stdoutOf = (ran: ProcessRunResult | null, exits: number[]): string | null =>
+  ran !== null && exits.includes(ran.exitCode) && !ran.isStdoutTruncated ? ran.stdout : null
+
+// The stdout of such a call (stdoutOf), for a call that does not walk the tree.
+async function gitOut(
+  $: EngineInterface, argv: string[], cwd: string, exits: number[], read: ChangesRead, env?: Record<string, string>,
+): Promise<string | null> {
+  return stdoutOf(await gitRun($, argv, cwd, read, env), exits)
 }
 
 // The status of the tree, as `git status --porcelain -z` prints it: `stdout` is its whole entries, and `isCut` says
 // that git's output was cut (a status that was cut ends inside an entry, and what follows its last NUL is no entry).
-// Null when there is no status to read: the call failed (as outside a git repository), or the reads of this root are
-// stopped, which two throws in a row do (statusThrows). `--ignore-submodules=dirty` keeps git from walking the work
-// tree of a submodule.
-async function gitStatus($: EngineInterface, root: string): Promise<{ stdout: string; isCut: boolean } | null> {
-  if (statusThrows?.root === root && statusThrows.count >= STATUS_THROWS_MAX) return null
-  const argv = [...GIT_READ, 'status', '--porcelain', '-z', '-uall', '--ignore-submodules=dirty']
-  const ran = await gitRun($, argv, root, GIT_READ_ENV)
-  const held = statusThrows?.root === root ? statusThrows.count : 0
-  statusThrows = { root, count: ran === null ? held + 1 : 0 }
-  if (ran === null || ran.exitCode !== 0) return null
-  const isCut = ran.isStdoutTruncated
+type TreeStatus = { stdout: string; isCut: boolean }
 
-  return { stdout: isCut ? ran.stdout.slice(0, ran.stdout.lastIndexOf('\0') + 1) : ran.stdout, isCut }
+// Whether a status lists an untracked folder, a `?? ` entry that ends in a slash. git lists a folder that holds no
+// tracked file as one entry, unless it is asked for `-uall`; a nested repository is one whatever it is asked.
+const hasUntrackedFolder = (stdout: string): boolean =>
+  stdout.split('\0').some(entry => entry.startsWith('?? ') && entry.endsWith('/'))
+
+// Reads the status. Null when there is no status to read: a call failed (as outside a git repository), threw, or was
+// not made. `--ignore-submodules=dirty` keeps git from walking the work tree of a submodule. The first call has no `-u`
+// flag, so git follows the person's `status.showUntrackedFiles`: `no` walks no untracked file (a person with a
+// dotfiles repository in $HOME sets it, so that git does not walk the home folder), and `normal` lists an untracked
+// folder as one entry (`dir/`). Only when that output lists such a folder, a second call with `-uall` lists the files
+// in it, and its output is the one used. The two calls have the same other flags and the same budget, and both count
+// as status calls for the throws; a second one that fails is a failure of the status, so the read has no changes.
+async function gitStatus($: EngineInterface, root: string, read: ChangesRead): Promise<TreeStatus | null> {
+  const statusWith = async (flags: string[]): Promise<TreeStatus | null> => {
+    const argv = [...GIT_READ, 'status', '--porcelain', '-z', ...flags, '--ignore-submodules=dirty']
+    const ran = await gitWalk($, argv, root, read)
+    if (ran === null || ran.exitCode !== 0) return null
+    const isCut = ran.isStdoutTruncated
+
+    return { stdout: isCut ? ran.stdout.slice(0, ran.stdout.lastIndexOf('\0') + 1) : ran.stdout, isCut }
+  }
+  const first = await statusWith([])
+
+  return first !== null && hasUntrackedFolder(first.stdout) ? statusWith(['-uall']) : first
 }
 
 // What differs from HEAD in the working tree: the files that changed, and the lines added and removed. Null when there
-// is nothing to show: outside a git repository, on a clean tree, or when there is no status to read (gitStatus). A
-// status that was cut gives the files it listed whole as a lower bound (`hasMoreFiles`) and no lines. The lines are
-// null when they cannot be had (an unborn HEAD has no HEAD to diff against); `hasMoreAdded` says that `added` is a
-// lower bound.
+// is nothing to show: outside a git repository, on a clean tree, when there is no status to read (gitStatus), or when
+// the reads of this root have stopped. A status that was cut gives the files it listed whole as a lower bound
+// (`hasMoreFiles`) and no lines. The lines are null when they cannot be had (an unborn HEAD has no HEAD to diff
+// against); `hasMoreAdded` says that `added` is a lower bound.
+// Two rules bound the cost. A read has READ_BUDGET_MS in all, from here: a call that finds none left is not made, and
+// the read ends as that call's failure would (readChanges). And the reads of a root stop once READ_THROWS_MAX of them
+// in a row had a status, or a diff against HEAD, that threw (readThrows): one count for each read, so that a status
+// that is fine does not clear a diff that keeps timing out. A read whose status and diff both ended without a throw
+// starts the count over; a throw of a later call of the read (the top of the repository, a new file) is none for the
+// root.
 async function gitChanges($: EngineInterface, root: string): Promise<Changes> {
-  const status = await gitStatus($, root)
+  const held = readThrows.get(root) ?? 0
+  if (held >= READ_THROWS_MAX) return null
+  const read: ChangesRead = { endsAt: (await $.clock.now()) + READ_BUDGET_MS, isSpent: false, hasThrown: false }
+  const changes = await readChanges($, root, read)
+  readThrows.set(root, read.hasThrown ? held + 1 : 0)
+
+  return changes
+}
+
+// The read of gitChanges: the status, the diff against HEAD and the lines of the new files, in calls that share the
+// budget of `read`. A call that finds none left ends the read as its failure would: no status gives no changes, no diff
+// gives no lines, and no top of the repository or count of a new file gives a lower bound.
+async function readChanges($: EngineInterface, root: string, read: ChangesRead): Promise<Changes> {
+  const status = await gitStatus($, root, read)
   if (status === null) return null
   const { files, newFiles } = parseStatus(status.stdout)
   if (files === 0) return null
@@ -343,33 +420,40 @@ async function gitChanges($: EngineInterface, root: string): Promise<Changes> {
     ...GIT_READ, '-c', 'diff.relative=false', 'diff', '--numstat', '--no-textconv', '--no-ext-diff',
     '--ignore-submodules=dirty', 'HEAD', '--',
   ]
-  const diff = await gitOut($, diffArgv, root, [0], GIT_READ_ENV)
+  const diff = stdoutOf(await gitWalk($, diffArgv, root, read), [0])
   if (diff === null) return { files, lines: null }
   let { added, removed } = sumNumstat(diff)
-  // The new files past NEW_FILES_MAX are not counted, and nor are those that follow a count that failed.
+  // The new files past NEW_FILES_MAX are not counted, and nor are those that follow a count that failed, or that the
+  // budget left no time for.
   let hasMoreAdded = newFiles.length > NEW_FILES_MAX
   if (newFiles.length > 0) {
     // The paths of the status are relative to the top of the repository, which may not be the session root. Finding it
     // reads no object, so that call runs without GIT_READ_ENV.
-    const toplevel = await gitOut($, ['git', 'rev-parse', '--show-toplevel'], root, [0])
-    if (toplevel === null) return { files, lines: null }
-    const top = toplevel.trim()
-    // A new file is in no diff against HEAD, so it is diffed against nothing, one file at a time. --no-index exits 1
-    // when the sides differ, an empty new file included, and 0 when they do not. Any other end, a cut output or a throw
-    // is a failure, and the loop stops at the first: a timeout on each of 50 files would add up to a read of minutes.
-    // The lines counted so far stand, as a lower bound.
-    for (const path of newFiles.slice(0, NEW_FILES_MAX)) {
-      const argv = [
-        ...GIT_READ, 'diff', '--no-index', '--numstat', '--no-textconv', '--no-ext-diff', '--', '/dev/null', path,
-      ]
-      const counted = await gitOut($, argv, top, [0, 1], NO_INDEX_ENV)
-      if (counted === null) {
-        hasMoreAdded = true
-        break
+    const toplevel = await gitOut($, ['git', 'rev-parse', '--show-toplevel'], root, [0], read)
+    if (toplevel === null) {
+      // A top that cannot be had leaves the lines unknown. One that was not asked for, as none was left of the budget,
+      // is no failure: the new files are left uncounted, as a count that was not made leaves them.
+      if (!read.isSpent) return { files, lines: null }
+      hasMoreAdded = true
+    } else {
+      const top = toplevel.trim()
+      // A new file is in no diff against HEAD, so it is diffed against nothing, one file at a time. --no-index exits 1
+      // when the sides differ, an empty new file included, and 0 when they do not. Any other end, a cut output, a throw
+      // or a call that was not made (the budget is spent) is a failure, and the loop stops at the first: a timeout on
+      // each of 50 files would add up to a read of minutes. The lines counted so far stand, as a lower bound.
+      for (const path of newFiles.slice(0, NEW_FILES_MAX)) {
+        const argv = [
+          ...GIT_READ, 'diff', '--no-index', '--numstat', '--no-textconv', '--no-ext-diff', '--', '/dev/null', path,
+        ]
+        const counted = await gitOut($, argv, top, [0, 1], read, NO_INDEX_ENV)
+        if (counted === null) {
+          hasMoreAdded = true
+          break
+        }
+        const lines = sumNumstat(counted)
+        added += lines.added
+        removed += lines.removed
       }
-      const lines = sumNumstat(counted)
-      added += lines.added
-      removed += lines.removed
     }
   }
 
@@ -525,13 +609,14 @@ export const register: Register = on => {
         refreshUsage($).catch(() => undefined)
         // A file that changed outside Claude's tools (an editor, a terminal, a background command that ended after
         // its call returned) shows without a new turn. The gap rule keeps git to about a quarter of the time
-        // (PROJECT_GAP_FACTOR). The tick asks only while the pane is shown: until 0.3.0 an idle session ran no git,
-        // and a closed pane has no one to show the count to. The reads that follow the person's or the agent's work
-        // (turn ends, write calls, CwdChanged) are unchanged, and a pane that opens asks for one itself. A list of
-        // panes that cannot be read asks for nothing.
+        // (PROJECT_GAP_FACTOR). The tick asks only for a pane in front, placed and shown: until 0.3.0 an idle session
+        // ran no git, and a pane that is closed, waits undrawn or is a tab behind another has no one to show the count
+        // to. The reads that follow the person's or the agent's work (turn ends, write calls, CwdChanged) are
+        // unchanged, and a pane that opens asks for one itself. A list of panes that cannot be read asks for nothing.
         $.clock.now()
           .then(async now => {
-            if ((await $.ui.panes()).some(pane => pane.id === PANE && pane.isPlaced)) requestProjectLater($, now)
+            const panes = await $.ui.panes()
+            if (panes.some(pane => pane.id === PANE && pane.isPlaced && pane.isShown)) requestProjectLater($, now)
           })
           .catch(() => undefined)
       }
@@ -545,7 +630,7 @@ export const register: Register = on => {
     const attached = await next(e)
     if (e.surface === 'desktop') {
       await $.ui.open({ id: PANE, title: 'Session' })
-      // The timer reads the project only while the pane is shown (session.start), so a pane that opens asks for a read.
+      // The timer reads the project only for a pane in front (session.start), so a pane that opens asks for a read.
       inBackground($, () => requestProject($))
     }
 
@@ -570,15 +655,19 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // A pane that is open but waits undrawn is not shown: asking for it again places it.
+  // A pane that is placed and shown is closed. One that is open but not in front, a tab behind another or a pane that
+  // waits undrawn, is not closed: the person asks for it, so it is asked for again, which places a pane that waits, and
+  // with `focus`, which brings a tab forward (a request, which the surface may refuse).
   on('command.run', { command: 'session-panel' }, async $ => {
-    if ((await $.ui.panes()).some(pane => pane.id === PANE && pane.isPlaced)) {
+    const pane = (await $.ui.panes()).find(listed => listed.id === PANE)
+    if (pane?.isPlaced === true && pane.isShown) {
       await $.ui.close({ id: PANE })
 
       return { text: 'Session pane closed.' }
     }
-    const opened = await $.ui.open({ id: PANE, title: 'Session' })
-    // As on an attach: a pane that opens asks for a read of the project, since the timer asks only while it is shown.
+    const focus = pane === undefined ? {} : { focus: true as const }
+    const opened = await $.ui.open({ id: PANE, title: 'Session', ...focus })
+    // As on an attach: a pane that opens asks for a read of the project, since the timer asks only for a pane in front.
     inBackground($, () => requestProject($))
 
     return { text: opened.isPlaced ? 'Session pane opened.' : `Session pane is not shown: ${opened.reason}` }

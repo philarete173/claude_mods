@@ -523,7 +523,7 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
     // its request of 0.7 s.
     for (const text of [
       'Response', '~120 tok/s', 'Whole turn', 'Elapsed', '33.5s', 'Model time', '1.7s', 'Tool time', '0.3s',
-      'Average TTFT', 'Steps', 'Tokens', '100k ↑ · 777 ↓', 'Cache', '99%', 'Cost', '$0.005',
+      'Average TTFT', 'Steps', 'Tokens', '912 ↑ · 777 ↓', 'Cache', '99%', 'Cost', '$0.005',
     ]) {
       expect(await ui.find({ type: 'Text', text }), `${surface}: ${text}`).toBeDefined()
     }
@@ -819,7 +819,7 @@ test('a turn of one tool step hides Response and Steps; the cache is green from 
     expect(await has(ui, /^Session \$/), surface).toBe(false)
     // The summary falls back to the whole turn: ~20 tok/s is in the header and in its row.
     expect(await ui.findAll({ type: 'Text', text: '~20 tok/s' }), surface).toHaveLength(2)
-    expect(await ui.find({ type: 'Text', text: '1k ↑ · 20 ↓' }), surface).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '900 ↑ · 20 ↓' }), surface).toBeDefined()
     // The log has the person's prompt only: the desktop's column of `who` is its own width, the terminal's is as wide
     // as `you`. The line reports no action, so the row has no column of outcome: its three cells.
     expect(logColumns(await ui.drawn()), surface).toEqual([

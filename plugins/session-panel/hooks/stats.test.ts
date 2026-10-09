@@ -85,7 +85,7 @@ test('computeTurnStats: the fixture of the brief', () => {
   expectNear(s.wholeTurnRate, 61.18, 0.005)
   // The last step: 477 tokens over its whole request, 6000 to 13700 ms: 477 / 7.7.
   expectNear(s.responseRate, 61.95, 0.005)
-  expect(s.tokensIn).toBe(99912) // all the input: 12 not cached, 99000 read from the cache, 900 written to it
+  expect(s.tokensIn).toBe(912) // 12 not cached and 900 written to the cache; the 99000 read from it are left out
   expect(s.tokensOut).toBe(777)
   expectNear(s.cachePct, 99.09, 0.005)
   expectNear(s.costUsd, 0.005)
@@ -148,20 +148,23 @@ test('computeTurnStats: without turn usage the step usages are summed', () => {
     ],
   }
   const s = computeTurnStats(acc, 33500, undefined, 5.005)
-  expect(s.tokensIn).toBe(400) // 100 not cached and 300 read from the cache
+  expect(s.tokensIn).toBe(100) // 100 not cached; the 300 read from the cache are left out
   expect(s.tokensOut).toBe(777)
-  expect(s.cachePct).toBe(75)
+  expect(s.cachePct).toBe(75) // but the share counts them: 300 of 400
 })
 
-test('computeTurnStats: Tokens in is all the input the turn sent, and the cache share is of that same input', () => {
+test('computeTurnStats: Tokens in is the input at full price or more, the cache share is of all of it', () => {
   const cases: Array<[usage: Usage, tokensIn: number, cachePct: number | null]> = [
-    [{ input_tokens: 5, cache_read_input_tokens: 100, cache_creation_input_tokens: 20, output_tokens: 7 }, 125, 80],
+    // What was read from the cache is left out of the figure and is in the share: 100 of 125.
+    [{ input_tokens: 5, cache_read_input_tokens: 100, cache_creation_input_tokens: 20, output_tokens: 7 }, 25, 80],
     // Each part alone, and a part that is missing counts 0.
     [{ input_tokens: 40 }, 40, 0],
-    [{ cache_read_input_tokens: 40 }, 40, 100],
+    [{ cache_read_input_tokens: 40 }, 0, 100],
     [{ cache_creation_input_tokens: 40 }, 40, 0],
     // The turn after a pause: the cache has expired, and the whole context is written to it. The cost is in the number.
     [{ input_tokens: 3, cache_creation_input_tokens: 182_000, output_tokens: 900 }, 182_003, 0],
+    // A turn that mostly reads the cache: the figure stays small, as the cost does, and the share is high.
+    [{ input_tokens: 10, cache_read_input_tokens: 980, cache_creation_input_tokens: 10 }, 20, 98],
     [{ output_tokens: 9 }, 0, null],
   ]
   for (const [usage, tokensIn, cachePct] of cases) {
@@ -237,8 +240,9 @@ test('shorten', () => {
   expect(shorten('abcde', 5)).toBe('abcde')
 })
 
-// U+202E (right-to-left override) and the other format characters (category Cf) draw nothing, but they reorder or join
-// what is around them: they are taken out.
+// U+202E (right-to-left override) and the other format characters (category Cf) draw nothing, but they reorder or hide
+// what is around them: they are taken out. The two joiners are format characters too: they stay between two non-ASCII
+// characters that are no spaces, and go beside an ASCII character or a space (ZWJ, ZWNJ).
 const FORMAT_CHARS: Array<[name: string, char: string]> = [
   ['U+202E, the right-to-left override', '\u202E'],
   ['U+202D, the left-to-right override', '\u202D'],
@@ -247,10 +251,30 @@ const FORMAT_CHARS: Array<[name: string, char: string]> = [
   ['U+2069, the pop of an isolate', '\u2069'],
   ['U+200E, the left-to-right mark', '\u200E'],
   ['U+200B, the zero-width space', '\u200B'],
-  ['U+200D, the zero-width joiner', '\u200D'],
   ['U+FEFF, the byte order mark', '\uFEFF'],
   ['U+00AD, the soft hyphen', '\u00AD'],
 ]
+
+// The zero-width joiner (U+200D) holds an emoji sequence together, and the non-joiner (U+200C) belongs to the spelling
+// of Persian and of Indic scripts: between two non-ASCII characters that are no spaces they reorder and hide nothing,
+// so they stay. Spelled as escapes, so that this file shows what it says.
+const ZWJ = '\u200D'
+const ZWNJ = '\u200C'
+const JOINERS: Array<[name: string, joiner: string]> = [['ZWJ', ZWJ], ['ZWNJ', ZWNJ]]
+const ROCKET = '\u{1F680}'
+// Spaces above U+007F, each one of `\s` as the ASCII space is: the patterns of redact take them for spaces too.
+const NBSP = '\u00A0'
+const EM_SPACE = '\u2003'
+const SPACES: Array<[name: string, space: string]> = [
+  ['U+00A0, the no-break space', NBSP],
+  ['U+2003, the em space', EM_SPACE],
+  ['U+202F, the narrow no-break space', '\u202F'],
+  ['U+3000, the ideographic space', '\u3000'],
+  ['U+2028, the line separator', '\u2028'],
+]
+const FAMILY = `\u{1F468}${ZWJ}\u{1F469}${ZWJ}\u{1F467}` // man, woman and girl joined: one emoji, a family
+const RAINBOW_FLAG = `\u{1F3F3}\uFE0F${ZWJ}\u{1F308}` // a white flag, a variation selector, a joiner and a rainbow
+const PERSIAN = `\u0645\u06CC${ZWNJ}\u062E\u0648\u0627\u0647\u0645` // "mi khaham", I want: two words, joined by a ZWNJ
 
 test('stripFormat takes out the characters of category Cf, and leaves everything else as it was', () => {
   for (const [name, char] of FORMAT_CHARS) expect(stripFormat(`a${char}b${char}${char}c`), name).toBe('abc')
@@ -258,6 +282,95 @@ test('stripFormat takes out the characters of category Cf, and leaves everything
   const kept = 'main ветка é 日本語 🚀 a\u00A0b\tc\nd'
   expect(stripFormat(kept)).toBe(kept)
   expect(stripFormat('')).toBe('')
+})
+
+test('stripFormat keeps a joiner between two non-ASCII characters: an emoji sequence, a Persian word', () => {
+  expect(stripFormat(FAMILY)).toBe(FAMILY)
+  expect(stripFormat(`${FAMILY} sleep 30`)).toBe(`${FAMILY} sleep 30`)
+  expect(stripFormat(`run ${FAMILY}`)).toBe(`run ${FAMILY}`)
+  expect(stripFormat(RAINBOW_FLAG)).toBe(RAINBOW_FLAG) // the variation selector before the joiner is no ASCII character
+  expect(stripFormat(PERSIAN)).toBe(PERSIAN)
+  // Either joiner stays between two characters of any kind above U+007F: accents, letters, Indic letters, emoji, and
+  // U+0080, the first code point above it.
+  const pairs = [['é', 'é'], ['ж', 'я'], ['\u0915', '\u0937'], [ROCKET, ROCKET], ['\u0080', '\u0080']] as const
+  for (const [name, joiner] of JOINERS) {
+    for (const [left, right] of pairs) {
+      expect(stripFormat(`${left}${joiner}${right}`), name).toBe(`${left}${joiner}${right}`)
+    }
+    // A space further off is no neighbour: the joiner between two letters stays whatever surrounds the pair.
+    expect(stripFormat(`${NBSP}é${joiner}é${NBSP} ${EM_SPACE}`), name).toBe(`${NBSP}é${joiner}é${NBSP} ${EM_SPACE}`)
+  }
+  // The rest of Cf goes from beside them, as from any text: the joiners are the only ones that stay.
+  expect(stripFormat(`\u202E${FAMILY}\u200B${PERSIAN}\uFEFF`)).toBe(`${FAMILY}${PERSIAN}`)
+  for (const [name, char] of FORMAT_CHARS) expect(stripFormat(`é${ZWJ}${char}${ZWNJ}é`), name).toBe(`é${ZWJ}${ZWNJ}é`)
+})
+
+test('stripFormat takes a joiner out when an ASCII character, or an end of the text, is beside it', () => {
+  for (const [name, joiner] of JOINERS) {
+    // In a branch or a folder name the joiner draws nothing, and it would hide a character: the name reads as it is.
+    expect(stripFormat(`ma${joiner}in`), name).toBe('main')
+    expect(stripFormat(`a${joiner}b${joiner}${joiner}c`), name).toBe('abc')
+    // Beside an emoji it joins nothing either: an ASCII character is no part of an emoji sequence.
+    expect(stripFormat(`a${joiner}${ROCKET}`), name).toBe(`a${ROCKET}`)
+    expect(stripFormat(`${ROCKET}${joiner}a`), name).toBe(`${ROCKET}a`)
+    // An ASCII character on one side is enough, whichever side it is.
+    expect(stripFormat(`é${joiner}a`), name).toBe('éa')
+    expect(stripFormat(`a${joiner}é`), name).toBe('aé')
+    // A space, a tab and a line break are ASCII too, and so is U+007F, the last code point of ASCII.
+    expect(stripFormat(`é${joiner}\u007F`), name).toBe('é\u007F')
+    expect(stripFormat(`é${joiner} é`), name).toBe('é é')
+    expect(stripFormat(`é ${joiner}é`), name).toBe('é é')
+    expect(stripFormat(`é\t${joiner}é`), name).toBe('é\té')
+    expect(stripFormat(`é${joiner}\né`), name).toBe('é\né')
+    // A space above U+007F is a space as well: it takes the joiner with it from either side, and from both.
+    for (const [spaceName, space] of SPACES) {
+      expect(stripFormat(`é${joiner}${space}`), `${name}, ${spaceName}`).toBe(`é${space}`)
+      expect(stripFormat(`${space}${joiner}é`), `${name}, ${spaceName}`).toBe(`${space}é`)
+      expect(stripFormat(`${space}${joiner}${space}`), `${name}, ${spaceName}`).toBe(`${space}${space}`)
+    }
+    // No character on a side, or on either: nothing to join.
+    expect(stripFormat(`${joiner}é`), name).toBe('é')
+    expect(stripFormat(`é${joiner}`), name).toBe('é')
+    expect(stripFormat(`${FAMILY}${joiner}`), name).toBe(FAMILY)
+    expect(stripFormat(joiner), name).toBe('')
+    expect(stripFormat(`${joiner}${joiner}`), name).toBe('')
+  }
+})
+
+test('stripFormat judges a joiner by the neighbours that remain, and a run of joiners as a whole', () => {
+  // The rest of Cf goes first: a character of it beside a joiner does not count as a neighbour that keeps the joiner.
+  for (const [name, char] of FORMAT_CHARS) {
+    expect(stripFormat(`a${char}${ZWJ}${char}b`), name).toBe('ab')
+    expect(stripFormat(`a${char}${ZWNJ}é`), name).toBe('aé')
+    expect(stripFormat(`é${char}${ZWJ}${char}é`), name).toBe(`é${ZWJ}é`)
+  }
+  // A run stays whole or goes whole: its joiners are no neighbours to one another.
+  expect(stripFormat(`a${ZWJ}${ZWNJ}${ZWJ}é`)).toBe('aé')
+  expect(stripFormat(`é${ZWJ}${ZWNJ}${ZWJ}a`)).toBe('éa')
+  expect(stripFormat(`é${ZWJ}${ZWNJ}é`)).toBe(`é${ZWJ}${ZWNJ}é`)
+  expect(stripFormat(`é${ZWJ.repeat(3)}é`)).toBe(`é${ZWJ.repeat(3)}é`)
+  expect(stripFormat(`a${ZWJ.repeat(3)}b é${ZWNJ.repeat(2)}é a${ZWNJ.repeat(2)}é`)).toBe(`ab é${ZWNJ.repeat(2)}é aé`)
+})
+
+// redact and shorten run over whole prompts: a run of joiners must cost one pass, not one pass from each joiner.
+test('stripFormat reads a long run of joiners once: 40,000 of them take a few milliseconds, not seconds', () => {
+  const run = ZWJ.repeat(40_000)
+  const started = performance.now()
+  expect(stripFormat(`é${run}é`)).toBe(`é${run}é`)
+  expect(stripFormat(`é${run}a`)).toBe('éa')
+  expect(performance.now() - started).toBeLessThan(500) // a lookbehind and lookahead pair takes about two seconds
+})
+
+test('shorten and redact keep the joiners of an emoji sequence and of a Persian word, as stripFormat does', () => {
+  for (const text of [FAMILY, PERSIAN]) {
+    expect(shorten(text, 20), text).toBe(text)
+    expect(redact(text), text).toBe(text)
+  }
+  expect(shorten(`\u202E${FAMILY} ${PERSIAN}\u200B`, 20)).toBe(`${FAMILY} ${PERSIAN}`)
+  expect(redact(`\uFEFF${FAMILY} token=hunter22secret`)).toBe(`${FAMILY} token=•••`)
+  // Beside an ASCII character a joiner goes from what shorten shows and from what redact returns.
+  expect(shorten(`ma${ZWJ}in`, 20)).toBe('main')
+  expect(redact(`ma${ZWNJ}in`)).toBe('main')
 })
 
 test('shorten takes the format characters out before it cuts', () => {
@@ -280,12 +393,37 @@ test('redact takes the format characters out first: one inside a secret does not
   expect(redact('plain text')).toBe('plain text')
 })
 
+test('redact masks a secret that has a joiner inside it: beside an ASCII character the joiner goes first', () => {
+  for (const [name, joiner] of JOINERS) {
+    expect(redact(`ghp_abc${joiner}defgh12345678`), name).toBe('•••')
+    expect(shorten(redact(`echo ghp_abc${joiner}defgh12345678`), 64), name).toBe('echo •••')
+    expect(redact(`key sk-abcd${joiner}efgh1234 end`), name).toBe('key ••• end')
+    expect(redact(`token${joiner}=hunter22secret`), name).toBe('token=•••')
+    expect(redact(`Bearer abc${joiner}defghijk`), name).toBe('Bearer •••')
+    // A joiner with the rest of Cf beside it, and a joiner at the very start of a secret.
+    expect(redact(`ghp_abc\u200B${joiner}\u200Bdefgh12345678`), name).toBe('•••')
+    expect(redact(`é${joiner}ghp_abcdefgh12345678`), name).toBe('é•••')
+    // Between a key and its value there is `\s*`, a space of any kind: a joiner between two spaces above U+007F goes,
+    // and the value is masked as it is without the joiner (at 0.3.0 it was; the joiner once stood in the way).
+    expect(redact(`token=${NBSP}${joiner}${NBSP}hunter22secret`), name).toBe(`token=${NBSP}${NBSP}•••`)
+    expect(redact(`Authorization:${EM_SPACE}${joiner}${EM_SPACE}abcdef123456`), name)
+      .toBe(`Authorization:${EM_SPACE}${EM_SPACE}•••`)
+    expect(redact(`Bearer${NBSP}${joiner}${NBSP}abcdefgh12345678`), name).toBe('Bearer •••')
+    // A joiner that stays, between two non-ASCII characters, is no gap: the open part of a pattern matches through it.
+    expect(redact(`password=é${joiner}é`), name).toBe('password=•••')
+    expect(redact(`https://user:pé${joiner}ss@host`), name).toBe('https://user:•••@host')
+  }
+})
+
 test('plainText takes the `**` of a pair, backticks and the `#` marks of a heading at a line start out', () => {
   const cases: Array<[markdown: string, plain: string]> = [
     ['**Verdict:** ok', 'Verdict: ok'],
     ['**One** and **two**', 'One and two'],
     ['a **b** c', 'a b c'],
     ['**1** failed and **2** passed', '1 failed and 2 passed'], // a body of one character closes at its own `**`
+    ['(**note**)', '(note)'], // a bracket, a comma or a stop beside the pair is no letter or digit
+    ['**Note**, **this**.', 'Note, this.'],
+    ['**bold** and 2**10 and **again**', 'bold and 2**10 and again'], // the pair goes, the exponent stays
     ['**bold with spaces inside**', 'bold with spaces inside'], // the spaces inside stay: only the pair goes
     ['`a`', 'a'],
     ['run `git status` now', 'run git status now'],
@@ -300,12 +438,16 @@ test('plainText takes the `**` of a pair, backticks and the `#` marks of a headi
   for (const [markdown, plain] of cases) expect(plainText(markdown), JSON.stringify(markdown)).toBe(plain)
 })
 
-test('plainText leaves `__`, a `**` with no pair or a space beside it, and a `#` that is no heading, alone', () => {
+test('plainText leaves `__`, a `**` with no pair, a space or a word beside it, and a `#` that is no heading', () => {
   const kept = [
     // Never `__`: a dunder is a name, not bold.
     '__init__.py', '__Verdict:__ ok', 'def __init__(self): pass', 'snake__case',
     // A `**` that stands alone or has a space beside it is an exponent, not bold.
     'x ** 2', '2**10', 'a ** b ** c', '2 ** 10 and 3 ** 4', '**', '****', '** spaced **', '**bold **', '** bold**',
+    // Two exponents are a pair of `**` with text between them, but a digit or a letter touches each on the outside.
+    '2**10 and 3**4', 'x**2 and y**3', 'π**2 and e**x', '2**n and 2**(n+1)',
+    // A pair that a letter or a digit touches on either side is no pair: the `**` is inside a word.
+    '**a**b', 'a**b**', 'x**y**z', '**1**2',
     // A pair has to be on one line.
     '**one\ntwo**',
     // A `#` that is no heading: no space after it, or not at the start of a line.

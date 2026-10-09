@@ -31,12 +31,17 @@ const PANE_UP: UiPane = { id: 'session-panel', title: 'Session', isShown: true, 
 // does not fetch from its remote; the call of rev-parse reads no object, so it carries none. The diff against HEAD
 // has a pair of its own after GIT_READ, which overrides the person's `diff.relative`: it would cut the counts to the
 // folder of the session. The status and that diff keep a submodule's work tree from being walked
-// (`--ignore-submodules=dirty`). A --no-index call has GIT_ATTR_SOURCE too: git's empty tree, so that no .gitattributes
-// selects a filter that would run on the new file. The branch is read with no GIT_READ and no options: it runs no
-// filters, so it is read before the tree is open (the first turn of the main agent opens it).
+// (`--ignore-submodules=dirty`). The first status has no `-u` flag, so that git follows the person's
+// `status.showUntrackedFiles`; one that lists an untracked folder brings a second status, with `-uall`. A --no-index
+// call has GIT_ATTR_SOURCE too: git's empty tree, so that no .gitattributes selects a filter that would run on the new
+// file. The timeout of each call that reads the changes is CHANGES_TIMEOUT_MS, or what is left of READ_BUDGET_MS,
+// counted from the start of the changes, when that is less. The branch is read with no GIT_READ and no options: it
+// runs no filters, so it is read before the tree is open (the first turn of the main agent opens it).
 const PROJECT_DELAY_MS = 1000
 const PROJECT_GAP_FACTOR = 4
 const READ_MS_MAX = 60_000 // the most that one read counts for in the gap rule, whatever the clock says it took
+const CHANGES_TIMEOUT_MS = 10_000 // the most that one git call that reads the changes may run
+const READ_BUDGET_MS = 30_000 // the most that the changes of one read may take in all, counted from the start of them
 const GIT_READ = [
   'git', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'diff.autoRefreshIndex=false',
 ]
@@ -45,8 +50,13 @@ const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 const NO_INDEX_ENV = { ...NO_LAZY_FETCH, GIT_ATTR_SOURCE: EMPTY_TREE }
 const BRANCH_RUN = { argv: ['git', 'branch', '--show-current'], init: { cwd: ROOT, timeoutMs: 5000 } }
 const STATUS_RUN = {
-  argv: [...GIT_READ, 'status', '--porcelain', '-z', '-uall', '--ignore-submodules=dirty'],
+  argv: [...GIT_READ, 'status', '--porcelain', '-z', '--ignore-submodules=dirty'],
   init: { cwd: ROOT, timeoutMs: 10_000, env: NO_LAZY_FETCH },
+}
+// The second status, which a first one that lists an untracked folder brings: the same, with `-uall`.
+const STATUS_ALL_RUN = {
+  argv: [...GIT_READ, 'status', '--porcelain', '-z', '-uall', '--ignore-submodules=dirty'],
+  init: STATUS_RUN.init,
 }
 const DIFF_RUN = {
   argv: [
@@ -174,7 +184,42 @@ const SUSPENDER: Plugin = {
     })
   },
 }
+// A plugin above the mod's that settles a call while the tool still runs: for a Bash whose command says `interrupt` it
+// lets the chain run on, unawaited, and answers 100 ms later with an error of its own. The signal of the mod's hook
+// aborts then, 100 ms into the call and with the tool running, where ABANDONER's aborts as the call starts. The kit
+// cannot fire that signal by the person's interrupt (`$.turn.abort` cuts no running call in it), so a hook above that
+// settles first is the one cause it can give. Like any plugin of a test it closes over nothing of this file.
+const INTERRUPTER: Plugin = {
+  name: 'interrupter',
+  tier: 'prepend',
+  register(on) {
+    on('tool.call', async ($, e, next) => {
+      if (e.tool !== 'Bash' || !e.command.includes('interrupt')) return next(e)
+      next(e).catch(() => undefined)
+      await $.clock.sleep(100)
+
+      return { isError: true as const, result: 'cut', text: 'cut' }
+    })
+  },
+}
+// A plugin above the mod's whose clock reads a fraction of a ms more with every read, as a clock of a finer grain than
+// a ms does: the host takes a whole number of ms as a timeout, so what is left of a budget must be rounded. Like any
+// plugin of a test it closes over nothing of this file.
+const FRACTIONAL_CLOCK: Plugin = {
+  name: 'fractional-clock',
+  tier: 'prepend',
+  register(on) {
+    let drift = 0
+    on('clock.now', async (_$, e, next) => {
+      drift += 0.25
+
+      return { value: ((await next(e)) as { value: number }).value + drift }
+    })
+  },
+}
 const WITH_ABANDONER = { plugins: [READER, ABANDONER], timeoutMs: 30_000 }
+const WITH_INTERRUPTER = { plugins: [READER, INTERRUPTER], timeoutMs: 30_000 }
+const WITH_FRACTIONAL_CLOCK = { plugins: [READER, FRACTIONAL_CLOCK], timeoutMs: 30_000 }
 const WITH_STORE = { plugins: [READER, OTHER_SESSION], timeoutMs: 30_000 }
 const WITH_SUSPENDER = { plugins: [SUSPENDER] }
 const PANE_PROPS: RenderPropsOf['Pane'] = {
@@ -242,11 +287,15 @@ type World = {
   gitExit: number // when it is not 0, the exit of every git call
   gitThrows: boolean // git cannot be started
   statusThrows: boolean // `git status` alone cannot be run to its end (it times out): its call rejects
-  status: GitAnswer // `git status --porcelain -z -uall`; a clean tree prints nothing
+  statusAllThrows: boolean // the same for the status with `-uall` alone: the first status is answered
+  diffThrows: boolean // the same for `git diff` against HEAD alone
+  status: GitAnswer // `git status --porcelain -z`, the first one, with no `-u` flag; a clean tree prints nothing
+  statusAll: GitAnswer | undefined // the status with `-uall`, brought by a first one that lists a folder; else `status`
   diff: GitAnswer // `git diff --numstat HEAD`
   toplevel: GitAnswer // `git rev-parse --show-toplevel`
   noIndex: (path: string) => GitAnswer // `git diff --no-index` of a new file: exit 1, as git does when the files differ
   gitLag: number // how long each git call takes, in mock ms
+  lags: Record<string, number> // how long a kind of git call takes besides: `status`, `diff`, `rev-parse`, `no-index`
   gitInFlight: number
   maxGitInFlight: number
   rootLag: number // how long session.root() takes, in mock ms
@@ -278,14 +327,32 @@ type World = {
 const gitCommand = (argv: readonly string[]): string | undefined =>
   argv.slice(1).find((arg, i, all) => !arg.startsWith('-') && all[i - 1] !== '-c')
 
+// What kind of call a git call is: its command, and `no-index` for the diff of a new file.
+const gitKind = (argv: readonly string[]): string | undefined => {
+  const command = gitCommand(argv)
+
+  return command === 'diff' && argv.includes('--no-index') ? 'no-index' : command
+}
+
 // What git answers to a call, by the command it is: the short commit is the answer to any rev-parse but the top.
 const gitAnswer = (w: World, argv: readonly string[]): GitAnswer => {
   const command = gitCommand(argv)
   if (command === 'branch') return ok(w.branch)
-  if (command === 'status') return w.status
+  if (command === 'status') return argv.includes('-uall') ? (w.statusAll ?? w.status) : w.status
   if (command === 'diff') return argv.includes('--no-index') ? w.noIndex(argv.at(-1) ?? '') : w.diff
 
   return argv.includes('--show-toplevel') ? w.toplevel : ok('abc1234\n')
+}
+
+// Whether a git call cannot be run to its end, as the flags of the world say: its call rejects.
+const doesGitThrow = (w: World, argv: readonly string[]): boolean => {
+  const kind = gitKind(argv)
+  const isAll = argv.includes('-uall')
+
+  return (
+    w.gitThrows || (kind === 'status' && (w.statusThrows || (isAll && w.statusAllThrows))) ||
+    (kind === 'diff' && w.diffThrows)
+  )
 }
 
 // The bottom of every chain: what the engine itself would answer, and what it was asked. With `isStoreBreakable` the
@@ -303,11 +370,15 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     gitExit: 0,
     gitThrows: false,
     statusThrows: false,
+    statusAllThrows: false,
+    diffThrows: false,
     status: ok(''),
+    statusAll: undefined,
     diff: ok(''),
     toplevel: ok('/repo\n'),
     noIndex: path => ({ exitCode: 1, stdout: `1\t0\t/dev/null => ${path}\n` }),
     gitLag: 0,
+    lags: {},
     gitInFlight: 0,
     maxGitInFlight: 0,
     rootLag: 0,
@@ -444,9 +515,11 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     w.runs.push({ argv: e.argv, init: e.init })
     w.gitInFlight += 1
     w.maxGitInFlight = Math.max(w.maxGitInFlight, w.gitInFlight)
-    if (w.gitLag > 0) await clock.sleep(w.gitLag)
+    const kind = gitKind(e.argv)
+    const lag = w.gitLag + (kind === undefined ? 0 : (w.lags[kind] ?? 0))
+    if (lag > 0) await clock.sleep(lag)
     w.gitInFlight -= 1
-    if (w.gitThrows || (w.statusThrows && gitCommand(e.argv) === 'status')) throw new Error('spawn git ENOENT')
+    if (doesGitThrow(w, e.argv)) throw new Error('spawn git ENOENT')
     const answer = gitAnswer(w, e.argv)
 
     return {
@@ -815,27 +888,71 @@ test('a press made while the map of the store is loaded at the start-up survives
     await ui.unmount()
   })
 
-test('the command opens the pane, closes it when it is shown, and says why when it is not placed', async ($, on) => {
-  const w = bottom(on, mock.clock(on))
-  const run = async (): Promise<string | undefined> => (await $.command.run({ ...RUN, command: 'session-panel' })).text
+test('the command opens the pane, closes it when it is placed and shown, and says why when it is not placed',
+  async ($, on) => {
+    const w = bottom(on, mock.clock(on))
+    const run = async (): Promise<string | undefined> =>
+      (await $.command.run({ ...RUN, command: 'session-panel' })).text
 
-  expect(await run()).toBe('Session pane opened.')
-  expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session' }])
-  w.panes = [PANE_UP]
-  expect(await run()).toBe('Session pane closed.')
-  expect(w.closed).toEqual(['session-panel'])
+    // The pane is not open, or another one is: it is opened, with no `focus`.
+    expect(await run()).toBe('Session pane opened.')
+    expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session' }])
+    w.panes = [{ ...PANE_UP, id: 'other' }]
+    expect(await run()).toBe('Session pane opened.')
+    expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session' }, { id: 'session-panel', title: 'Session' }])
+    // It is placed and shown: it is closed.
+    w.panes = [PANE_UP]
+    expect(await run()).toBe('Session pane closed.')
+    expect(w.closed).toEqual(['session-panel'])
+    expect(w.opened).toHaveLength(2)
 
-  // A pane that is open but waits undrawn is not shown: the person asks for it, so it is asked for again.
-  w.panes = [{ ...PANE_UP, isPlaced: false }]
-  w.opened.length = 0
-  expect(await run()).toBe('Session pane opened.')
-  expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session' }])
-  expect(w.closed).toEqual(['session-panel'])
+    // A pane that is open but waits undrawn is not shown: the person asks for it, so it is asked for again, with
+    // `focus`. Such a pane lists as not shown; one that listed as shown while it waited would be no different.
+    for (const waiting of [{ ...PANE_UP, isPlaced: false }, { ...PANE_UP, isPlaced: false, isShown: false }]) {
+      w.panes = [waiting]
+      w.opened.length = 0
+      expect(await run()).toBe('Session pane opened.')
+      expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session', focus: true }])
+      expect(w.closed).toEqual(['session-panel']) // none closed again
+    }
 
-  w.panes = []
-  w.placed = { isPlaced: false, reason: 'the terminal is too narrow' }
-  expect(await run()).toBe('Session pane is not shown: the terminal is too narrow')
-})
+    w.panes = []
+    w.placed = { isPlaced: false, reason: 'the terminal is too narrow' }
+    expect(await run()).toBe('Session pane is not shown: the terminal is too narrow')
+  })
+
+// A pane that is placed but is a tab behind another one is not in front: the command does not close it, it brings it
+// forward, which asks for the pane again with `focus`; as for any pane that opens, it asks for a read of the project.
+test('the command on a pane that is a tab behind another opens it with focus, does not close it, and asks for a read',
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.panes = [{ ...PANE_UP, isShown: false }]
+
+    const ran = await $.command.run({ ...RUN, command: 'session-panel' })
+
+    expect(ran.text).toBe('Session pane opened.')
+    expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session', focus: true }])
+    expect(w.closed).toEqual([])
+    expect(reads(w)).toBe(0) // the hook asks and returns
+    await clock.advance(1)
+    expect(reads(w)).toBe(1)
+  })
+
+test('the command on a pane that is placed and shown closes it, with another pane open beside it, and asks for no read',
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.panes = [{ ...PANE_UP, id: 'other', isShown: false }, PANE_UP]
+
+    const ran = await $.command.run({ ...RUN, command: 'session-panel' })
+
+    expect(ran.text).toBe('Session pane closed.')
+    expect(w.closed).toEqual(['session-panel'])
+    expect(w.opened).toEqual([])
+    await clock.advance(5 * PROJECT_DELAY_MS)
+    expect(reads(w)).toBe(0)
+  })
 
 // The timer asks for a read of the project only while the pane is shown, so a pane that opens asks for one itself; one
 // that closes asks for none.
@@ -1052,7 +1169,8 @@ test('the project has the changes: a modified file and a new file, counted by th
     expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, DIFF_RUN, TOPLEVEL_RUN, noIndexRun('n.ts', '/repo')])
   })
 
-// The argv and the environment of every call, spelled out: a mistake in the shared constants above is caught here.
+// The argv and the environment of every call, spelled out: a mistake in the shared constants above is caught here. The
+// status has no `-u` flag: this one lists no untracked folder, so no second status follows.
 test('the status and the diff against HEAD ignore dirty submodules; each --no-index call has the empty tree as the '
   + 'source of attributes', WITH_READER, async ($, on) => {
   const clock = mock.clock(on)
@@ -1066,7 +1184,7 @@ test('the status and the diff against HEAD ignore dirty submodules; each --no-in
   const prefix = ['git', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'diff.autoRefreshIndex=false']
   expect(w.runs.map(run => run.argv)).toEqual([
     ['git', 'branch', '--show-current'],
-    [...prefix, 'status', '--porcelain', '-z', '-uall', '--ignore-submodules=dirty'],
+    [...prefix, 'status', '--porcelain', '-z', '--ignore-submodules=dirty'],
     [
       ...prefix, '-c', 'diff.relative=false', 'diff', '--numstat', '--no-textconv', '--no-ext-diff',
       '--ignore-submodules=dirty', 'HEAD', '--',
@@ -1301,6 +1419,8 @@ test('a new file that is empty, gone or counted by an exit of 0 is no failure: e
     expect(countedPaths(w)).toHaveLength(5) // each one was tried
   })
 
+// git lists a nested repository as a folder whatever the status is asked for, so the first status brings the second,
+// and that one lists it the same.
 test('a nested repository is a changed file with no lines: no git call counts it', WITH_READER, async ($, on) => {
   const clock = mock.clock(on)
   const w = bottom(on, clock)
@@ -1311,11 +1431,14 @@ test('a nested repository is a changed file with no lines: no git call counts it
   await openTree($, clock, w)
 
   expect((await readState($)).project.changes).toEqual({ files: 1, lines: { added: 0, removed: 0 } })
-  expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, DIFF_RUN])
+  expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, STATUS_ALL_RUN, DIFF_RUN])
 })
 
-// The calls of git that read the tree, by the command they run.
+// The calls of git that read the tree, by the command they run: the statuses, and the diffs against HEAD.
 const statusRuns = (w: World): number => w.runs.filter(run => gitCommand(run.argv) === 'status').length
+const diffRuns = (w: World): number => w.runs.filter(run => gitKind(run.argv) === 'diff').length
+// The timeout that a git call was run with.
+const timeoutOf = (run: World['runs'][number]): unknown => (run.init as { timeoutMs?: number }).timeoutMs
 
 // A read of the project asked for by a change of the folder, over by the time the clock has moved on 1 ms.
 const askRead = async ($: Engine, clock: MockClock): Promise<void> => {
@@ -1323,8 +1446,9 @@ const askRead = async ($: Engine, clock: MockClock): Promise<void> => {
   await clock.advance(1)
 }
 
-// Two `git status` calls in a row that throw, for one root, stop the reads of its changes: a huge tree (a dotfiles
-// repository in $HOME) would spend the whole timeout on each read. The branch is still read.
+// Two reads in a row, for one root, that had a status that threw stop the reads of its changes: a huge tree (a dotfiles
+// repository in $HOME) would spend the whole timeout on each read. The branch is still read. A diff against HEAD that
+// throws counts as a status that does (see below), and the count is each root's own.
 test('two status calls in a row that throw stop the changes reads for that root, for as long as the module lives',
   WITH_READER, async ($, on) => {
     const clock = mock.clock(on)
@@ -1410,7 +1534,7 @@ test('a status that exits with an error is no throw: outside a repository the re
     expect((await readState($)).project.changes).toEqual({ files: 1, lines: { added: 3, removed: 1 } })
   })
 
-test('the reads of another root go on, and the root that was stopped reads again once another has been read',
+test('the reads of another root go on, and the root that was stopped stays stopped when another has been read',
   WITH_READER, async ($, on) => {
     const clock = mock.clock(on)
     const w = bottom(on, clock)
@@ -1437,33 +1561,381 @@ test('the reads of another root go on, and the root that was stopped reads again
       name: 'other_repo', branch: 'master', changes: { files: 1, lines: { added: 3, removed: 1 } },
     })
 
-    // Back to the first one: the read of the other has cleared the count, so the status runs again.
+    // Back to the first one: the read of the other has not cleared its count, so it is stopped still.
     w.root = ROOT
     w.runs.length = 0
     await askRead($, clock)
-    expect(statusRuns(w)).toBe(1)
-    expect((await readState($)).project).toEqual({
-      name: 'online_shop', branch: 'master', changes: { files: 1, lines: { added: 3, removed: 1 } },
-    })
+    expect(w.runs).toEqual([BRANCH_RUN])
+    expect((await readState($)).project).toEqual({ name: 'online_shop', branch: 'master', changes: null })
   })
 
-test('throws for two roots in a row are no two for one root: the count is that of one root', WITH_READER,
+test('two roots read in turn keep their own counts: each is stopped by its own two throws, and not before', WITH_READER,
   async ($, on) => {
     const clock = mock.clock(on)
     const w = bottom(on, clock)
     await $.session.start(START)
     await clock.advance(1)
     w.statusThrows = true
-    await openTree($, clock, w) // ROOT: a throw
+    await openTree($, clock, w) // ROOT: its first throw
     w.root = '/work/other_repo'
-    await askRead($, clock) // another root: a throw, for it the first
+    await askRead($, clock) // another root: its first throw, and no reset of the count of ROOT
     w.root = ROOT
-    await askRead($, clock) // ROOT again: the first throw in a row for it
+    await askRead($, clock) // ROOT again: its second throw, which stops it, though the read before was another root's
     expect(statusRuns(w)).toBe(3)
-    await askRead($, clock) // the second in a row: the last that runs
+    await askRead($, clock) // ROOT is stopped: no status
+    expect(statusRuns(w)).toBe(3)
+    w.root = '/work/other_repo'
+    await askRead($, clock) // the other root has thrown once: its second throw runs, and stops it
     expect(statusRuns(w)).toBe(4)
     await askRead($, clock)
     expect(statusRuns(w)).toBe(4)
+    w.root = ROOT
+    await askRead($, clock)
+    expect(statusRuns(w)).toBe(4) // both stopped
+    expect(reads(w)).toBe(7) // the branch is read all the same, for every read that was asked for
+  })
+
+// The status follows the person's `status.showUntrackedFiles`. The first one has no `-u` flag: `no` walks no untracked
+// file and lists none, `normal` lists an untracked folder as one entry. Only a folder in that output brings a second
+// status, with `-uall`, and the output of that one is the one used.
+test('the first status has no -u flag, and no second status runs when it lists no untracked folder', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0?? n.ts\0?? dir/o.ts\0') // a file in a folder is listed by its path: it is no folder entry
+    w.diff = ok('3\t1\ta.ts\n')
+    await $.session.start(START)
+    await clock.advance(1)
+    await openTree($, clock, w)
+
+    const statuses = w.runs.filter(run => gitKind(run.argv) === 'status')
+    expect(statuses.map(run => run.argv)).toEqual([STATUS_RUN.argv])
+    expect(statuses.some(run => run.argv.some(arg => arg.startsWith('-u')))).toBe(false)
+    expect(w.runs).toEqual([
+      BRANCH_RUN, STATUS_RUN, DIFF_RUN, TOPLEVEL_RUN, noIndexRun('n.ts', '/repo'), noIndexRun('dir/o.ts', '/repo'),
+    ])
+    expect((await readState($)).project.changes).toEqual({ files: 3, lines: { added: 5, removed: 1 } })
+  })
+
+test('an untracked folder in the first output brings a second status with -uall, whose counts are used', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0?? dir/\0') // as `normal` lists it: the folder is one entry
+    w.statusAll = ok(' M a.ts\0?? dir/x.ts\0?? dir/y.ts\0') // as `-uall` lists it: the files in it
+    w.diff = ok('3\t1\ta.ts\n')
+    w.noIndex = path => ({ exitCode: 1, stdout: `4\t0\t/dev/null => ${path}\n` })
+    await $.session.start(START)
+    await clock.advance(1)
+    await openTree($, clock, w)
+
+    expect(w.runs).toEqual([
+      BRANCH_RUN, STATUS_RUN, STATUS_ALL_RUN, DIFF_RUN, TOPLEVEL_RUN,
+      noIndexRun('dir/x.ts', '/repo'), noIndexRun('dir/y.ts', '/repo'),
+    ])
+    // The files and the new files are those of the second status: the folder was one entry in the first.
+    expect((await readState($)).project.changes).toEqual({ files: 3, lines: { added: 11, removed: 1 } })
+  })
+
+test('with only tracked changes listed, as `status.showUntrackedFiles` `no` leaves them, no untracked file is counted',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0 M b.ts\0')
+    w.diff = ok('3\t1\ta.ts\n')
+    await $.session.start(START)
+    await clock.advance(1)
+    await openTree($, clock, w)
+
+    // No second status, no top of the repository, no new file: nothing in the tree is walked for an untracked file.
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, DIFF_RUN])
+    expect((await readState($)).project.changes).toEqual({ files: 2, lines: { added: 3, removed: 1 } })
+  })
+
+// What a second status may end in: an error is a failure of the status, so the read has no changes and no diff; a cut
+// output is a cut status, and it is the one used.
+const SECOND_STATUSES: Array<[what: string, answer: GitAnswer, changes: Record<string, unknown> | null]> = [
+  ['exits with an error', { exitCode: 128, stdout: ' M a.ts\0' }, null],
+  [
+    'is cut', { exitCode: 0, stdout: ' M a.ts\0?? dir/x.ts\0?? dir/y', isStdoutTruncated: true },
+    { files: 2, hasMoreFiles: true, lines: null },
+  ],
+]
+for (const [what, answer, changes] of SECOND_STATUSES) {
+  const gives = changes === null ? 'no changes' : 'a lower bound'
+  test(`a second status that ${what} is the status of the read: ${gives}, and no diff`,
+    WITH_READER, async ($, on) => {
+      const clock = mock.clock(on)
+      const w = bottom(on, clock)
+      w.status = ok(' M a.ts\0?? dir/\0')
+      w.statusAll = answer
+      await $.session.start(START)
+      await clock.advance(1)
+      await openTree($, clock, w)
+
+      expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, STATUS_ALL_RUN])
+      expect((await readState($)).project.changes).toEqual(changes)
+    })
+}
+
+test('a second status that throws counts for the stop as a first one does: two such reads in a row stop the root',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0?? dir/\0')
+    w.statusAllThrows = true
+    await $.session.start(START)
+    await clock.advance(1)
+    await openTree($, clock, w)
+    expect(statusRuns(w)).toBe(2) // the first is answered, and the second throws
+    expect((await readState($)).project.changes).toBeNull()
+    await askRead($, clock)
+    expect(statusRuns(w)).toBe(4)
+
+    w.statusAllThrows = false
+    w.runs.length = 0
+    await askRead($, clock) // the root is stopped: the branch alone
+    expect(w.runs).toEqual([BRANCH_RUN])
+  })
+
+// A diff against HEAD that throws counts as a status that does, and the count is of reads: a status that is fine does
+// not clear a diff that keeps timing out, so two such reads in a row stop the root, as two throws of the status do.
+test('two reads in a row whose diff against HEAD throws stop the reads of that root, though each status is fine',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0')
+    await $.session.start(START)
+    await clock.advance(1)
+    w.diffThrows = true // the diff times out, as in a tree that git cannot compare with HEAD in 10 s
+    await openTree($, clock, w)
+    expect(diffRuns(w)).toBe(1)
+    // The file is counted all the same, and its lines are not.
+    expect((await readState($)).project.changes).toEqual({ files: 1, lines: null })
+    await askRead($, clock)
+    expect(statusRuns(w)).toBe(2)
+    expect(diffRuns(w)).toBe(2) // two throws in a row
+
+    // The third read reads the branch, and runs neither the status nor the diff, though both would be fine now.
+    w.diffThrows = false
+    w.diff = ok('3\t1\ta.ts\n')
+    w.runs.length = 0
+    await askRead($, clock)
+    expect(w.runs).toEqual([BRANCH_RUN])
+    expect((await readState($)).project).toEqual({ name: 'online_shop', branch: 'master', changes: null })
+  })
+
+test('a status that throws in one read and a diff that throws in the next are two throws in a row for the root',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0')
+    await $.session.start(START)
+    await clock.advance(1)
+    w.statusThrows = true
+    await openTree($, clock, w) // the status throws
+    w.statusThrows = false
+    w.diffThrows = true
+    await askRead($, clock) // the status is fine, and the diff throws
+    expect([statusRuns(w), diffRuns(w)]).toEqual([2, 1])
+
+    w.diffThrows = false
+    w.runs.length = 0
+    await askRead($, clock)
+    expect(w.runs).toEqual([BRANCH_RUN])
+  })
+
+test('a read whose status and diff both end without a throw starts the count over: only two throws in a row stop',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0')
+    w.diff = ok('3\t1\ta.ts\n')
+    await $.session.start(START)
+    await clock.advance(1)
+    w.diffThrows = true
+    await openTree($, clock, w) // the diff throws
+    w.diffThrows = false
+    await askRead($, clock) // a status and a diff that end well: the count starts over
+    expect((await readState($)).project.changes).toEqual({ files: 1, lines: { added: 3, removed: 1 } })
+    w.diffThrows = true
+    await askRead($, clock) // the diff throws
+    w.diffThrows = false
+    await askRead($, clock) // it is read, and ends well
+    w.diffThrows = true
+    await askRead($, clock) // the diff throws
+    expect(statusRuns(w)).toBe(5)
+
+    w.diffThrows = false
+    await askRead($, clock) // one throw in a row so far: still read
+    expect(statusRuns(w)).toBe(6)
+    expect((await readState($)).project.changes).toEqual({ files: 1, lines: { added: 3, removed: 1 } })
+  })
+
+// Only a status and the diff against HEAD walk the tree: the count of a new file, or the top of the repository, that
+// throws is a failure of that call alone, and no throw for the root.
+test('a new file whose count throws is no throw for the root: the reads of the root go on', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0?? n.ts\0')
+    w.diff = ok('3\t1\ta.ts\n')
+    w.noIndex = () => {
+      throw new Error('spawn git ENOENT')
+    }
+    await $.session.start(START)
+    await clock.advance(1)
+    await openTree($, clock, w)
+    await askRead($, clock)
+    await askRead($, clock)
+
+    expect(statusRuns(w)).toBe(3) // every read ran its status: none was stopped
+    expect((await readState($)).project.changes).toEqual({
+      files: 2, lines: { added: 3, removed: 1, hasMoreAdded: true },
+    })
+  })
+
+// The calls of one read share READ_BUDGET_MS, counted from the start of its changes: each call has what is left of it
+// when that is less than CHANGES_TIMEOUT_MS. `lags` makes the clock move on in a kind of call, as a slow call does.
+test('a slow status leaves the next call the rest of the budget as its timeout, and every call after it', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0?? n.ts\0')
+    w.diff = ok('3\t1\ta.ts\n')
+    w.lags = { status: 25_000 } // the clock is 25 s on when the status ends
+    await $.session.start(START)
+    await clock.advance(1)
+    await openTree($, clock, w)
+    await clock.advance(30_000)
+
+    // The status had the whole budget, which its own timeout is under; the calls after it have what it left.
+    expect(w.runs.map(run => [gitKind(run.argv), timeoutOf(run)])).toEqual([
+      ['branch', 5000],
+      ['status', CHANGES_TIMEOUT_MS],
+      ['diff', READ_BUDGET_MS - 25_000],
+      ['rev-parse', READ_BUDGET_MS - 25_000],
+      ['no-index', READ_BUDGET_MS - 25_000],
+    ])
+    expect((await readState($)).project.changes).toEqual({ files: 2, lines: { added: 4, removed: 1 } })
+  })
+
+// The host takes a whole number of ms as a timeout, and refuses any other: a clock that reads a fraction of a ms leaves
+// a fraction of the budget, which is rounded up, so every call of the read is made and has a whole timeout. A call has
+// its own timeout until less than that is left, so the status is slow here: the calls after it have what it left.
+test('a clock that reads a fraction of a ms still gives each call a whole number of ms as its timeout',
+  WITH_FRACTIONAL_CLOCK, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0?? n.ts\0')
+    w.diff = ok('3\t1\ta.ts\n')
+    w.lags = { status: 25_000 }
+    await $.session.start(START)
+    await clock.advance(1)
+    await openTree($, clock, w)
+    await clock.advance(30_000)
+
+    expect(w.runs.map(run => gitKind(run.argv))).toEqual(['branch', 'status', 'diff', 'rev-parse', 'no-index'])
+    expect(w.runs.every(run => Number.isInteger(timeoutOf(run)))).toBe(true)
+    expect(w.runs.map(run => timeoutOf(run))[2]).toBe(5000) // a fraction under 5000 ms are left: rounded up
+    expect((await readState($)).project.changes).toEqual({ files: 2, lines: { added: 4, removed: 1 } })
+  })
+
+// The timeouts of a status, a diff, the top of the repository and a count of one new file, by how long the status and
+// the diff took: the timeout of a call is CHANGES_TIMEOUT_MS until less than that is left.
+const BUDGET_TIMEOUTS: Array<[what: string, lags: Record<string, number>, timeouts: number[]]> = [
+  ['no time', {}, [10_000, 10_000, 10_000, 10_000]],
+  ['5 s each', { status: 5000, diff: 5000 }, [10_000, 10_000, 10_000, 10_000]], // 20 s are left for the last two
+  ['12 s each', { status: 12_000, diff: 12_000 }, [10_000, 10_000, 6000, 6000]], // 6 s are left after them
+  ['20 s and 9 s', { status: 20_000, diff: 9000 }, [10_000, 10_000, 1000, 1000]],
+]
+for (const [what, lags, timeouts] of BUDGET_TIMEOUTS) {
+  test(`after a status and a diff that took ${what}, the four calls have the timeouts ${timeouts.join(', ')} ms`,
+    WITH_READER, async ($, on) => {
+      const clock = mock.clock(on)
+      const w = bottom(on, clock)
+      w.status = ok(' M a.ts\0?? n.ts\0')
+      w.diff = ok('3\t1\ta.ts\n')
+      w.lags = lags
+      await $.session.start(START)
+      await clock.advance(1)
+      await openTree($, clock, w)
+      await clock.advance(60_000)
+
+      expect(w.runs.slice(1).map(run => timeoutOf(run))).toEqual(timeouts)
+    })
+}
+
+// Where the budget of a read runs out, the calls that were made, and what the read gives: the next call is not made,
+// and the read ends as that call's failure would. The status lists a modified file and five new files of one line each,
+// the diff has 3 lines added and 1 removed; a folder in the status brings the second status.
+const NEW_FILES = ['n1.ts', 'n2.ts', 'n3.ts', 'n4.ts', 'n5.ts']
+const WITH_NEW_FILES: Partial<World> = {
+  status: ok(` M a.ts\0${NEW_FILES.map(name => `?? ${name}\0`).join('')}`), diff: ok('3\t1\ta.ts\n'),
+}
+const WITH_A_FOLDER: Partial<World> = { status: ok(' M a.ts\0?? dir/\0') }
+const LOWER_BOUND = { files: 6, lines: { added: 3, removed: 1, hasMoreAdded: true } }
+const BUDGET_ENDS: Array<[
+  what: string, world: Partial<World>, kinds: string[], changes: Record<string, unknown> | null,
+]> = [
+  [
+    'after the first status, so no second status is run',
+    { ...WITH_A_FOLDER, lags: { status: 30_000 } }, ['status'], null,
+  ],
+  [
+    'after both statuses, so no diff is run',
+    { ...WITH_A_FOLDER, lags: { status: 15_000 } }, ['status', 'status'], { files: 2, lines: null },
+  ],
+  [
+    'after the diff, so the top of the repository is not asked for',
+    { ...WITH_NEW_FILES, lags: { status: 15_000, diff: 15_000 } }, ['status', 'diff'], LOWER_BOUND,
+  ],
+  [
+    'after the top of the repository, so no new file is counted',
+    { ...WITH_NEW_FILES, lags: { status: 10_000, diff: 10_000, 'rev-parse': 10_000 } },
+    ['status', 'diff', 'rev-parse'], LOWER_BOUND,
+  ],
+  [
+    'in the loop over the new files, after the third',
+    { ...WITH_NEW_FILES, lags: { 'no-index': 12_000 } },
+    ['status', 'diff', 'rev-parse', 'no-index', 'no-index', 'no-index'],
+    { files: 6, lines: { added: 6, removed: 1, hasMoreAdded: true } },
+  ],
+]
+for (const [what, world, kinds, changes] of BUDGET_ENDS) {
+  test(`a read whose budget is spent ${what}`, WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = Object.assign(bottom(on, clock), world)
+    await $.session.start(START)
+    await clock.advance(1)
+    await openTree($, clock, w)
+    await clock.advance(120_000)
+
+    expect(w.runs.slice(1).map(run => gitKind(run.argv))).toEqual(kinds) // the branch is the first call
+    expect((await readState($)).project.changes).toEqual(changes)
+  })
+}
+
+// A call that is not made is no throw: it ran out of the clock, not of its timeout. Here the clock is a whole budget on
+// when each status ends, as after a suspend, so the diff is never made, and no read counts a throw.
+test('a call that was not made, for the budget was spent, is no throw: the reads of the root are not stopped',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.status = ok(' M a.ts\0')
+    w.lags = { status: READ_BUDGET_MS }
+    await $.session.start(START)
+    await clock.advance(1)
+    await startTurn($)
+    await clock.advance(2 * READ_BUDGET_MS)
+    for (let i = 0; i < 2; i += 1) {
+      await $.classic.CwdChanged({ old_cwd: ROOT, new_cwd: ROOT })
+      await clock.advance(2 * READ_BUDGET_MS)
+    }
+
+    expect(statusRuns(w)).toBe(3) // the third read ran its status: the root was never stopped
+    expect(diffRuns(w)).toBe(0)
+    expect((await readState($)).project.changes).toEqual({ files: 1, lines: null })
   })
 
 test('a call that may change a file reads the project 1000 ms after it ends, and not before', WITH_READER,
@@ -2224,7 +2696,7 @@ test('a main turn ends as lastTurn: step timing, tool time, cost and log; everyt
     const state = await readState($)
     expect(state.turn).toBeNull()
     expect(state.lastTurn).toMatchObject({
-      elapsedMs: 2000, modelMs: 1700, toolMs: 300, steps: 2, ttftMs: 250, tokensIn: 1000, tokensOut: 800, cachePct: 90,
+      elapsedMs: 2000, modelMs: 1700, toolMs: 300, steps: 2, ttftMs: 250, tokensIn: 100, tokensOut: 800, cachePct: 90,
       costUsd: 0.375,
     })
     expectNear(state.lastTurn?.wholeTurnRate, 140 / 1.7)
@@ -2285,10 +2757,11 @@ test('turn.start logs a prompt as you, redacted and cut to 70, and an engine tur
     expect(state.turn?.turnId).toBe('t5')
   })
 
-// U+202E, the right-to-left override, reorders what follows it; U+200B is a zero-width space. They are spelled as
-// escapes, so that this file shows what it says.
+// U+202E, the right-to-left override, reorders what follows it; U+200B is a zero-width space; U+200D is the zero-width
+// joiner. They are spelled as escapes, so that this file shows what it says.
 const BIDI = '\u202E'
 const ZWSP = '\u200B'
+const ZWJ = '\u200D'
 
 test('the format characters are taken out of the branch and the folder name: a U+202E reorders nothing', WITH_READER,
   async ($, on) => {
@@ -2303,10 +2776,24 @@ test('the format characters are taken out of the branch and the folder name: a U
     expect((await readState($)).project).toEqual({ name: 'online_shop', branch: 'main', changes: null })
   })
 
+test('a joiner beside an ASCII character is taken out of the branch and the folder name: it hides nothing',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.branch = `ma${ZWJ}in\n`
+    w.root = `/work/onli${ZWJ}ne_shop`
+
+    await $.session.start(START)
+    await clock.advance(1)
+
+    expect((await readState($)).project).toEqual({ name: 'online_shop', branch: 'main', changes: null })
+  })
+
 test('the format characters are taken out of the names of the MCP servers, before the hidden ones are matched',
   WITH_READER, async ($, on) => {
-    // The U+202E is in the name of the person's server; the U+200B is in the prefix of `ccd_x`, a server of the app.
-    const servers = [`issue${BIDI}-hub`, `cc${ZWSP}d_x`, 'codebase-memory']
+    // The U+202E is in the name of the person's server; the U+200B and the joiner are in the prefixes of `ccd_x` and
+    // `ccd_y`, servers of the app.
+    const servers = [`issue${BIDI}-hub`, `cc${ZWSP}d_x`, `cc${ZWJ}d_y`, 'codebase-memory']
 
     expect(await listedAfterStart($, on, servers)).toEqual(['issue-hub', 'codebase-memory'])
   })
@@ -2349,6 +2836,27 @@ test('the format characters are taken out of every line of the log: prompt, tag,
       'rename txt.exe',
     ])
     expect(JSON.stringify(log)).not.toContain(BIDI)
+  })
+
+// The zero-width joiner (U+200D) is a format character too, but between two non-ASCII characters that are no spaces it
+// holds an emoji sequence together, so it stays there: a family is three emoji and two joiners, and it is one emoji in
+// the log. Every other format character goes, and so does a joiner beside an ASCII character or a space (stripFormat):
+// it joins nothing there.
+const FAMILY = `\u{1F468}${ZWJ}\u{1F469}${ZWJ}\u{1F467}` // man, woman and girl
+
+test('an emoji sequence stays whole in the line of a prompt; a format character beside it goes, and a joiner by ASCII',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+
+    await $.turn.start({ text: `${FAMILY} sleep 30`, turnId: 't1' })
+    await $.turn.start({ text: `${BIDI}${FAMILY}${ZWSP} run \uFEFFit`, turnId: 't2' })
+    await $.turn.start({ text: `ship${ZWJ}\u{1F680} ${ZWJ}it`, turnId: 't3' })
+
+    const { log } = await readState($)
+    expect(log.map(entry => entry.text)).toEqual(['ship\u{1F680} it', `${FAMILY} run it`, `${FAMILY} sleep 30`])
+    expect(log[2]?.text.split(ZWJ)).toHaveLength(3) // both joiners are in the line
+    expect(log[0]?.text).not.toContain(ZWJ)
   })
 
 // The Subagents list draws the description and the type of a row as the row keeps them. The row is written when the
@@ -2408,6 +2916,22 @@ test('a secret that has a format character in it is masked: the character does n
     expect(log.map(entry => entry.text)).toEqual(['token=•••', 'Bash echo •••'])
     expect(JSON.stringify(log)).not.toContain('abcdefgh')
     expect(JSON.stringify(log)).not.toContain('hunter22secret')
+  })
+
+test('a secret that has a joiner in it is masked too: beside an ASCII character the joiner goes before the patterns',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    bottom(on, clock)
+    await $.session.start(START)
+
+    await drive(clock, $.tool.call({ tool: 'Bash', command: `echo ghp_abc${ZWJ}defgh12345678` }))
+    await $.turn.start({ text: `token${ZWJ}=hunter22secret`, turnId: 't1' })
+
+    const { log } = await readState($)
+    expect(log.map(entry => entry.text)).toEqual(['token=•••', 'Bash echo •••'])
+    expect(JSON.stringify(log)).not.toContain('abcdefgh')
+    expect(JSON.stringify(log)).not.toContain('hunter22secret')
+    expect(JSON.stringify(log)).not.toContain(ZWJ)
   })
 
 test('a failed or denied tool call is logged as ✗ or denied, and a secret in the command is redacted', WITH_READER,
@@ -2472,6 +2996,28 @@ test('an abandoned call that came back as an error is a note with no mark; a pla
       ['Bash abandon it', 'ok', '✓ 0.3s'],
       ['Bash fail abandon it', 'info', '0.3s'],
     ])
+  })
+
+// The signal of the hook aborts while the tool runs, before `next(e)` returns, and the call comes back as an error: the
+// hook above answers 100 ms in, and the tool (a failing Bash) ends 300 ms in. The line comes when the call ends, a note
+// with the time of the whole call and no mark. The test above has the signal abort as the call starts.
+test('a call whose signal aborts while the tool runs, and that comes back as an error, is a note with no mark',
+  WITH_INTERRUPTER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    w.toolFailMs = 300
+    await $.session.start(START)
+    await clock.advance(1)
+    // The log has no value until the first line is written.
+    const lines = async (): Promise<unknown[][]> =>
+      ((await readState($)).log ?? []).map(entry => [entry.text, entry.kind, entry.outcome])
+
+    const call = $.tool.call({ tool: 'Bash', command: 'fail interrupt it' })
+    await clock.advance(150) // the hook above has answered, and the tool runs still: nothing is logged yet
+    expect(await lines()).toEqual([])
+    await clock.advance(250) // the tool ends, 300 ms after it began, and the hook of the mod logs it
+    expect(await call).toEqual({ isError: true, result: 'cut', text: 'cut' })
+    expect(await lines()).toEqual([['Bash fail interrupt it', 'info', '0.3s']])
   })
 
 test('a long command is cut to 64 characters, and its outcome stays whole', SLOW_READER, async ($, on) => {
@@ -3272,13 +3818,19 @@ test('the read that a tick asks for waits four times as long as the last read to
     expect(reads(w)).toBe(1)
   })
 
-// The timer asks only while the pane is shown, open and placed: a closed pane has no one to show the count to, and an
-// open one that waits undrawn has none yet. The rest of the tick, the redraw and the usage, does not depend on it.
+// The timer asks only for a pane in front, open, placed and shown: a closed pane has no one to show the count to, an
+// open one that waits undrawn has none yet, and one that is a tab behind another is not looked at. The rest of the
+// tick, the redraw and the usage, does not depend on it.
 const TICK_PANES: Array<[what: string, panes: UiPane[], isRead: boolean]> = [
   ['is closed', [], false],
   ['is open but not placed', [{ ...PANE_UP, isPlaced: false }], false],
+  ['is open and placed but not shown, a tab behind another', [{ ...PANE_UP, isShown: false }], false],
+  [
+    'is a tab behind another, which is shown', [{ ...PANE_UP, isShown: false }, { ...PANE_UP, id: 'other' }], false,
+  ],
   ['is closed and another one is open', [{ ...PANE_UP, id: 'other' }], false],
-  ['is open and placed', [PANE_UP], true],
+  ['is open, placed and shown', [PANE_UP], true],
+  ['is open, placed and shown, with a tab behind it', [{ ...PANE_UP, id: 'other', isShown: false }, PANE_UP], true],
 ]
 for (const [what, panes, isRead] of TICK_PANES) {
   test(`the second tick asks for ${isRead ? 'a' : 'no'} read of the project when the pane ${what}`, WITH_READER,
