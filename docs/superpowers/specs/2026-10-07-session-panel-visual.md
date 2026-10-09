@@ -5,8 +5,8 @@
 > first and a subagent row drops `@type` below 12 description cells (§6.7, §6.10); the project is a block of its own,
 > with a changes row (§6.3); a count that is only a lower bound has a plus, but a lower bound of no lines has no numbers
 > (§6.3); in a narrow log a prompt reads `you › …` and an engine message `engine › …` (§6.10); the Log fills the pane's
-> free height, 8 lines at least (§6.12). The HTML preview `docs/design/session-panel-preview.html` stays the approved v2
-> mock-up and predates these changes.
+> free height, 8 lines at least (§6.12); the rule above a section is one line high, with no margins (§5.1). The HTML
+> preview `docs/design/session-panel-preview.html` stays the approved v2 mock-up and predates these changes.
 
 Date: 2026-10-07. Status: implemented and shipped (0.3.0). The user approved the look in
 `docs/design/session-panel-preview.html` before implementation.
@@ -16,7 +16,7 @@ Scope: presentation only. The sections, their content, the formats and every for
 ## 1. Decisions at a glance
 
 1. **Block separation.** Blocks are separated the OpenChamber way:
-   - a 1 px rule with 8 px of space above and below;
+   - a 1 px rule, centred in a box one text line high, so it has room above and below it;
    - then a header row: line icon, **bold title**, dim chevron, and a dim summary pushed to the right.
 2. **No row can outgrow the pane.** Every row is built from fixed cells (`flexShrink={0}`, width in cells) and at most two flexible cells (`flexShrink={1}` + `minWidth={0}` + `overflow="hidden"`, text `wrap="truncate"`).
 3. **Columns that must line up have fixed cell widths:** time, who, log outcome, status mark, subagent `@type`, cost, percent and limit label. Nothing is aligned by character count.
@@ -42,7 +42,7 @@ Session $123.23 · Subagents $25.36
 Project                                        claude_mods
 ⑂  main
 ✎  12 files changed                           +2061 / −111
-──────────────────────────────────────────────────────────    8 px · 1 px rule · 8 px
+──────────────────────────────────────────────────────────    one line high · 1 px rule centred
 ▥  Turn stats ▾                                  ~72 tok/s
 Whole turn                                       ~72 tok/s
 Elapsed                                             1m 18s
@@ -68,7 +68,9 @@ Elapsed                                             1m 18s
   - `width={1}` + `columnGap={1}` put the subagent descriptions 16 px in;
   - `marginTop={1}` adds about 8 px over the 19 px line.
 - **A height cell is one text line,** about 19 px, and `props.scroll.bodyRows` counts text lines: `height={10}` is 10
-  lines tall (measured live in the spikes of §6.12). So the 8 px is the width of a cell, not the unit of `height`.
+  lines tall (measured live in the spikes of §6.12). So the 8 px is the width of a cell, not the unit of `height`, and
+  a rule built from margins is not a whole line: two margins and the 1 px line were 17 px. The rule is a Box of
+  `height={1}` instead (§5.1).
 - **The old "12.5 px per column" was a planning guess.** v1 cannot refute it, because its meter is clamped at 180 px either way.
 - **`CELL_PX = 8`** is used only to turn `bodyColumns` into the px widths of the meters. Confirmed on the live pane on 2026-10-07 (§11, check 1).
 - **`Svg` `width` and `height` are CSS px** (l.11588–11595).
@@ -105,7 +107,8 @@ The desktop draws text in the system font, so character counts and padded string
 | Status | Props |
 |---|---|
 | Seen working on the live desktop (v1) | theme keys `success`, `warning`, `error`; `dimColor`; raw hex; `bold`; `Svg` images; a `plain` `Button` drawn as a text row; Box `width`, `columnGap`, `marginTop`, `justifyContent` |
-| Declared in the d.ts, first used here | `minWidth`, `overflow`, `flexGrow`, `alignItems`, `marginBottom`, `paddingLeft`, `flexWrap`, `Button` `dimColor` (l.937–941) |
+| Declared in the d.ts, first used here | `minWidth`, `overflow`, `flexGrow`, `alignItems`, `paddingLeft`, `flexWrap` |
+| Declared in the d.ts, first used here (a Button) | `dimColor` (l.937–941) |
 | Seen working live, vertical use (§6.12) | `minHeight`, `height={0}`, `flexGrow`, `flexShrink`, `overflow="hidden"` |
 | Seen not working live (§6.12) | `height="100%"` on the root: it grows to its content |
 | Deliberately not used | `backgroundColor`, `borderStyle`, `borderColor` (§12) |
@@ -156,13 +159,14 @@ TextProps has no size or family (l.11869–11887). The hierarchy comes from thre
 |---|---|---|
 | `GAP` | 1 (8 px) | icon slot → text; between the columns of a log, subagent or limit row; title → chevron; meter → percent |
 | `GAP_WIDE` | 2 (16 px) | the least room between a label and its value in space-between rows; between MCP chips |
-| `RULE_MARGIN` | 1 (8 px) | above and below each divider (desktop only) |
+| rule height | 1 (a text line, ~19 px) | the Box of each divider, the 1 px line centred in it (desktop only) |
 | row gap | 0 | rows stack at the text line (~19 px on the desktop) |
 
 Rhythm on the desktop:
 
 - rows inside a block are 19 px apart;
-- between blocks there is 8 px + 1 px rule + 8 px, so the last row of a block and the next header are 36 px apart instead of 19.
+- between blocks there is the rule: one text line (about 19 px) with the 1 px line in the middle of it, so the last row
+  of a block and the next header are about 38 px apart instead of 19.
 
 ### 3.4 Sizes and constants (drop-in for view.tsx)
 
@@ -260,14 +264,16 @@ const RULE_SVG =
   `<svg xmlns="http://www.w3.org/2000/svg" width="${RULE_PX}" height="1" viewBox="0 0 ${RULE_PX} 1"` +
   ` preserveAspectRatio="none"><rect width="${RULE_PX}" height="1" fill="#808080" fill-opacity="0.35"/></svg>`
 
-// The rule above a section: an image in a Box that cuts it to the pane, with room around it. The terminal draws a text
-// rule, one row, as v1's blank line was. The desktop draws no Svg whose alt is empty, so the rule says `rule`.
+// The rule above a section: an image in a Box one line high, with the line centred in it, and the Box cuts the image to
+// the pane. A desktop `height` cell is one text line (about 19 px) but a margin of 1 is about 8 px, so a rule built
+// from margins was not a whole line, and the Log's tail lost the difference. The terminal draws a text rule, one row,
+// as v1's blank line was. The desktop draws no Svg whose alt is empty, so the rule says `rule`.
 function divider(d: Draw): RenderElement {
   const { Box, Text, Svg } = d.ui
   if (Svg === undefined) return <Text dimColor wrap="truncate">{'─'.repeat(Math.max(0, d.cols))}</Text>
 
   return (
-    <Box flexDirection="row" marginTop={1} marginBottom={1} overflow="hidden">
+    <Box flexDirection="row" height={1} alignItems="center" overflow="hidden">
       <Svg source={RULE_SVG} alt="rule" width={RULE_PX} height={1} />
     </Box>
   )
@@ -280,6 +286,13 @@ How the rule gets the exact pane width:
 - A plain line has no caps, so the cut is invisible.
 - v1 already showed that the body clips content running past it, without widening the pane.
 - `preserveAspectRatio="none"` keeps the line 1 px tall if the surface scales an image down to its slot (l.11588–11590).
+
+How the rule gets its height:
+
+- The Box is one line high (`height={1}`) and the line is centred in it (`alignItems="center"`). On the desktop a height
+  cell is one text line, about 19 px (§2.1), so the rule is a whole line, with room above and below the 1 px line.
+- The rule has no margins. A margin of 1 is about 8 px, so a rule of two margins and the 1 px line was 17 px, not a
+  whole line, and each one cut 2 px off the Log's last line (§6.12).
 
 ### 5.2 Icon slot
 
@@ -512,9 +525,9 @@ The Project block follows the top block and comes before Usage, as OpenChamber's
   - With no project name, the whole block.
   - With no branch, the branch row.
   - Outside a repository, on a clean tree, when git failed, or where the changes are not read, the changes row. They
-    are not read before the first turn of the main agent, nor for a folder whose `git status` has failed to run twice
-    in a row (a timeout, or a git that cannot start); the folder and the branch still show. A status over 4 MiB does
-    not leave the row out: it is marked above.
+    are not read before the first turn of the main agent, nor for a folder whose reads have twice in a row had a
+    `git status`, or a `git diff` against HEAD, that failed to run (a timeout, or a git that cannot start); the folder
+    and the branch still show. A status over 4 MiB does not leave the row out: it is marked above.
   - When the lines are unknown (an unborn HEAD, a failed diff) or both 0 (only binary files changed), the numbers: the count alone shows.
 - **Terminal.** No icon slots: the branch and changes rows start with an emoji instead, `🌿 main` and `📝 12 files changed` (§10).
 
@@ -898,7 +911,9 @@ function logParts(d: Draw): RenderElement[] {
   line of the engine (`engine`: a tagged message such as `agent-message`) reads `engine › …`: its text alone does not
   say whose it is. The other lines have no label. In [time, text] a line's outcome still comes first, and the label
   follows it. The layout does not count the label: `MIN_LOG_TEXT_CELLS` counts the text alone, so at the edge of a
-  layout an engine line shows its label and none of its text.
+  layout an engine line shows its label and none of its text. Where `who` has given way, a subagent's type has no
+  column and no label, so it is visible nowhere in the Log but in its `spawned · type: …` line, if the cut does not
+  take it: a known limit (finding 11 of the 0.3.0 live check).
 - **Columns.** The `who` and outcome columns are worked out from the longest `who` and the longest outcome among the
   lines drawn. Those may be more than the lines shown (§6.12), so a long outcome lower down can make `who` give way for
   every row. The rule stays: one layout for the head and the tail is what keeps their columns in line.
@@ -906,7 +921,8 @@ function logParts(d: Draw): RenderElement[] {
   it, or a stop did) is a note, not a fault. It is kind `info`, so it is not red: its text is drawn as on any line that
   is no error, its `who` and outcome are dim as on every such line, and its outcome is the time alone, with no ✗, as a
   stopped subagent's result does. This rests on the engine's `next.signal` (`ran.isError` and `next.signal.aborted`
-  after `await next(e)`), and is to be confirmed live (§11, check 9).
+  after `await next(e)`), and was seen live for a subagent stopped with `TaskStop` and for Esc on the main agent, while
+  a call that fails by itself stays red (§11, check 9).
 
 ### 6.11 Empty and partial states
 
@@ -941,13 +957,19 @@ natural height, in one Box, as 0.2.0 did.
   - the tail is a column Box with `height={0}`, `flexGrow={1}`, `flexShrink={1}` and `overflow="hidden"`. It has no
     height of its own, grows into what the root leaves free, and cuts its lines at the bottom.
 - **The unit.** A desktop height cell is one text line, about 19 px, and `props.scroll.bodyRows` counts text lines
-  (§2.1). The 8 px is the width of a cell, and what `marginTop={1}` adds; it does not hold for `height`.
+  (§2.1). The 8 px is the width of a cell, and what a margin of 1 adds; it does not hold for `height`.
+- **The rules.** The rule above a section is one line high (`height={1}`, §5.1), so every block is a whole number of
+  lines and the Log's last line is whole at the bottom of the pane. The rule was two margins and the 1 px line, 17 px,
+  and each one cut 2 px off that line: with 6 or 7 rules, about a third of it (finding 1 of the 0.3.0 live check). A
+  look at the fix on the desktop is pending (§11, check 2). If a strip remains, the next suspect is the Button's height
+  in the section header.
 - **What the engine does.**
   - It scrolls a body that is taller than the pane, natively, with a scrollbar and the wheel.
   - A change of `bodyRows` alone re-runs `ui.render`, on every frame of a resize.
 - **What did not work.** A root with `height="100%"` grows to its content: all 60 lines show, and the pane scrolls.
-- **Not verified.** The terminal (Ink/Yoga); the real pane, since the spikes drew throwaway content (§11, check 10); and
-  nested chains of growing Boxes, which the flat structure avoids.
+- **Not verified.** The terminal (Ink/Yoga); the real pane at three heights, though the 0.3.0 live check saw it fill the
+  pane (§11, check 10); the Log's last line since the rule became one line high (§11, check 2); and nested chains of
+  growing Boxes, which the flat structure avoids.
 - **Evidence.** Two live spikes on the desktop, engine 2.1.288, 2026-10-08, with a throwaway mod that drew numbered log
   lines and a footer line after them (the mod was deleted afterwards). Four of its modes matter:
   - B, a root with `height={bodyRows}` and a `flexGrow` log with `overflow="hidden"`, worked exactly: at `bodyRows` 65
@@ -1089,7 +1111,7 @@ The ellipsis is the surface's own, from `wrap="truncate"`. No string is shortene
 
 | Element | Desktop | Terminal |
 |---|---|---|
-| Divider | 1600 × 1 px SVG in a clipping Box, 8 px above and below | `Text dimColor` of `'─'.repeat(bodyColumns)`, no margins (one row, as v1's blank line was) |
+| Divider | 1600 × 1 px SVG in a clipping Box, one line high | `Text dimColor` of `'─'.repeat(bodyColumns)`, one row |
 | Section icon, ring, branch, changes | `Svg` in a 2-cell slot | dropped (`iconSlot` returns null) |
 | Project block | rule; bold `Project` + the folder name at the right; branch icon + branch; changes icon + `12 files changed`, the numbers at the right | text rule; `Project` + the folder name at the right; `🌿 main`; `📝 12 files changed`, the numbers at the right |
 | Meter | `meterSvg` at the computed px width | ten cells of `▰▱` in the meter colours, as v1 |
@@ -1124,7 +1146,10 @@ Checks on the first live render, before the tests are frozen:
    - At the default width, the right end of the Context bar should sit about 16–32 px left of the `8` of `88.2%`, and no row should cross the pane's right edge.
    - If the bar's right end is cut off or touches the percent, `CELL_PX` is too big; if the gap is over 45 px, it is too small.
    - Either way, set `CELL_PX` to the body's px width ÷ `bodyColumns`.
-2. **Rule spacing.** Between the last row of a block and the next header there should be about 17 px of space, split by the 1 px line. If it is about 35 px, the image is being laid out in a text line: drop the divider Box's `marginTop` and `marginBottom` to 0.
+2. **Rule spacing.** The rule is a Box one text line high, with the 1 px line centred in it (§5.1). Between the last row
+   of a block and the next header there should be about 19 px of space, split by the 1 px line, and the Log's last line
+   should be whole at the bottom of the pane, not cut by the rules above it (the 0.3.0 check saw about 2 px lost for
+   each rule). If a strip remains, the next suspect is the Button's height in the section header (§5.4).
 3. **Narrow pane.** Narrow the pane to about 300 px. No row crosses the edge, and descriptions, log text and summaries end in `…`. Costs and percents stay whole; `@type` and the log's `who` are either whole or left out (§6.7, §6.10).
 4. **Empty alt.** If the transcript says a `ui.render` tree was refused and names `alt`, give each decorative icon the label of its row and the rule `alt="rule"`.
 5. **Chevron.** It is dim at rest and full strength under the pointer. A click folds the section and the header keeps its summary.
@@ -1132,11 +1157,13 @@ Checks on the first live render, before the tests are frozen:
 7. **Changes refresh.** The changes row updates about a second after an edit or a command by any agent. A read-only
    command such as `ls` does not trigger it. In a big repository it comes later: four times the last read, which counts
    at most a minute, so the wait is at most four minutes. An edit made outside Claude's tools (an editor, a terminal)
-   shows within about a minute, with no new turn, while the pane is shown: the project is read on every second tick of
-   the 30-second timer, but only while the pane is open and placed. Opening the pane reads at once. In a new session the
-   changes row is absent until the first turn of the main agent: before it only the folder and the branch show.
+   shows within about a minute, with no new turn, while the pane is in front: the project is read on every second tick
+   of the 30-second timer, but only while the pane is placed and shown, not a tab behind another. Opening the pane
+   reads at once, and so does `/session-panel` on a pane behind another tab, which it brings forward instead of closing
+   it. In a new session the changes row is absent until the first turn of the main agent: before it only the folder and
+   the branch show.
 
-Open checks since Tasks 11 and 12, for the 0.3.0 release:
+Checks since Tasks 11 and 12, for the 0.3.0 release:
 
 8. **The terminal under the new root.** The root has `minHeight` (§4), and Ink/Yoga has not been seen with it and with
    the Log's tail of `height={0}` (§6.12). Docked (110 columns or more) and inline: the Log reaches the bottom of the
@@ -1155,10 +1182,12 @@ Open checks since Tasks 11 and 12, for the 0.3.0 release:
     line shows `engine › ` and may show none of its text. See how much of the text shows after `engine › `, beside the
     longest outcome.
 
-Results of the live renders (2026-10-07 and 2026-10-08):
+Results of the live renders (2026-10-07, 2026-10-08 and 2026-10-09):
 
 1. Pass. At ~300 px the bar ends ~18 px left of the percent; `CELL_PX` 8 stays.
-2. Pass. 12–14 px between the ink and the rule on each side, ≈ 17 px box to box.
+2. Pass for the rule of two margins: 12–14 px between the ink and the rule on each side, ≈ 17 px box to box. That rule
+   was not a whole line: the 0.3.0 live check saw it cut 2 px off the Log's last line for each rule (finding 1, §6.12).
+   The rule is one line high now (§5.1), and a look at the fix on the desktop is pending.
 3. Pass. At ~300 px no row crosses the edge; descriptions and log text end in `…`. Since Task 8 the log's outcome column gives way when the text would keep fewer than 8 cells (about 40 columns on the desktop), so at ~300 px the log shows the outcome at the end of the text, by design.
    - Task 9 changed the narrow rules (§6.7, §6.10) and replaces the Task 8 rule above: in a narrow pane `who` gives way
      first, then the outcome moves in front of the text, and a subagent row drops `@type` when its description would
@@ -1170,12 +1199,30 @@ Results of the live renders (2026-10-07 and 2026-10-08):
 4. The tree was not refused, but the desktop drew no Svg with an empty `alt`: the icons, the ring and the rules were missing while their slots stayed. Fixed by giving every Svg a label (commit c5f73d1).
 5. Pass. A click on the chevron folds the section, and the folded state survives a reload.
 6. Pending.
-7. Pending.
-8. Pending.
-9. Pending.
-10. Pending.
-11. Pending.
-12. Pending.
+7. Seen working in the 0.3.0 live check (2026-10-09):
+   - a file made by a background process at about 14:09:20 showed in Project by 14:10 (`1 file changed  +3 / −0`),
+     with no new turn;
+   - 60 new files read `60 files changed  +50+ / −0`: the 50 counted, and the plus for the rest.
+8. Pending. The 0.3.0 live check was on the desktop only.
+9. Pass, in the 0.3.0 live check. A subagent stopped with `TaskStop` (`Bash sleep 120`, `28.8s`) and Esc on the main
+   agent (`Bash sleep 30`, `4.6s`) each logged a line with the time alone, no ✗ and not red, while `Bash false` stayed
+   red. So `next.signal` fires for both, and by the time `next(e)` returns the aborted result.
+10. Partly, in the 0.3.0 live check. The Log filled the pane (33 lines instead of 15) and grew when a section was
+    folded. Its last line was cut by the rules above it (finding 1): that is fixed (§5.1), and a look at the fix is
+    pending (check 2). The three heights and the scrollbar were not recorded.
+11. Pending. The 0.3.0 live check does not mention the first frame.
+12. Seen in a narrow pane in the 0.3.0 live check: the lines read `you › …` and `engine › agent-message`. How much text
+    follows `engine › ` at the edge of the layout was not recorded.
+
+Not checked in the 0.3.0 live check, or pending a look:
+
+- the fix of finding 1, the rule one line high: the Log's last line has not been looked at since (check 2);
+- the fold state after a restart;
+- a pane hidden behind another tab (`isShown: false`): the minute read now skips it, and `/session-panel` brings it
+  forward instead of closing it;
+- a branch change, a detached HEAD, `git stash`, an edit of a tracked file, `N+ files changed` (a status over 4 MiB), a
+  root outside git, a SHA-256 repository;
+- Usage, `denied`, `/compact` and `/clear`.
 
 ## 12. Compromises forced by the API
 
