@@ -238,14 +238,16 @@ function meter(d: Draw, pct: number, alt: string, widthPx: number): RenderElemen
   )
 }
 
-// The rule above a section: an image in a Box that cuts it to the pane, with room around it. The terminal draws a text
-// rule, one row, as v1's blank line was. The desktop draws no Svg whose alt is empty, so the rule says `rule`.
+// The rule above a section: an image in a Box one line high, with the line centred in it, and the Box cuts the image to
+// the pane. A desktop `height` cell is one text line (about 19 px) but a margin of 1 is about 8 px, so a rule built
+// from margins was not a whole line, and the Log's tail lost the difference. The terminal draws a text rule, one row,
+// as v1's blank line was. The desktop draws no Svg whose alt is empty, so the rule says `rule`.
 function divider(d: Draw): RenderElement {
   const { Box, Text, Svg } = d.ui
   if (Svg === undefined) return <Text dimColor wrap="truncate">{'─'.repeat(Math.max(0, d.cols))}</Text>
 
   return (
-    <Box flexDirection="row" marginTop={1} marginBottom={1} overflow="hidden">
+    <Box flexDirection="row" height={1} alignItems="center" overflow="hidden">
       <Svg source={RULE_SVG} alt="rule" width={RULE_PX} height={1} />
     </Box>
   )

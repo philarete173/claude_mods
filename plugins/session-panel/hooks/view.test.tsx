@@ -2027,9 +2027,11 @@ test('the divider is an image cut by its Box on the desktop and a text rule on t
   const rules = flat(draw(onSurface(FULL, 'desktop'))).filter(({ node }) => isRuleNode(node))
   expect(rules).toHaveLength(7) // the Project block and the six sections
   for (const { node, parent } of rules) {
-    // A line 1 px tall in a clipping Box with room around it; it is wider than any pane, so the Box cuts it.
+    // A line 1 px tall, centred in a clipping Box one line high; it is wider than any pane, so the Box cuts it. The
+    // Box has no margin: a margin is about 8 px, not a line, so a rule built from margins is not a whole line.
     expect(node.props).toMatchObject({ height: 1, alt: 'rule' })
-    expect(parent?.props).toMatchObject({ overflow: 'hidden', marginTop: 1, marginBottom: 1 })
+    expect(parent?.props).toMatchObject({ height: 1, alignItems: 'center', overflow: 'hidden' })
+    expect(Object.keys(parent?.props ?? {}).filter(key => key.startsWith('margin'))).toEqual([])
     expect(String(node.props?.source)).toContain('preserveAspectRatio="none"')
   }
 
