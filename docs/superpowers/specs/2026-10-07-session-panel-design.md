@@ -426,9 +426,9 @@ ASCII, с пробелом любого вида или с краем текст
   значениями. По умолчанию всё развёрнуто.
 - **Файл хранилища** следует за идентичностью плагина. Десктопная установка пишет
   `session-panel_inline-fb64dc720a6f.json` (идентичность `session-panel@inline`), как видела живая проверка 0.3.0
-  (п. 8); копия, загруженная под другой идентичностью (например, `session-panel@claude-mods`), ведёт собственный файл,
-  и состояние сворачивания у них не общее (живая проверка 0.2.0, п. 7). Сессии на 0.2.0 делят файл `inline` и пишут
-  карту целиком, пока их не перезапустят.
+  (п. 8); копия, загруженная под другой идентичностью (например, `session-panel@philarete-mods`), ведёт собственный
+  файл, и состояние сворачивания у них не общее (живая проверка 0.2.0, п. 7). Сессии на 0.2.0 делят файл `inline` и
+  пишут карту целиком, пока их не перезапустят.
 - **Высота журнала:** журнал рисует столько строк, сколько строк в теле панели, но не меньше 8 (`MIN_LOG_ROWS`), из
   последних 60 событий, новые сверху. Первые 8 видны всегда; остальные заполняют высоту, которую оставляют другие
   блоки, и обрезаются снизу, поэтому старые уходят первыми. Если свернуть другую секцию, журнал получит её место.
@@ -444,7 +444,7 @@ ASCII, с пробелом любого вида или с краем текст
 
 ```text
 claude_mods/                         маркетплейс
-  .claude-plugin/marketplace.json    { name: "claude-mods", plugins: [session-panel] }
+  .claude-plugin/marketplace.json    { name: "philarete-mods", plugins: [session-panel] }
   README.md, LICENSE (MIT), .gitignore
   plugins/session-panel/
     .claude-plugin/plugin.json       name, version, description, "types": "./types/index.d.ts"
@@ -495,7 +495,8 @@ claude_mods/                         маркетплейс
 
 ## 8. Риски и спайк
 
-До основной реализации пишется каркас мода с пробами. Он копирует свои наблюдения в `~/projects/claude_mods/.spike/results.json` через `$.fs.write`. Эта запись временная и удаляется вместе с каркасом. Пробы:
+До основной реализации пишется каркас мода с пробами. Он копирует свои наблюдения в `<repo>/.spike/results.json` через
+`$.fs.write`. Эта запись временная и удаляется вместе с каркасом. Пробы:
 
 1. Размещается ли панель, открытая из `session.start` или `session.attach` на десктопе. Записать `isPlaced` и `reason`.
 2. Набор полей `turn.step` (`turnId`, `agentId`, `model`) и последовательность видов чанков. Получаются ли правдоподобные TTFT и tok/s.
@@ -545,14 +546,18 @@ claude_mods/                         маркетплейс
 
 ## 9. Разработка и установка
 
-- **Исходники:** `~/projects/claude_mods`, git. Коммиты только с разрешения пользователя.
+- **Исходники:** `<repo>`, git. Коммиты только с разрешения пользователя.
 - **Горячая перезагрузка:** `rsync -a --delete --exclude .claude-plugin/types/ plugins/session-panel/ ~/.claude/dev-mods/<session-id>/session-panel/` после каждой правки. Движок перезагружает мод в конце хода. Папку `.claude-plugin/types/` движок пишет сам, она в `.gitignore`.
-- **Установка:** `claude plugin marketplace add ~/projects/claude_mods` и `claude plugin install session-panel@claude-mods`. После установки копия в dev-mods удаляется, чтобы мод не загрузился дважды.
-- **Обновление установленной копии:** 1) поднять `version` и в `plugins/session-panel/.claude-plugin/plugin.json`, и в
-  `.claude-plugin/marketplace.json`; 2) выполнить `claude plugin marketplace update claude-mods`, затем
-  `claude plugin update session-panel@claude-mods`; 3) начать новую сессию. Движок загружает снимок из
-  `~/.claude/plugins/cache/claude-mods/session-panel/<version>/`, поэтому правка в репозитории доходит до установленного
-  мода только после обновления.
+- **Установка:** `claude plugin marketplace add philarete173/claude_mods` (или путь к локальному клону) и
+  `claude plugin install session-panel@philarete-mods`. После установки копия в dev-mods удаляется, чтобы мод не
+  загрузился дважды.
+- **Обновление установленной копии:** 1) выпуск: поднять `version` только в
+  `plugins/session-panel/.claude-plugin/plugin.json` (с 0.3.2 запись плагина в `.claude-plugin/marketplace.json` версии
+  не несёт) и выполнить команду `claude plugin tag plugins/session-panel`, которая создаёт тег
+  `session-panel--vX.Y.Z`; 2) выполнить `claude plugin marketplace update philarete-mods`, затем
+  `claude plugin update session-panel@philarete-mods`; 3) начать новую сессию. Движок загружает снимок из
+  `~/.claude/plugins/cache/philarete-mods/session-panel/<version>/`, поэтому правка в репозитории доходит до
+  установленного мода только после обновления.
 
 ## 10. Заимствования (MIT)
 
@@ -566,7 +571,8 @@ claude_mods/                         маркетплейс
 
 ## 11. Итоги спайка (2026-10-07)
 
-Данные: `.superpowers/sdd/2026-10-07-session-panel/spike-results-{1,2}.json`, движок 2.1.288, десктоп.
+Данные: `.superpowers/sdd/2026-10-07-session-panel/spike-results-{1,2}.json` (локальные файлы, в репозитории их нет),
+движок 2.1.288, десктоп.
 
 | Проба | Результат | Решение |
 |---|---|---|

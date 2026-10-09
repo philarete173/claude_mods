@@ -1,6 +1,8 @@
 # Session Panel: план реализации
 
-> **Для исполнителей:** план выполняется задачами через superpowers:subagent-driven-development. Шаги отмечены чекбоксами (`- [ ]`). Каждая задача читается вместе со спецификацией, а раздел «Глобальные ограничения» входит в требования каждой задачи.
+> **Для исполнителей:** план выполняется задачами через superpowers:subagent-driven-development. Шаги отмечены
+> чекбоксами (`- [x]`). Каждая задача читается вместе со спецификацией, а раздел «Глобальные ограничения» входит в
+> требования каждой задачи.
 
 **Цель:** мод Claude Code с боковой панелью живой статистики сессии для вкладки Code приложения Claude Desktop.
 
@@ -15,9 +17,10 @@
 
 ## Глобальные ограничения
 
-- **Корень репозитория:** `/home/philarete/projects/claude_mods`. Мод лежит в `plugins/session-panel/`.
+- **Корень репозитория:** `.`. Мод лежит в `plugins/session-panel/`.
 - **Типы API** (движок 2.1.288):
-  - `/tmp/claude-1000/bundled-skills/2.1.288/2f4ee0d234c5e813b450256be851c0db/plugin-authoring/types/claude-code.d.ts`; файл большой, искать grep'ом по имени;
+  - `types/claude-code.d.ts` в папке навыка `plugin-authoring`, которую пишет движок;
+    файл большой, искать grep'ом по имени;
   - рядом лежат `reference.md` и `examples/` (`pane.tsx`, `pane-state.d.ts`, `band.tsx`, `tool-call.ts`);
   - после первой загрузки мода движок кладёт копию типов в `<папка мода в dev-mods>/.claude-plugin/types/claude-code/index.d.ts`.
 - **Хуки только наблюдают.** Каждый хук возвращает результат `next(e)` без изменений. Нельзя возвращать `deny`, переписывать вход или подменять результат.
@@ -25,7 +28,8 @@
   - сеть: `fetch`, `$.http` под запретом;
   - чтение токенов, ключей и `$.env`;
   - `$.settings`, `$.model`;
-  - запись на диск, кроме `$.store`. Исключение — временный файл спайка `.spike/results.json` в задаче 1.
+  - запись на диск, кроме `$.store`. Исключение — временный файл спайка `.spike/results.json` в задаче 1
+    (локальный файл, в репозитории его нет).
 - **Git:** только `['git', 'branch', '--show-current']` и `['git', 'rev-parse', '--short', 'HEAD']`, с параметрами `{ cwd: root, timeoutMs: 5000 }`.
 - **Язык:** подписи интерфейса и комментарии в коде на английском.
 - **Идентификаторы:**
@@ -43,7 +47,8 @@
 - **Стоимость:** только из движка, по приросту `cost.usd` (§4.4). Таблиц цен и сети нет.
 - **Горячая перезагрузка.** После каждой правки исполнитель синхронизирует копию:
   ```bash
-  rsync -a --delete --exclude '.claude-plugin/types/' --exclude '/tsconfig.json' /home/philarete/projects/claude_mods/plugins/session-panel/ /home/philarete/.claude/dev-mods/bcaecb67-a219-4453-b027-9e930232ca47/session-panel/
+  rsync -a --delete --exclude '.claude-plugin/types/' --exclude '/tsconfig.json' \
+    plugins/session-panel/ ~/.claude/dev-mods/<session-id>/session-panel/
   ```
   Движок перезагружает мод в конце хода главного агента.
 - **Git-коммиты исполнители не делают.** Коммитит главный агент после ревью и только с разрешения пользователя.
@@ -75,15 +80,18 @@
 - Создать (временно, задача 3 его заменит): `plugins/session-panel/hooks/register.tsx`.
 
 **Интерфейсы:**
-- Даёт: пробы пишут файл `/home/philarete/projects/claude_mods/.spike/results.json` в формате ниже. Его читает главный агент.
+- Даёт: пробы пишут файл `.spike/results.json` (локальный файл, в репозитории его нет) в формате ниже. Его читает
+  главный агент.
 
-- [ ] **Шаг 1. Манифесты.**
+- [x] **Шаг 1. Манифесты.**
   - **`marketplace.json`:** `name: "claude-mods"`, `owner.name` из `git config user.name`, а если имя не задано, то `"philarete"`; один плагин `session-panel` с `source: "./plugins/session-panel"`, `version: "0.1.0"` и описанием «Live session stats side pane for the Claude desktop Code tab». Схему сверить с `claude plugin validate`.
   - **`plugin.json`:** `{ "name": "session-panel", "version": "0.1.0", "description": "<то же>" }`.
   - **`hooks.json`:** `{ "modules": ["./register.tsx"] }`.
   - **`LICENSE`:** MIT, `Copyright (c) 2026 <то же имя>`.
   - **`.gitignore`:** из карты файлов.
-- [ ] **Шаг 2. Спайк `register.tsx`.** Экспорт `register: Register` по образцу `examples/pane.tsx`. Модуль собирает объект результатов и пишет его через `$.fs.write` (сигнатуру взять из d.ts) не чаще раза в 2 секунды, отложенно через `$.clock.after`. Все хуки возвращают `next(e)` без изменений. Поля результата:
+- [x] **Шаг 2. Спайк `register.tsx`.** Экспорт `register: Register` по образцу `examples/pane.tsx`. Модуль собирает
+  объект результатов и пишет его через `$.fs.write` (сигнатуру взять из d.ts) не чаще раза в 2 секунды, отложенно через
+  `$.clock.after`. Все хуки возвращают `next(e)` без изменений. Поля результата:
   - `engine`: строка версии, если API её отдаёт (`$.session.version()`), иначе `null`.
   - `time`: `{ toTimeString: new Date().toTimeString(), tzOffset: new Date().getTimezoneOffset(), tz: Intl.DateTimeFormat().resolvedOptions().timeZone }` на `session.start`.
   - `pane` (последние 10): на `session.start` и `session.attach` вызывается `$.ui.open({ id: 'session-panel', title: 'Session' })`. Записать `{ event, surface: e.surface ?? null, surfaces: await $.session.surfaces(), result }`, где `result` — то, что вернул `open`.
@@ -103,10 +111,11 @@
   - `postTool` (последние 10): на `classic.PostToolUse` и `classic.PostToolUseFailure` записать `Object.keys(e)`, `tool_name`, `duration_ms`, `agent_id ?? null`.
   - `breakdown`: `(await $.session.usage({ breakdown: 'summary' })).context.breakdown` на `session.start`. Если там больше 2000 символов JSON, оставить только `skills` и `mcpTools`.
   - Отрисовка: хук `ui.render` для `{ component: 'Pane', requestId: 'session-panel' }` возвращает `Box` со строкой `spike: N steps, M cost samples` и `Text` с временем последней записи файла.
-- [ ] **Шаг 3. Проверка манифестов и модуля.**
-  - Запустить: `claude plugin validate /home/philarete/projects/claude_mods/plugins/session-panel`, затем `claude plugin validate /home/philarete/projects/claude_mods`.
+- [x] **Шаг 3. Проверка манифестов и модуля.**
+  - Запустить: `claude plugin validate plugins/session-panel`, затем `claude plugin validate .`.
   - Ожидается: обе команды без ошибок; отчёт перечисляет хуки `session.start`, `session.attach`, `turn.step`, `turn.start`, `turn.complete`, `session.measure`, `agent.spawn`, `classic.PostToolUse`, `classic.PostToolUseFailure`, `ui.render`.
-- [ ] **Шаг 4. Синхронизация.** Выполнить команду `rsync` из глобальных ограничений и вернуть её вывод. В итоговом отчёте написать, что пользователь должен ответить **Enable for this session** на вопрос о горячей перезагрузке.
+- [x] **Шаг 4. Синхронизация.** Выполнить команду `rsync` из глобальных ограничений и вернуть её вывод. В итоговом
+  отчёте написать, что пользователь должен ответить **Enable for this session** на вопрос о горячей перезагрузке.
 
 После задачи главный агент проводит ход с субагентом и с несколькими инструментами, читает `results.json` и записывает решения по пробам в спецификацию (§8, раздел «Итоги спайка»).
 
@@ -196,7 +205,8 @@ export function fmtClock(ms: number): string
   - любой другой инструмент → его имя.
 - **Форматы:** §3.2 спецификации. Отображение `fmtCountdown`: `ms ≤ 0` → `'↻ now'`; иначе минуты `M = ceil(ms / 60000)`, и `M < 60` → `↻ Mm`, `M < 1440` → `↻ Hh Mm`, иначе `↻ Dd Hh`. `fmtClock` выдаёт локальное `HH:MM:SS` через `new Date(ms)`.
 
-- [ ] **Шаг 1. Написать падающие тесты** в `stats.test.ts` с `import { test, expect } from 'claude-code/testing'` — по одному `test` на функцию. Таблица ожидаемых значений:
+- [x] **Шаг 1. Написать падающие тесты** в `stats.test.ts` с `import { test, expect } from 'claude-code/testing'` — по
+  одному `test` на функцию. Таблица ожидаемых значений:
 
   | Вызов | Ожидается |
   |---|---|
@@ -242,9 +252,10 @@ export function fmtClock(ms: number): string
   - `U = { input_tokens: 12, output_tokens: 777, cache_read_input_tokens: 99000, cache_creation_input_tokens: 900 }`.
 
   Дробные значения сравнивать с допуском (`toBeCloseTo` или аналог из `claude-code/testing`).
-- [ ] **Шаг 2. Убедиться, что тесты падают.** Запустить `claude plugin test /home/philarete/projects/claude_mods/plugins/session-panel`. Ожидается: FAIL (функций ещё нет).
-- [ ] **Шаг 3. Реализовать `stats.ts`** — минимально, чтобы тесты прошли. Без импортов от движка, кроме типов.
-- [ ] **Шаг 4. Тесты проходят.** Тот же запуск. Ожидается: все тесты `stats.test.ts` PASS. Затем синхронизация `rsync`.
+- [x] **Шаг 2. Убедиться, что тесты падают.** Запустить `claude plugin test plugins/session-panel`. Ожидается: FAIL
+  (функций ещё нет).
+- [x] **Шаг 3. Реализовать `stats.ts`** — минимально, чтобы тесты прошли. Без импортов от движка, кроме типов.
+- [x] **Шаг 4. Тесты проходят.** Тот же запуск. Ожидается: все тесты `stats.test.ts` PASS. Затем синхронизация `rsync`.
 
 ---
 
@@ -295,15 +306,17 @@ export function fmtClock(ms: number): string
 - **MCP** — по итогам спайка (§11, проба 4) `WaitForMcpServers` модулям недоступен: источник — `breakdown.mcpTools`; в значении только имена серверов.
 - **Отрисовка временная (до задачи 4):** `ui.render` для `{ component: 'Pane', requestId: 'session-panel' }` выводит `Box` из строк `Text`, по одной на атом, в виде `key: JSON` длиной до 200 символов.
 
-- [ ] **Шаг 1. Написать падающие тесты** в `register.test.ts` на том, что позволяет `claude-code/testing` (в d.ts искать `claude-code/testing`, `mock.store`, `mock.clock`, `$.ui.mount`):
+- [x] **Шаг 1. Написать падающие тесты** в `register.test.ts` на том, что позволяет `claude-code/testing` (в d.ts искать
+  `claude-code/testing`, `mock.store`, `mock.clock`, `$.ui.mount`):
   - (a) после старта сессии команда `session-panel` зарегистрирована;
   - (b) `mock.store` с `collapsed: { log: true }` даёт атом `collapsed.log === true`;
   - (c) `$.ui.mount` панели на `surface: 'desktop'` находит текст `lastTurn`.
 
   Если тестовый набор не умеет вызывать события движка, в отчёте написать, какие события вызвать не удалось, и не подделывать их.
-- [ ] **Шаг 2. Убедиться, что тесты падают.** `claude plugin test …/plugins/session-panel`. Ожидается: FAIL.
-- [ ] **Шаг 3. Реализовать** контракт, `plugin.json` и `register.tsx`.
-- [ ] **Шаг 4. Проверка.** `claude plugin test` проходит целиком (и `stats.test.ts`); `claude plugin validate …/plugins/session-panel` без ошибок. Затем синхронизация `rsync`.
+- [x] **Шаг 2. Убедиться, что тесты падают.** `claude plugin test …/plugins/session-panel`. Ожидается: FAIL.
+- [x] **Шаг 3. Реализовать** контракт, `plugin.json` и `register.tsx`.
+- [x] **Шаг 4. Проверка.** `claude plugin test` проходит целиком (и `stats.test.ts`);
+  `claude plugin validate …/plugins/session-panel` без ошибок. Затем синхронизация `rsync`.
 
 После задачи главный агент проверяет на живом десктопе, что временная отрисовка показывает правдоподобные значения после хода с субагентом.
 
@@ -341,15 +354,17 @@ export function fmtClock(ms: number): string
 - **Строка «метка — значение»:** `Box` с `justifyContent: 'space-between'`.
 - **Цвета текста:** процент шкалы — ключ `warning`/`error` по порогу; Cache от 50% — `success`; статусы ◐ `#2f7de1`, ✓ `success`, ✗ `error`.
 
-- [ ] **Шаг 1. Написать падающие тесты** в `view.test.tsx`: заполнить атомы фикстурами (как именно — найти в `claude-code/testing`) и смонтировать `Pane` на `desktop` и на `terminal`.
+- [x] **Шаг 1. Написать падающие тесты** в `view.test.tsx`: заполнить атомы фикстурами (как именно — найти в
+  `claude-code/testing`) и смонтировать `Pane` на `desktop` и на `terminal`.
   - (a) есть тексты `Context`, `12.8%`, `Turn stats`, `~61 tok/s`, `$0.02`;
   - (b) нажатие `toggle:log` убирает строки журнала, а `mock.store` содержит `collapsed.log === true`;
   - (c) при `rateLimits: []` заголовка `Usage` нет;
   - (d) на `terminal` шкала текстовая (`▰`);
   - (e) `meterSvg(85, 100)` содержит `#e0a030` и `width="85"` у заливки.
-- [ ] **Шаг 2. Убедиться, что тесты падают.** Ожидается: FAIL.
-- [ ] **Шаг 3. Реализовать** `view.tsx` и подключить его в `register.tsx`.
-- [ ] **Шаг 4. Проверка.** `claude plugin test` проходит целиком; `claude plugin validate` без ошибок. Затем синхронизация `rsync`.
+- [x] **Шаг 2. Убедиться, что тесты падают.** Ожидается: FAIL.
+- [x] **Шаг 3. Реализовать** `view.tsx` и подключить его в `register.tsx`.
+- [x] **Шаг 4. Проверка.** `claude plugin test` проходит целиком; `claude plugin validate` без ошибок. Затем
+  синхронизация `rsync`.
 
 ---
 
@@ -358,26 +373,31 @@ export function fmtClock(ms: number): string
 **Файлы:**
 - Создать: `README.md`.
 
-- [ ] **Шаг 1. README.** Разделы:
+- [x] **Шаг 1. README.** Разделы:
   - что показывает панель (по §3, без скриншотов);
-  - установка: `claude plugin marketplace add ~/projects/claude_mods`, `claude plugin install session-panel@claude-mods`;
+  - установка: `claude plugin marketplace add <repo>`, `claude plugin install session-panel@claude-mods`;
   - команда `/session-panel`;
   - что мод делает и чего не делает (§2);
   - как считается стоимость: прирост `cost.usd` после каждого шага приписывается его агенту;
   - разработка: `rsync` и горячая перезагрузка;
   - авторство по §10.
-- [ ] **Шаг 1б. Комментарии об авторстве** над заимствованным кодом (§10): OpenChamber (MIT, © 2025 Bohdan Triapitsyn) — над `computeTurnStats`, `mergedLength`, `cacheHitPct`, `splitCost` в `stats.ts`; Desktop Statusline (MIT, George Liu) — над `fmtCountdown` в `stats.ts` и над `meterSvg` в `view.tsx`. Одна строка на комментарий.
-- [ ] **Шаг 2. Полная проверка** (делает `reality-checker`; результат — реальный вывод команд):
+- [x] **Шаг 1б. Комментарии об авторстве** над заимствованным кодом (§10): OpenChamber (MIT, © 2025 Bohdan Triapitsyn) —
+  над `computeTurnStats`, `mergedLength`, `cacheHitPct`, `splitCost` в `stats.ts`; Desktop Statusline (MIT, George Liu)
+  — над `fmtCountdown` в `stats.ts` и над `meterSvg` в `view.tsx`. Одна строка на комментарий.
+- [x] **Шаг 2. Полная проверка** (делает `reality-checker`; результат — реальный вывод команд):
   - `claude plugin validate plugins/session-panel` и `claude plugin validate .` — без ошибок;
   - `claude plugin test plugins/session-panel` — все тесты PASS;
-  - проверка типов. TypeScript в системе нет, поэтому **нужно разрешение пользователя** на загрузку через npx: `npx -y -p typescript@5.9 tsc -p /home/philarete/.claude/dev-mods/bcaecb67-a219-4453-b027-9e930232ca47/session-panel` (tsconfig, который движок положил в `.claude-plugin/types/`). Ожидается: 0 ошибок.
-- [ ] **Шаг 3. Ручная сверка с пользователем** (§7, пункт 4): контекст и лимиты совпадают с индикаторами приложения; после хода с субагентом заполнены Turn stats, Subagents и Log.
-- [ ] **Шаг 4. Установка** (с разрешения пользователя):
-  - `claude plugin marketplace add /home/philarete/projects/claude_mods`;
+  - проверка типов. TypeScript в системе нет, поэтому **нужно разрешение пользователя** на загрузку через npx:
+    `npx -y -p typescript@5.9 tsc -p ~/.claude/dev-mods/<session-id>/session-panel` (tsconfig, который движок положил в
+    `.claude-plugin/types/`). Ожидается: 0 ошибок.
+- [x] **Шаг 3. Ручная сверка с пользователем** (§7, пункт 4): контекст и лимиты совпадают с индикаторами приложения;
+  после хода с субагентом заполнены Turn stats, Subagents и Log.
+- [x] **Шаг 4. Установка** (с разрешения пользователя):
+  - `claude plugin marketplace add .`;
   - `claude plugin install session-panel@claude-mods`;
   - удалить копию в dev-mods, чтобы мод не загрузился дважды;
   - в новой сессии убедиться, что панель открылась.
-- [ ] **Шаг 5. Коммиты** — главный агент, только с разрешения пользователя.
+- [x] **Шаг 5. Коммиты** — главный агент, только с разрешения пользователя.
 
 ## Задачи, добавленные по ходу работы
 

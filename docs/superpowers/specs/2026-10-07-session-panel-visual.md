@@ -1205,7 +1205,8 @@ Results of the live renders (2026-10-07, 2026-10-08 and 2026-10-09):
      the live check of 0.2.0 (`docs/live-check-2026-10-08-0.2.0.md`) saw part of them. At about 355 px there is no `who`
      and the outcome is at the right. At about 270 px `@type` is gone, while the descriptions and the outcome show. The
      third layout, with the outcome in front of the text, was not reached at about 270 px.
-4. The tree was not refused, but the desktop drew no Svg with an empty `alt`: the icons, the ring and the rules were missing while their slots stayed. Fixed by giving every Svg a label (commit ddeaf86).
+4. The tree was not refused, but the desktop drew no Svg with an empty `alt`: the icons, the ring and the rules were
+   missing while their slots stayed. Fixed by giving every Svg a label (commit eb28b17).
 5. Pass. A click on the chevron folds the section, and the folded state survives a reload.
 6. Pending.
 7. Seen working in the 0.3.0 live check (2026-10-09):
