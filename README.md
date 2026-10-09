@@ -15,11 +15,13 @@ states: the store file follows the plugin's identity, `session-panel@inline` aga
 - **Project**: the project folder, its git branch, and the working tree's changes against HEAD: `12 files changed`
   and `+2061 / −111`. New files count too, with their lines counted for the first 50. A count that is only a lower
   bound is marked with a plus: `+2061+ / −111` when new files went uncounted, and `12+ files changed`, with no line
-  numbers, when git's status output was cut (it has a 4 MiB limit). The changes are read from the first turn of the
-  main agent on; before it only the folder and the branch show. They are read again about a second after an agent
-  edits a file or runs a command that is not read-only, and once a minute, so that edits made outside Claude's tools
-  (an editor, a terminal, a background command that ended after its call returned) show without a new turn; after a
-  slow read the next one waits four times as long as that read took. A folder whose `git status` times out twice in a
+  numbers, when git's status output was cut (it has a 4 MiB limit). A lower bound of no lines shows no numbers, as
+  unknown lines do (for example, a SHA-256 repository with only new files, or a first new-file count that failed). The
+  changes are read from the first turn of the main agent on; before it only the folder and the branch show. They are
+  read again about a second after an agent edits a file or runs a command that is not read-only, and once a minute while
+  the pane is shown, so that edits made outside Claude's tools (an editor, a terminal, a background command that ended
+  after its call returned) show without a new turn; opening the pane reads at once, and after a slow read the next one
+  waits four times as long as that read took, at most four minutes. A folder whose `git status` times out twice in a
   row, such as a dotfiles repository in `$HOME`, is given up for changes while the mod lives (until another folder has
   been read); its branch still shows. Outside a repository only the folder shows; a clean tree has no changes row.
 - **Usage**: the plan limits (5-hour, Weekly, Spend) as meters with a countdown to each reset. Hidden when the engine
@@ -41,8 +43,9 @@ states: the store file follows the plugin's identity, `session-panel@inline` aga
   and results (a successful Agent call, a SendMessage to a known subagent or a subagent's `SubagentHandback` is not
   logged: their lines say it), compactions. Tool calls and subagent results both carry their outcome (✓/✗ and the
   time, or denied) in a right-aligned column. A call that comes back as an error because it was abandoned (you
-  interrupted it, or a stop did) is a dim note with its time alone and no ✗; this rests on the engine's `next.signal`
-  and is to be confirmed live. A subagent's answer loses its markdown marks (paired `**`, backticks, a heading's `#`).
+  interrupted it, or a stop did) is not drawn as an error: it is not red, its `who` and outcome are dim as on every line
+  that is no error, and its outcome is the time alone, with no ✗; this rests on the engine's `next.signal` and is to be
+  confirmed live. A subagent's answer loses its markdown marks (paired `**`, backticks, a heading's `#`).
   In auto mode a subagent's `done` line shows the report it handed back, even when auto mode withheld or flagged it;
   the text is masked as any other, and the main agent did not get it, a known limitation. In a narrow pane the `who`
   column gives way first, and then the outcome moves in front of the text; where there is no `who`, a prompt reads

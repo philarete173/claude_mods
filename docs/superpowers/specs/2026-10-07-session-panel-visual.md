@@ -3,12 +3,13 @@
 > Changes after the approved preview: every Svg carries a non-empty alt (§5.2, §11); the subagent `@type` sits in a
 > column of its own (§6.7); the log's `who` column is 13 cells on the desktop; in a narrow pane the log drops `who`
 > first and a subagent row drops `@type` below 12 description cells (§6.7, §6.10); the project is a block of its own,
-> with a changes row (§6.3); a count that is only a lower bound has a plus (§6.3); in a narrow log a prompt reads
-> `you › …` and an engine message `engine › …` (§6.10); the Log fills the pane's free height, 8 lines at least
-> (§6.12). The HTML preview `docs/design/session-panel-preview.html` stays the approved v2 mock-up and predates these
-> changes.
+> with a changes row (§6.3); a count that is only a lower bound has a plus, but a lower bound of no lines has no numbers
+> (§6.3); in a narrow log a prompt reads `you › …` and an engine message `engine › …` (§6.10); the Log fills the pane's
+> free height, 8 lines at least (§6.12). The HTML preview `docs/design/session-panel-preview.html` stays the approved v2
+> mock-up and predates these changes.
 
-Date: 2026-10-07. Status: proposal. The user approves the look in `docs/design/session-panel-preview.html` before implementation.
+Date: 2026-10-07. Status: implemented and shipped (0.3.0). The user approved the look in
+`docs/design/session-panel-preview.html` before implementation.
 
 Scope: presentation only. The sections, their content, the formats and every formula of `2026-10-07-session-panel-design.md` §3–§4 stay as they are. Where the two specs differ on looks, this one replaces §3.1 of the main spec. Engine 2.1.288. "d.ts" below means `plugin-authoring/types/claude-code.d.ts` of that engine, cited by line.
 
@@ -504,6 +505,9 @@ The Project block follows the top block and comes before Usage, as OpenChamber's
     diffs are not run, and `lines` is null. `filesLabel` draws the label.
   - When new files past the first 50, or one whose count failed, add no lines, the added count has a plus after it:
     `+2061+ / −4`. `linesCell` draws it (`hasMoreAdded`).
+  - A lower bound of no lines (`+0` with `hasMoreAdded`, and no lines removed) shows no numbers, as unknown lines do:
+    the count alone shows. It happens in a SHA-256 repository with only new files, where every `--no-index` call fails,
+    and when the first new-file count fails.
 - **Left out.**
   - With no project name, the whole block.
   - With no branch, the branch row.
@@ -877,7 +881,7 @@ function logParts(d: Draw): RenderElement[] {
 - **Weight.** Time and `who` are dim, so the text carries the row. An error `who` is red.
 - **`who` width per surface.**
   - Desktop: a constant 13 cells, so the text column does not jump when the longest `who` changes.
-  - Terminal: v1's longest-visible `who`, capped at 14.
+  - Terminal: the longest `who` among the lines drawn, as in v1, capped at 14.
 - **Outcome.** The mark and the time of an action (`✓ 0.3s`, `✗ 0.3s`), or `denied`, in a column of its own at the right edge of the row. A subagent's result has one too: `✓ 1m 12s`, `✗ 1m 12s`, or the time alone for a stop, which is no fault.
   - The column is FIXED and right-aligned (`justifyContent="flex-end"`). It holds one `Text wrap="truncate"`, styled like the `who` of the same line: red for an error line, dim otherwise.
   - A line without an outcome (a prompt, `spawned`, `resumed`, a compaction) gets the same cell, empty, so every text is cut at the same x.
@@ -899,8 +903,9 @@ function logParts(d: Draw): RenderElement[] {
   lines drawn. Those may be more than the lines shown (§6.12), so a long outcome lower down can make `who` give way for
   every row. The rule stays: one layout for the head and the tail is what keeps their columns in line.
 - **Abandoned call.** A tool call that came back as an error while its call had been abandoned (the person interrupted
-  it, or a stop did) is a note, not a fault. It is kind `info`, so it is dim, and it shows its time alone, with no ✗, as
-  a stopped subagent's result does. This rests on the engine's `next.signal` (`ran.isError` and `next.signal.aborted`
+  it, or a stop did) is a note, not a fault. It is kind `info`, so it is not red: its text is drawn as on any line that
+  is no error, its `who` and outcome are dim as on every such line, and its outcome is the time alone, with no ✗, as a
+  stopped subagent's result does. This rests on the engine's `next.signal` (`ran.isError` and `next.signal.aborted`
   after `await next(e)`), and is to be confirmed live (§11, check 9).
 
 ### 6.11 Empty and partial states
@@ -914,7 +919,8 @@ function logParts(d: Draw): RenderElement[] {
 | No project name | no Project block (§6.3) |
 | No branch | the Project block without the branch row |
 | No repository, a clean tree, a failed git, or changes not read yet or given up (§6.3) | no changes row |
-| A status over 4 MiB, or new files not all counted | `N+ files changed` with no numbers, or `+2061+ / −4` (§6.3) |
+| A status over 4 MiB | `N+ files changed` with no numbers (§6.3) |
+| New files not all counted | `+2061+ / −4`; with no line counted, no numbers, as in the next row (§6.3) |
 | Lines unknown (an unborn HEAD, a failed diff) or both 0 (only binary files changed) | the changes row with the count alone, no numbers |
 | Subagent cost unknown | dim `—` in the cost column |
 | More than 8 subagents | `+N more` (§6.7) |
@@ -940,7 +946,8 @@ natural height, in one Box, as 0.2.0 did.
   - It scrolls a body that is taller than the pane, natively, with a scrollbar and the wheel.
   - A change of `bodyRows` alone re-runs `ui.render`, on every frame of a resize.
 - **What did not work.** A root with `height="100%"` grows to its content: all 60 lines show, and the pane scrolls.
-- **Not verified.** The terminal (Ink/Yoga), and nested chains of growing Boxes, which the flat structure avoids.
+- **Not verified.** The terminal (Ink/Yoga); the real pane, since the spikes drew throwaway content (§11, check 10); and
+  nested chains of growing Boxes, which the flat structure avoids.
 - **Evidence.** Two live spikes on the desktop, engine 2.1.288, 2026-10-08, with a throwaway mod that drew numbered log
   lines and a footer line after them (the mod was deleted afterwards). Four of its modes matter:
   - B, a root with `height={bodyRows}` and a `flexGrow` log with `overflow="hidden"`, worked exactly: at `bodyRows` 65
@@ -1088,7 +1095,7 @@ The ellipsis is the surface's own, from `wrap="truncate"`. No string is shortene
 | Meter | `meterSvg` at the computed px width | ten cells of `▰▱` in the meter colours, as v1 |
 | Status mark | 14 px status icon, `alt` = status | v1 glyphs in a 1-cell Box: `◐` blue, `✓` success, `✗` error, `✗` dim |
 | `+N more` indent | 3 cells | 2 cells |
-| `who` column | 13 cells | longest visible `who`, ≤ 14 |
+| `who` column | 13 cells | longest `who` among the lines drawn, ≤ 14 |
 | `@type` column | 15 cells | longest drawn `@type`, ≤ 15 |
 | Outcome column | longest drawn outcome + 1 cell | longest drawn outcome |
 | Header | `[icon] Title ▾ … summary` | `Title ▾ … summary`. The plain Button draws the glyph alone, and the focus inverts it (l.896–897, l.929–934). |
@@ -1123,10 +1130,11 @@ Checks on the first live render, before the tests are frozen:
 5. **Chevron.** It is dim at rest and full strength under the pointer. A click folds the section and the header keeps its summary.
 6. **Lines separator.** On the desktop the changes row reads `+8 / −1`, with the spaces around the slash, not `+8/−1` (the no-break spaces of `LINES_SEP`, §6.3).
 7. **Changes refresh.** The changes row updates about a second after an edit or a command by any agent. A read-only
-   command such as `ls` does not trigger it. In a big repository it comes later: four times the last read. An edit made
-   outside Claude's tools (an editor, a terminal) shows within about a minute, with no new turn: the project is read on
-   every second tick of the 30-second timer. In a new session the changes row is absent until the first turn of the
-   main agent: before it only the folder and the branch show.
+   command such as `ls` does not trigger it. In a big repository it comes later: four times the last read, which counts
+   at most a minute, so the wait is at most four minutes. An edit made outside Claude's tools (an editor, a terminal)
+   shows within about a minute, with no new turn, while the pane is shown: the project is read on every second tick of
+   the 30-second timer, but only while the pane is open and placed. Opening the pane reads at once. In a new session the
+   changes row is absent until the first turn of the main agent: before it only the folder and the branch show.
 
 Open checks since Tasks 11 and 12, for the 0.3.0 release:
 
@@ -1134,9 +1142,10 @@ Open checks since Tasks 11 and 12, for the 0.3.0 release:
    the Log's tail of `height={0}` (§6.12). Docked (110 columns or more) and inline: the Log reaches the bottom of the
    pane, and a pane too short for the head scrolls. If the terminal does not grow the tail, the hedge is `rows` 0 on the
    terminal, which draws the tree of 0.2.0.
-9. **An abandoned call.** A tool call that is stopped (an agent on `sleep 120`, stopped after 20 s) logs a dim line with
-   its time and no ✗ (§6.10). The same for a subagent stopped with `TaskStop`: does `next.signal` fire for it, and has
-   it fired by the time `next(e)` returns the aborted result?
+9. **An abandoned call.** A tool call that is stopped (an agent on `sleep 120`, stopped after 20 s) logs a line that is
+   not red, with its time alone as the outcome (`20.0s`) and no ✗ (§6.10). Look for that, not for a dim line: the text
+   is drawn as on any line that is no error, and its `who` and outcome are dim. The same for a subagent stopped with
+   `TaskStop`: does `next.signal` fire for it, and has it fired by the time `next(e)` returns the aborted result?
 10. **The real pane at three sizes.** The spikes drew throwaway content, so the pane as the mod draws it has not been
     seen (§6.12). At three pane heights: the Log reaches the bottom edge, there is no scrollbar while the content fits,
     and folding a section grows the Log.
@@ -1151,7 +1160,13 @@ Results of the live renders (2026-10-07 and 2026-10-08):
 1. Pass. At ~300 px the bar ends ~18 px left of the percent; `CELL_PX` 8 stays.
 2. Pass. 12–14 px between the ink and the rule on each side, ≈ 17 px box to box.
 3. Pass. At ~300 px no row crosses the edge; descriptions and log text end in `…`. Since Task 8 the log's outcome column gives way when the text would keep fewer than 8 cells (about 40 columns on the desktop), so at ~300 px the log shows the outcome at the end of the text, by design.
-   - Task 9 changed the narrow rules (§6.7, §6.10) and replaces the Task 8 rule above: in a narrow pane `who` gives way first, then the outcome moves in front of the text, and a subagent row drops `@type` when its description would keep fewer than 12 cells. By the constants, below about 40 columns on the desktop the log drops `who` and the subagent rows drop `@type`, and below about 26 the outcome moves in front of the text. These figures are computed, not seen live; to be confirmed in the next live check.
+   - Task 9 changed the narrow rules (§6.7, §6.10) and replaces the Task 8 rule above: in a narrow pane `who` gives way
+     first, then the outcome moves in front of the text, and a subagent row drops `@type` when its description would
+     keep fewer than 12 cells. By the constants, below about 40 columns on the desktop the log drops `who` and the
+     subagent rows drop `@type`, and below about 26 the outcome moves in front of the text. These figures are computed;
+     the live check of 0.2.0 (`docs/live-check-2026-10-08-0.2.0.md`) saw part of them. At about 355 px there is no `who`
+     and the outcome is at the right. At about 270 px `@type` is gone, while the descriptions and the outcome show. The
+     third layout, with the outcome in front of the text, was not reached at about 270 px.
 4. The tree was not refused, but the desktop drew no Svg with an empty `alt`: the icons, the ring and the rules were missing while their slots stayed. Fixed by giving every Svg a label (commit c5f73d1).
 5. Pass. A click on the chevron folds the section, and the folded state survives a reload.
 6. Pending.
