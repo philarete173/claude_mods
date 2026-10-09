@@ -285,6 +285,7 @@ test('plainText takes the `**` of a pair, backticks and the `#` marks of a headi
     ['**Verdict:** ok', 'Verdict: ok'],
     ['**One** and **two**', 'One and two'],
     ['a **b** c', 'a b c'],
+    ['**1** failed and **2** passed', '1 failed and 2 passed'], // a body of one character closes at its own `**`
     ['**bold with spaces inside**', 'bold with spaces inside'], // the spaces inside stay: only the pair goes
     ['`a`', 'a'],
     ['run `git status` now', 'run git status now'],

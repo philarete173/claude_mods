@@ -101,6 +101,11 @@ let lastModelWindow: number | null = null
 // The cost readings run one after another, each against the one before it: none overtakes another.
 let costQueue: Promise<void> = Promise.resolve()
 
+// The presses of the pane run one after another too, whether the one before failed or not. A press builds on the map
+// that it reads from the store (toggleSection), so one that read it before the write of the press before it had ended
+// would drop that fold. A reload of the module starts the chain over: a press then waits for none of the old module's.
+let pressQueue: Promise<void> = Promise.resolve()
+
 // Whether a read of the project is under way. The reads run one at a time: two never overlap, and git is not asked for
 // the same thing twice at once.
 let isProjectBusy = false
@@ -229,8 +234,9 @@ async function refreshUsage($: EngineInterface): Promise<void> {
   const now = await $.session.usage({ breakdown: 'summary' })
   const { breakdown } = now.context
   // WaitForMcpServers is not there for a module: every server that has tools in the context is listed, whatever its
-  // state. The desktop app's own servers (`ccd_…` and DESKTOP_SERVERS) are neither listed nor counted.
-  const names = [...new Set(breakdown?.mcpTools.map(tool => tool.serverName))].filter(
+  // state. The desktop app's own servers (`ccd_…` and DESKTOP_SERVERS) are neither listed nor counted. A name is the
+  // key as a configuration authored it, so its format characters go (stripFormat): a U+202E would reorder the list.
+  const names = [...new Set(breakdown?.mcpTools.map(tool => stripFormat(tool.serverName)))].filter(
     name => !name.startsWith('ccd_') && !DESKTOP_SERVERS.includes(name),
   )
   // The window is the breakdown's: a compaction window under the model's shows up only there. Without one, the window
@@ -266,8 +272,8 @@ async function gitBranch($: EngineInterface, root: string): Promise<string | nul
 // the index and take index.lock, which makes the git commands of the person or the agent fail. It passes
 // `-c core.fsmonitor=false` too, or git may run the fsmonitor hook that the person configured, or start its own daemon,
 // and `-c diff.autoRefreshIndex=false`, or a diff of the tree refreshes the index all the same, taking index.lock and
-// rewriting .git/index. The `env` it is given, GIT_READ_ENV, keeps a partial clone from fetching the objects it lacks
-// from its remote, which is network.
+// rewriting .git/index. The `env` it is given, GIT_READ_ENV or, for a `--no-index` call, NO_INDEX_ENV, keeps a partial
+// clone from fetching the objects it lacks from its remote, which is network.
 async function gitRun(
   $: EngineInterface, argv: string[], cwd: string, env?: Record<string, string>,
 ): Promise<ProcessRunResult | null> {
@@ -496,9 +502,10 @@ export const register: Register = on => {
     // The baseline, and the first Total. A reading that fails must not stop the timer or the opening of the pane.
     await chargeCost($, undefined).catch(() => undefined)
     // The store holds the map this mod wrote itself, but a file can be edited: what is not a map of booleans is
-    // ignored.
+    // ignored. A press made while the map was loading wins over it; the atom starts as `{}`, so with no press the
+    // stored map is taken whole.
     const saved = await $.store.get('collapsed')
-    if (isFoldedMap(saved)) await update($, collapsedAtom, () => saved)
+    if (isFoldedMap(saved)) await update($, collapsedAtom, held => ({ ...saved, ...held }))
     inBackground($, () => refreshUsage($))
     inBackground($, () => requestProject($))
     let ticks = 0
@@ -772,7 +779,7 @@ export const register: Register = on => {
 
     return renderPane(els, data, e.props, {
       onToggle: id => {
-        toggleSection($, id).catch(() => undefined)
+        pressQueue = pressQueue.then(() => toggleSection($, id)).catch(() => undefined)
       },
     })
   })

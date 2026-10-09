@@ -207,7 +207,8 @@ export function redact(s: string): string {
 // a line, with the space after them. A `**` that stands alone or has a space beside it stays (`x ** 2`, `2**10`), and
 // so does `__`: `__init__.py` is a file, not bold.
 export function plainText(s: string): string {
-  return s.replace(/\*\*(\S(?:.*?\S)?)\*\*/g, '$1').replace(/`/g, '').replace(/^#+ /gm, '')
+  // The group inside the pair is lazy (`??`): a body of one character closes at its own `**`, not at the next pair's.
+  return s.replace(/\*\*(\S(?:.*?\S)??)\*\*/g, '$1').replace(/`/g, '').replace(/^#+ /gm, '')
 }
 
 // Takes out the format characters (stripFormat), collapses whitespace runs and cuts to `max` characters, the last one

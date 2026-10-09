@@ -231,6 +231,7 @@ type World = {
   usageLag: number // how long usage() takes, in mock ms
   usageFails: boolean // usage() rejects
   isStoreUnreadable: boolean // a read of the store rejects (only where `bottom` was given a store that can break)
+  storeLag: number // how long each call of that store takes, in mock ms
   toolFailMs: number // how long a failing tool call takes, in mock ms
   tokens: number | undefined // context.tokens of usage(): none before the first response of the window
   rawMaxTokens: number | undefined // the window the breakdown measures against; undefined: no breakdown in usage()
@@ -259,8 +260,8 @@ const gitAnswer = (w: World, argv: readonly string[]): GitAnswer => {
 }
 
 // The bottom of every chain: what the engine itself would answer, and what it was asked. With `isStoreBreakable` the
-// store is one in memory that answers reads and writes, and rejects every read while `isStoreUnreadable` is set: a
-// store that fails as the engine's may, which `mock.store` never does.
+// store is one in memory that answers reads and writes, rejects every read while `isStoreUnreadable` is set, and takes
+// `storeLag` mock ms over each call: a store that fails and lags as the engine's may, which `mock.store` never does.
 const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isStoreBreakable = false): World => {
   const w: World = {
     usd: 10,
@@ -290,6 +291,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     usageLag: 0,
     usageFails: false,
     isStoreUnreadable: false,
+    storeLag: 0,
     toolFailMs: 0,
     tokens: undefined,
     rawMaxTokens: 1_000_000,
@@ -304,12 +306,14 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
   }
   if (isStoreBreakable) {
     const kept: Record<string, unknown> = { ...store }
-    on('store.get', (_$, e) => {
+    on('store.get', async (_$, e) => {
+      if (w.storeLag > 0) await clock.sleep(w.storeLag)
       if (w.isStoreUnreadable) throw new Error('the store cannot be read')
 
       return { value: kept[e.key] }
     })
-    on('store.set', (_$, e) => {
+    on('store.set', async (_$, e) => {
+      if (w.storeLag > 0) await clock.sleep(w.storeLag)
       kept[e.key] = JSON.parse(JSON.stringify(e.value))
 
       return { value: undefined }
@@ -699,6 +703,49 @@ test('a press when the store cannot be read builds on the map of the pane, and i
     await ui.unmount()
   })
 
+// The store takes time over each call, 50 ms here, and a press builds on the map that it reads there: two presses made
+// inside one round-trip, or a press and the load of the start-up, must not undo each other, in the pane or the store.
+test('a second press, made while the first one waits on the store, keeps the fold of the first', WITH_STORE,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock, { collapsed: { log: true } }, true)
+    await $.session.start(START)
+    await clock.advance(1)
+    const ui = await mountPane($)
+    w.storeLag = 50
+
+    const first = ui.press({ key: 'toggle:turn' })
+    await clock.advance(20) // the first press is still reading the store
+    const second = ui.press({ key: 'toggle:mcp' })
+    await clock.advance(1000) // far past the four calls of the store that the two presses make
+    await Promise.all([first, second])
+    w.storeLag = 0
+
+    const folded = { log: true, turn: true, mcp: true }
+    expect((await readState($)).collapsed).toEqual(folded)
+    expect(await readStore($)).toEqual(folded)
+    await ui.unmount()
+  })
+
+test('a press made while the map of the store is loaded at the start-up survives the load', WITH_STORE,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock, { collapsed: { mcp: true, turn: false } }, true)
+    const ui = await mountPane($) // no session.start yet: the pane is open and shows nothing folded
+    w.storeLag = 50
+
+    const press = ui.press({ key: 'toggle:turn' }) // it folds Turn, which the store has left open
+    await clock.advance(10) // the press is still reading the store
+    const start = $.session.start(START) // the load reads the store now, and gets the map as it was before the press
+    await clock.advance(1000) // far past the calls of the store
+    await Promise.all([press, start])
+    w.storeLag = 0
+
+    expect((await readState($)).collapsed).toEqual({ mcp: true, turn: true })
+    expect(await readStore($)).toEqual({ mcp: true, turn: true })
+    await ui.unmount()
+  })
+
 test('the command opens the pane, closes it when it is shown, and says why when it is not placed', async ($, on) => {
   const w = bottom(on, mock.clock(on))
   const run = async (): Promise<string | undefined> => (await $.command.run({ ...RUN, command: 'session-panel' })).text
@@ -820,6 +867,20 @@ test('a turn that carries an agent id is no turn of the main agent: it does not 
     await clock.advance(1)
     expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, DIFF_RUN])
     expect((await readState($)).project.changes).toEqual({ files: 1, lines: { added: 3, removed: 1 } })
+  })
+
+test('only the first turn of the main agent asks for a read: the start of a second one asks for none', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await openTree($, clock, w)
+    expect(reads(w)).toBe(1) // the read that the first turn asked for
+
+    await startTurn($, 't1')
+    await clock.advance(1)
+    expect(reads(w)).toBe(1)
   })
 
 // The names of the MCP servers the panel lists after start-up, for a breakdown that holds a tool of each of `servers`.
@@ -2116,6 +2177,14 @@ test('the format characters are taken out of the branch and the folder name: a U
     expect((await readState($)).project).toEqual({ name: 'online_shop', branch: 'main', changes: null })
   })
 
+test('the format characters are taken out of the names of the MCP servers, before the hidden ones are matched',
+  WITH_READER, async ($, on) => {
+    // The U+202E is in the name of the person's server; the U+200B is in the prefix of `ccd_x`, a server of the app.
+    const servers = [`issue${BIDI}-hub`, `cc${ZWSP}d_x`, 'codebase-memory']
+
+    expect(await listedAfterStart($, on, servers)).toEqual(['issue-hub', 'codebase-memory'])
+  })
+
 test('a detached HEAD, and a branch of nothing but format characters, show the short commit', WITH_READER,
   async ($, on) => {
     const clock = mock.clock(on)
@@ -3023,6 +3092,22 @@ test('every second tick of the timer asks for a read of the project, and the fir
     expect(w.invalidated).toHaveLength(4)
     expect(reads(w)).toBe(2)
   })
+
+// The tick dates its ask with the time of the clock, and the wait that it leaves is measured from that time: a write
+// call inside the wait adds no read of its own.
+test('a write call inside the wait that a tick left adds no read of its own', WITH_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  w.runs.length = 0
+
+  await clock.advance(1_000_000 + 60_000 - clock.now()) // the second tick asks for a read, which is due 1000 ms later
+  await clock.advance(100)
+  await $.tool.call(instant()) // 100 ms into the wait: it adds nothing
+  await clock.advance(5 * PROJECT_DELAY_MS)
+  expect(reads(w)).toBe(1)
+})
 
 test('the read that a tick asks for waits four times as long as the last read took, when that is more than the delay',
   WITH_READER, async ($, on) => {
