@@ -56,6 +56,11 @@ const PROJECT_DELAY_MS = 1000
 // may come during the read before), and a read that ran into its timeouts is not retried at once.
 const PROJECT_GAP_FACTOR = 4
 
+// The most one read counts for in lastReadMs, in ms, so the gap rule waits four minutes at most. A read is timed by the
+// wall clock: a suspend in the middle of one would count the whole sleep, and stop the minute read for four times as
+// long. A real read that long already has git near its timeouts.
+const READ_MS_MAX = 60_000
+
 // How long each git call that reads the changes may run, in ms.
 const CHANGES_TIMEOUT_MS = 10_000
 
@@ -120,8 +125,8 @@ let isProjectStale = false
 // new call would get is taken as lost, and the next call asks again.
 let projectWait: { askedAt: number; delayMs: number } | null = null
 
-// How long the last read of the project took, in ms, whether it succeeded or failed; 0 until the first one ends. The
-// delay of the next delayed read follows it (PROJECT_GAP_FACTOR).
+// How long the last read of the project took, in ms, whether it succeeded or failed, and READ_MS_MAX at most; 0 until
+// the first one ends. The delay of the next delayed read follows it (PROJECT_GAP_FACTOR).
 let lastReadMs = 0
 
 // Whether a turn of the main agent has started since this module loaded; false at load. `git status` and `git diff` can
@@ -175,8 +180,9 @@ const agentOutcome = (
   const took = fmtDuration(durationMs)
   if (status === 'stopped') return { text: status, outcome: took }
   if (status !== 'done') return { text: status, outcome: `✗ ${took}` }
-  // The answer is markdown, which the pane shows as it is: its marks go first.
-  const said = shorten(redact(plainText(answer)), 80)
+  // The answer is markdown, which the pane shows as it is: its marks go first, but after its format characters, as one
+  // beside a mark (a BOM after `**`) hides it from plainText.
+  const said = shorten(redact(plainText(stripFormat(answer))), 80)
   const head = row.costUsd === null ? 'done' : `done · ${fmtUsd(row.costUsd)}`
 
   return { text: said === '' ? head : `${head} — ${said}`, outcome: `✓ ${took}` }
@@ -393,7 +399,7 @@ async function readProject($: EngineInterface): Promise<void> {
   try {
     await refreshProject($)
   } finally {
-    lastReadMs = (await $.clock.now()) - startedAt
+    lastReadMs = Math.min((await $.clock.now()) - startedAt, READ_MS_MAX)
   }
 }
 
@@ -502,9 +508,9 @@ export const register: Register = on => {
     // The baseline, and the first Total. A reading that fails must not stop the timer or the opening of the pane.
     await chargeCost($, undefined).catch(() => undefined)
     // The store holds the map this mod wrote itself, but a file can be edited: what is not a map of booleans is
-    // ignored. A press made while the map was loading wins over it; the atom starts as `{}`, so with no press the
-    // stored map is taken whole.
-    const saved = await $.store.get('collapsed')
+    // ignored, and so is a store that cannot be read. A press made while the map was loading wins over it; the atom
+    // starts as `{}`, so with no press the stored map is taken whole.
+    const saved = await $.store.get('collapsed').catch(() => undefined)
     if (isFoldedMap(saved)) await update($, collapsedAtom, held => ({ ...saved, ...held }))
     inBackground($, () => refreshUsage($))
     inBackground($, () => requestProject($))
@@ -516,8 +522,15 @@ export const register: Register = on => {
       if (ticks % 2 === 0) {
         refreshUsage($).catch(() => undefined)
         // A file that changed outside Claude's tools (an editor, a terminal, a background command that ended after its
-        // call returned) shows without a new turn. The gap rule keeps git to a quarter of the time.
-        $.clock.now().then(now => requestProjectLater($, now)).catch(() => undefined)
+        // call returned) shows without a new turn. The gap rule keeps git to a quarter of the time. The tick asks only
+        // while the pane is shown: until 0.3.0 an idle session ran no git, and a closed pane has no one to show the
+        // count to. The reads that follow the person's or the agent's work (turn ends, write calls, CwdChanged) are
+        // unchanged, and a pane that opens asks for one itself. A list of panes that cannot be read asks for nothing.
+        $.clock.now()
+          .then(async now => {
+            if ((await $.ui.panes()).some(pane => pane.id === PANE && pane.isPlaced)) requestProjectLater($, now)
+          })
+          .catch(() => undefined)
       }
     })
     if ((await $.session.surfaces()).includes('desktop')) await $.ui.open({ id: PANE, title: 'Session' })
@@ -527,7 +540,11 @@ export const register: Register = on => {
 
   on('session.attach', async ($, e, next) => {
     const attached = await next(e)
-    if (e.surface === 'desktop') await $.ui.open({ id: PANE, title: 'Session' })
+    if (e.surface === 'desktop') {
+      await $.ui.open({ id: PANE, title: 'Session' })
+      // The timer reads the project only while the pane is shown (session.start), so a pane that opens asks for a read.
+      inBackground($, () => requestProject($))
+    }
 
     return attached
   })
@@ -558,6 +575,8 @@ export const register: Register = on => {
       return { text: 'Session pane closed.' }
     }
     const opened = await $.ui.open({ id: PANE, title: 'Session' })
+    // As on an attach: a pane that opens asks for a read of the project, since the timer asks only while it is shown.
+    inBackground($, () => requestProject($))
 
     return { text: opened.isPlaced ? 'Session pane opened.' : `Session pane is not shown: ${opened.reason}` }
   })

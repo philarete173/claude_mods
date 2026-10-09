@@ -36,6 +36,7 @@ const PANE_UP: UiPane = { id: 'session-panel', title: 'Session', isShown: true, 
 // filters, so it is read before the tree is open (the first turn of the main agent opens it).
 const PROJECT_DELAY_MS = 1000
 const PROJECT_GAP_FACTOR = 4
+const READ_MS_MAX = 60_000 // the most that one read counts for in the gap rule, whatever the clock says it took
 const GIT_READ = [
   'git', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'diff.autoRefreshIndex=false',
 ]
@@ -147,8 +148,35 @@ const OTHER_SESSION: Plugin = {
     on('command.run', { command: 'read-store' }, async $ => ({ text: JSON.stringify(await $.store.get('collapsed')) }))
   },
 }
+// A plugin above the mod's that plays a suspend in the middle of a read, as the wall clock shows it: `arm-suspend`
+// takes the sleep in ms, and from the next `git status` on the clock reads that much later, with no timer run
+// meanwhile. The mock clock cannot show that by itself: it runs the timers through a slow read, as a machine that
+// sleeps does not. Like any plugin of a test it closes over nothing of this file.
+const SUSPENDER: Plugin = {
+  name: 'suspender',
+  tier: 'prepend',
+  register(on) {
+    let offset = 0
+    let jump = 0
+    on('command.run', { command: 'arm-suspend' }, async (_$, e) => {
+      jump = Number(e.args)
+
+      return { text: 'armed' }
+    })
+    on('clock.now', async (_$, e, next) => ({ value: ((await next(e)) as { value: number }).value + offset }))
+    on('process.run', async (_$, e, next) => {
+      if (jump > 0 && e.argv.includes('status')) {
+        offset += jump
+        jump = 0
+      }
+
+      return next(e)
+    })
+  },
+}
 const WITH_ABANDONER = { plugins: [READER, ABANDONER], timeoutMs: 30_000 }
 const WITH_STORE = { plugins: [READER, OTHER_SESSION], timeoutMs: 30_000 }
+const WITH_SUSPENDER = { plugins: [SUSPENDER] }
 const PANE_PROPS: RenderPropsOf['Pane'] = {
   title: 'Session', isFocused: false, bodyColumns: 40, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {},
 }
@@ -208,6 +236,7 @@ type World = {
   stepCost: number // what the next model request adds to the ledger when it stops
   surfaces: RenderSurface[]
   panes: UiPane[]
+  arePanesUnreadable: boolean // ui.panes() rejects
   placed: { isPlaced: true } | { isPlaced: false; reason: string }
   branch: string // what `git branch --show-current` prints
   gitExit: number // when it is not 0, the exit of every git call
@@ -268,6 +297,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     stepCost: 0,
     surfaces: ['desktop'],
     panes: [],
+    arePanesUnreadable: false,
     placed: { isPlaced: true },
     branch: 'master\n',
     gitExit: 0,
@@ -440,7 +470,11 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
 
     return { value: undefined }
   })
-  on('ui.panes', () => ({ value: w.panes }))
+  on('ui.panes', () => {
+    if (w.arePanesUnreadable) throw new Error('the panes cannot be listed')
+
+    return { value: w.panes }
+  })
   on('ui.invalidate', (_$, e) => {
     w.invalidated.push(e.event)
 
@@ -562,6 +596,22 @@ test('a cost reading that fails stops neither the timer, the store read nor the 
     expect(state.project).toEqual({ name: 'online_shop', branch: 'master', changes: null })
   })
 
+test('a store that cannot be read at the start stops neither the timer, the project read nor the opening of the pane',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock, { collapsed: { log: true } }, true)
+    w.isStoreUnreadable = true
+
+    await $.session.start(START)
+    await clock.advance(30_000)
+
+    expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session' }])
+    expect(w.invalidated).toEqual(['ui.render']) // the timer is running
+    const state = await readState($)
+    expect(state.collapsed).toBeUndefined() // there was no map to load
+    expect(state.project).toEqual({ name: 'online_shop', branch: 'master', changes: null })
+  })
+
 test('without a desktop the pane waits for the command; an attaching desktop opens it', async ($, on) => {
   const w = bottom(on, mock.clock(on))
   w.surfaces = ['terminal']
@@ -575,6 +625,25 @@ test('without a desktop the pane waits for the command; an attaching desktop ope
   })
   expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session' }])
 })
+
+// The timer asks for a read of the project only while the pane is shown, so a pane that opens asks for one itself.
+test('a desktop that attaches opens the pane and asks for a read of the project; another surface asks for none',
+  async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.surfaces = ['terminal']
+    await $.session.start({ ...START, surface: 'terminal' })
+    await clock.advance(1)
+    w.runs.length = 0
+
+    await $.session.attach({ surface: 'mobile', clientId: 'mobile:default' })
+    await clock.advance(5 * PROJECT_DELAY_MS)
+    expect(reads(w)).toBe(0)
+    await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' })
+    expect(reads(w)).toBe(0) // the hook asks and returns
+    await clock.advance(1)
+    expect(reads(w)).toBe(1)
+  })
 
 test('the collapsed map is loaded from the store on start', WITH_READER, async ($, on) => {
   bottom(on, mock.clock(on), { collapsed: { log: true } })
@@ -768,6 +837,24 @@ test('the command opens the pane, closes it when it is shown, and says why when 
   expect(await run()).toBe('Session pane is not shown: the terminal is too narrow')
 })
 
+// The timer asks for a read of the project only while the pane is shown, so a pane that opens asks for one itself; one
+// that closes asks for none.
+test('opening the pane with the command asks for a read of the project; closing it asks for none', async ($, on) => {
+  const clock = mock.clock(on)
+  const w = bottom(on, clock)
+  const run = () => $.command.run({ ...RUN, command: 'session-panel' })
+
+  await run() // opens it
+  expect(reads(w)).toBe(0) // the hook asks and returns
+  await clock.advance(1)
+  expect(reads(w)).toBe(1)
+
+  w.panes = [PANE_UP]
+  await run() // closes it
+  await clock.advance(5 * PROJECT_DELAY_MS)
+  expect(reads(w)).toBe(1)
+})
+
 test('start-up reads project, branch, skills and MCP servers in the background', WITH_READER, async ($, on) => {
   const clock = mock.clock(on)
   const w = bottom(on, clock)
@@ -791,12 +878,13 @@ test('start-up reads project, branch, skills and MCP servers in the background',
 })
 
 // Everything that asks for a read of the project: the call of a tool that may change a file, a change of the folder,
-// the end of a main turn and the timer of the session, which asks every second tick. While the tree is shut each one
-// reads the branch and nothing else.
+// the end of a main turn and the timer of the session, which asks every second tick while the pane is shown. While the
+// tree is shut each one reads the branch and nothing else.
 test('before the first turn of the main agent the tree is not read: no status, no diff, no new file counted',
   WITH_READER, async ($, on) => {
     const clock = mock.clock(on)
     const w = bottom(on, clock)
+    w.panes = [PANE_UP]
     w.status = ok(' M a.ts\0?? n.ts\0')
     w.diff = ok('3\t1\ta.ts\n')
 
@@ -1241,6 +1329,7 @@ test('two status calls in a row that throw stop the changes reads for that root,
   WITH_READER, async ($, on) => {
     const clock = mock.clock(on)
     const w = bottom(on, clock)
+    w.panes = [PANE_UP] // the timer asks while the pane is shown
     w.status = ok(' M a.ts\0')
     w.diff = ok('3\t1\ta.ts\n')
     await $.session.start(START)
@@ -1774,12 +1863,12 @@ for (const [gap, isRead] of SCALED_WAITS) {
   })
 }
 
-// A read that spans a suspend or a clock jump takes hours by the clock, and a delayed read then waits four times that.
-// The wait it set must not outlive the fast reads that come after it: a wait counts for twice the shorter of its own
-// delay and the delay a new call would get. Here the read of the first turn takes an hour, so the first call asks for
-// four hours; the end of a turn reads at once, in 600 ms, so a new call would get 2400 ms, and the window is 4800 ms
-// from the call that asked. A call inside it adds nothing, one at its edge asks again: the read comes 7200 ms after the
-// first call, not four hours.
+// A read that spans a suspend or a clock jump takes hours by the clock; it counts for READ_MS_MAX, and a delayed read
+// then waits four times that. The wait it set must not outlive the fast reads that come after it: a wait counts for
+// twice the shorter of its own delay and the delay a new call would get. Here the read of the first turn takes an
+// hour, so the first call asks for four minutes; the end of a turn reads at once, in 600 ms, so a new call would get
+// 2400 ms, and the window is 4800 ms from the call that asked. A call inside it adds nothing, one at its edge asks
+// again: the read comes 7200 ms after the first call, not four minutes.
 test('a wait set after a read of an hour does not outlive the fast read that follows it', TICKING_READER,
   async ($, on) => {
     const HOUR = 3_600_000
@@ -1794,7 +1883,7 @@ test('a wait set after a read of an hour does not outlive the fast read that fol
     w.rootLag = 0
     w.runs.length = 0
 
-    await $.tool.call(instant()) // asks, with a delay of four hours
+    await $.tool.call(instant()) // asks, with a delay of four minutes
     w.gitLag = 300 // the next read takes 600 ms
     await $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, turnId: 't0', reason: 'answer' })
     await clock.advance(1 + 600)
@@ -1808,6 +1897,42 @@ test('a wait set after a read of an hour does not outlive the fast read that fol
     expect(reads(w)).toBe(1)
     await clock.advance(1)
     expect(reads(w)).toBe(2) // 7200 ms after the first call
+  })
+
+// A read that is in flight when the machine sleeps is timed by the wall clock, which counts the whole sleep: here an
+// hour. The gap rule counts it for READ_MS_MAX at most, so the minute read waits four minutes after it, not four hours,
+// and the minutes after that are read as before. The mock clock cannot show it alone, so SUSPENDER makes the jump.
+test('a read that spans a suspend stops the minute read for four minutes, not for four times the sleep',
+  WITH_SUSPENDER, async ($, on) => {
+    const HOUR = 3_600_000
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    w.panes = [PANE_UP]
+    w.status = ok(' M a.ts\0')
+    w.diff = ok('2\t1\ta.ts\n')
+    const start = 1_000_000
+    await $.session.start(START)
+    await clock.advance(1)
+    await openTree($, clock, w)
+    w.runs.length = 0
+    await $.command.run({ ...RUN, command: 'arm-suspend', args: String(HOUR) })
+
+    // The second tick asks for a read, and the status of that read runs across the hour.
+    await clock.advance(start + 60_000 + PROJECT_DELAY_MS - clock.now())
+    expect(reads(w)).toBe(1)
+    // The fourth tick asks again: the read waits four times what the hour counts for.
+    await clock.advance(start + 120_000 + PROJECT_GAP_FACTOR * READ_MS_MAX - 1 - clock.now())
+    expect(reads(w)).toBe(1)
+    await clock.advance(1)
+    expect(reads(w)).toBe(2)
+    // After that, a read a minute again. The tick that falls on the end of the wait may ask for a read of its own, so
+    // the count is taken from a point past it.
+    await clock.advance(2 * PROJECT_DELAY_MS)
+    const settled = reads(w)
+    await clock.advance(60_000 - PROJECT_DELAY_MS)
+    expect(reads(w)).toBe(settled + 1)
+    await clock.advance(60_000)
+    expect(reads(w)).toBe(settled + 2)
   })
 
 // The other side of the shorter: a wait counts for twice its own delay when a new call would get a longer one, as a
@@ -2537,6 +2662,20 @@ test('the answer of a subagent loses its markdown marks, whether the engine gave
     expect(JSON.stringify((await readState($)).log)).not.toContain('hunter22secret')
   })
 
+// A format character beside a mark hides it from the pass that takes the marks out, so the format characters go first:
+// here a byte order mark (U+FEFF) after the opening `**`.
+test('a format character beside a markdown mark in the answer of a subagent does not keep the mark', WITH_READER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await $.agent.spawn(SPAWN)
+
+    const answer = '**\uFEFFVerdict:** ok'
+    await $.turn.complete({ answer, durationMs: 5, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer' })
+
+    expect((await readState($)).log[0]?.text).toBe('done — Verdict: ok')
+  })
+
 test('the end of a subagent has its outcome in a field of its own: a mark and the time, a stop with no mark',
   SLOW_READER, async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })
@@ -3054,12 +3193,14 @@ test('every 30 s the pane is redrawn and statuses follow $.agent.list; usage ref
     expect(w.breakdowns).toBe(2)
   })
 
-// The timer asks for a read on every second tick, so a minute apart, and the read comes the delay after the tick, as
-// the read after a call of a tool does. A file that changed outside Claude's tools shows without a new turn.
+// While the pane is shown the timer asks for a read on every second tick, so a minute apart, and the read comes the
+// delay after the tick, as the read after a call of a tool does. A file that changed outside Claude's tools shows
+// without a new turn.
 test('every second tick of the timer asks for a read of the project, and the first does not', WITH_READER,
   async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })
     const w = bottom(on, clock)
+    w.panes = [PANE_UP]
     await $.session.start(START)
     await clock.advance(1)
     await openTree($, clock, w)
@@ -3098,6 +3239,7 @@ test('every second tick of the timer asks for a read of the project, and the fir
 test('a write call inside the wait that a tick left adds no read of its own', WITH_READER, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = bottom(on, clock)
+  w.panes = [PANE_UP] // without it the tick asks for nothing, and the one read is the call's own
   await $.session.start(START)
   await clock.advance(1)
   w.runs.length = 0
@@ -3113,6 +3255,7 @@ test('the read that a tick asks for waits four times as long as the last read to
   WITH_READER, async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })
     const w = bottom(on, clock)
+    w.panes = [PANE_UP]
     await $.session.start(START)
     await clock.advance(1)
     w.gitLag = 600 // a read is two calls, so it takes 1200 ms, and a delayed read waits 4800 ms after it
@@ -3126,6 +3269,49 @@ test('the read that a tick asks for waits four times as long as the last read to
     expect(reads(w)).toBe(0)
     await clock.advance(1)
     expect(reads(w)).toBe(1)
+  })
+
+// The timer asks only while the pane is shown, open and placed: a closed pane has no one to show the count to, and an
+// open one that waits undrawn has none yet. The rest of the tick, the redraw and the usage, does not depend on it.
+const TICK_PANES: Array<[what: string, panes: UiPane[], isRead: boolean]> = [
+  ['is closed', [], false],
+  ['is open but not placed', [{ ...PANE_UP, isPlaced: false }], false],
+  ['is closed and another one is open', [{ ...PANE_UP, id: 'other' }], false],
+  ['is open and placed', [PANE_UP], true],
+]
+for (const [what, panes, isRead] of TICK_PANES) {
+  test(`the second tick asks for ${isRead ? 'a' : 'no'} read of the project when the pane ${what}`, WITH_READER,
+    async ($, on) => {
+      const clock = mock.clock(on, { now: 1_000_000 })
+      const w = bottom(on, clock)
+      w.panes = panes
+      await $.session.start(START)
+      await clock.advance(1)
+      await openTree($, clock, w)
+      w.runs.length = 0
+
+      await clock.advance(1_000_000 + 60_000 + 5 * PROJECT_DELAY_MS - clock.now()) // the second tick, and its delay
+      expect(reads(w)).toBe(isRead ? 1 : 0)
+      expect(w.invalidated).toHaveLength(2)
+      expect(w.breakdowns).toBe(2)
+    })
+}
+
+test('a list of panes that cannot be read asks for no read, and the rest of the tick goes on', WITH_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    w.panes = [PANE_UP]
+    w.arePanesUnreadable = true
+    await $.session.start(START)
+    await clock.advance(1)
+    await openTree($, clock, w)
+    w.runs.length = 0
+
+    await clock.advance(1_000_000 + 60_000 + 5 * PROJECT_DELAY_MS - clock.now()) // the second tick, and its delay
+    expect(reads(w)).toBe(0)
+    expect(w.invalidated).toHaveLength(2)
+    expect(w.breakdowns).toBe(2)
   })
 
 test('the engine list closes subagents that are still running and never rewrites an outcome', WITH_READER,
