@@ -1,9 +1,14 @@
 {
   "name": "session-panel",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Live session stats side pane for the Claude desktop Code tab",
   "author": {
-    "name": "Philipp Ulanovskiy"
+    "name": "Philipp Ulanovskiy",
+    "url": "https://github.com/philarete173"
   },
+  "homepage": "https://github.com/philarete173/claude_mods",
+  "repository": "https://github.com/philarete173/claude_mods",
+  "license": "MIT",
+  "keywords": ["session", "stats", "cost", "context", "usage", "subagents", "git", "pane", "desktop"],
   "types": "./types/index.d.ts"
 }
