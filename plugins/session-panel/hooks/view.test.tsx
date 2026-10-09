@@ -963,7 +963,7 @@ test('the log shows 20 lines, newest first, an error in red, and a long text cut
   }
 })
 
-test('the mounted pane splits its Log into a head and a tail by the rows of its body, and again when it changes', SLOW,
+test('the mounted pane splits its Log by the rows of its body, and draws one Box where they are not known', SLOW,
   async ($, on) => {
     const clock = mock.clock(on, { now: NOW })
     bottom(on, clock)
@@ -993,6 +993,16 @@ test('the mounted pane splits its Log into a head and a tail by the rows of its 
         expect(logRows(tree).map(rowText), where).toEqual(
           Array.from({ length: head + tail }, (_, i) => `prompt ${29 - i}`),
         )
+      }
+      // Where the engine hands no height (0, or a number that is none: the NaN arrives as null) the root has no
+      // `minHeight`, which the engine has to take left out, and the Log is the 15 lines in one Box. A pane may well
+      // draw first with such a body.
+      for (const bodyRows of [0, Number.NaN]) {
+        const where = `${surface} ${bodyRows} rows`
+        await ui.redraw({ ...PANE_PROPS, scroll: { offset: 0, bodyRows } })
+        const tree: Node = await ui.drawn()
+        expect(tree.props?.minHeight, where).toBeUndefined()
+        expect(logBoxes(tree).map(box => logRows(box).length), where).toEqual([15])
       }
       await ui.unmount()
     }
@@ -1593,6 +1603,74 @@ test('with no outcome drawn the row is [time, who, text] while the text keeps 8 
   }
 })
 
+// The lines that a row with no cell for `who` labels, and those it leaves alone: a tool's line, a subagent's
+// (`engineer` starts like `engine`), and one whose type is the longest the terminal keeps. The last line is not one
+// that the mod writes (a prompt has no outcome): it fixes the order of the outcome and the label.
+const LABEL_LINES: LogEntry[] = [
+  { at: NOW, who: 'you', text: 'fix the order qty', kind: 'info' },
+  { at: NOW - 1000, who: 'engine', text: 'the build is done', kind: 'info' },
+  { at: NOW - 2000, who: 'main', text: 'Bash ls', kind: 'ok', outcome: '✓ 0.3s' },
+  { at: NOW - 3000, who: 'engineer', text: 'Edit a.py', kind: 'error', outcome: '✗ 1m 12s' },
+  { at: NOW - 4000, who: 'minimal-change', text: 'Read b.py', kind: 'ok', outcome: '✓ 0.1s' },
+  { at: NOW - 5000, who: 'you', text: 'a prompt that ran', kind: 'info', outcome: '27.4s' },
+]
+
+test('with no cell for `who` a row labels a prompt `you › …` and an engine message `engine › …`, and no other', () => {
+  // The text of each line in each layout. In [time, text] the outcome leads, and the label comes after it.
+  const textOnly = [
+    'you › fix the order qty', 'engine › the build is done', '✓ 0.3s Bash ls', '✗ 1m 12s Edit a.py',
+    '✓ 0.1s Read b.py', '27.4s you › a prompt that ran',
+  ]
+  const bare = [
+    'you › fix the order qty', 'engine › the build is done', 'Bash ls', 'Edit a.py', 'Read b.py',
+    'you › a prompt that ran',
+  ]
+  const withWho = ['fix the order qty', 'the build is done', 'Bash ls', 'Edit a.py', 'Read b.py', 'a prompt that ran']
+  // The edges are 41 and 27 on the desktop, 41 and 26 on the terminal (`✗ 1m 12s` is the longest outcome and
+  // `minimal-change` the longest name): [time, who, text, outcome] from 41, [time, text, outcome] from 27 or 26, and
+  // [time, text] below.
+  const widths: [bodyColumns: number, layout: string[], texts: string[]][] = [
+    [8, LAYOUT_TEXT, textOnly], [25, LAYOUT_TEXT, textOnly], [30, LAYOUT_BARE, bare], [40, LAYOUT_BARE, bare],
+    [41, LAYOUT_WHO, withWho], [120, LAYOUT_WHO, withWho],
+  ]
+  for (const surface of SURFACES) {
+    for (const [bodyColumns, layout, texts] of widths) {
+      const where = `${surface} ${bodyColumns} columns`
+      const tree = draw(onSurface({ ...EMPTY, log: LABEL_LINES }, surface), bodyColumns)
+      expect(logRows(tree).map(logRoles), where).toEqual(Array(LABEL_LINES.length).fill(layout))
+      // The outcome and the label are one string with the text, in its one Text, so the cut at its end keeps them.
+      expect(logRows(tree).map(row => textsOf(childrenOf(row)[layout.indexOf('text')])), where)
+        .toEqual(texts.map(text => [text]))
+      expect(rowProblems(tree), where).toEqual([])
+    }
+  }
+})
+
+test('the labels follow the `who` the hooks write: a prompt is `you`, an engine turn `engine`, a tool its caller', SLOW,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: NOW })
+    bottom(on, clock)
+    await $.session.start(START)
+    await $.turn.start({ text: 'fix the order qty', turnId: 't1' })
+    await $.turn.start({ text: '<task-notification>done</task-notification>', turnId: 't2' })
+    await drive(clock, $.tool.call({ tool: 'Bash', command: 'ls' }))
+
+    // The newest first. At 20 columns the row is [time, text], at 30 [time, text, outcome], at 40 it has `who` as well,
+    // on both surfaces.
+    const widths: [bodyColumns: number, texts: string[]][] = [
+      [20, ['✓ 0.3s Bash ls', 'engine › task-notification', 'you › fix the order qty']],
+      [30, ['Bash ls', 'engine › task-notification', 'you › fix the order qty']],
+      [40, ['Bash ls', 'task-notification', 'fix the order qty']],
+    ]
+    for (const surface of SURFACES) {
+      for (const [bodyColumns, texts] of widths) {
+        const ui = await mountPane($, surface, { ...PANE_PROPS, bodyColumns })
+        expect(logRows(await ui.drawn()).map(rowText), `${surface} ${bodyColumns} columns`).toEqual(texts)
+        await ui.unmount()
+      }
+    }
+  })
+
 test('the log rows outgrow no pane, with and without outcomes, at the narrowest and the widest body used', () => {
   for (const surface of SURFACES) {
     for (const bodyColumns of [8, 120]) {
@@ -1618,7 +1696,12 @@ test('the log rows outgrow no pane, with and without outcomes, at the narrowest 
 
 // The kit has no layout engine, so the fill itself was seen on the live desktop: the root as tall as the body at the
 // least, the head's 8 lines kept, the tail growing into the rows that are free, the pane scrolling when the content is
-// taller. What is pinned here is the tree that was seen there.
+// taller. What is pinned here is the tree that was seen there (the visual spec, §6.12 Log height).
+
+// The last three children of the pane: the Log's rule and header, then the Box after them (its head, or all its lines).
+const lastThree = (tree: Node): Node[] => childrenOf(tree).slice(-3)
+// Whether a Box of height 0, the tail's, is anywhere in the tree.
+const hasZeroHeight = (tree: Node): boolean => flat(tree).some(({ node }) => node.props?.height === 0)
 
 test('the Log is a rule, a header, a head of 8 lines and a tail, children of a root as tall as the body', () => {
   for (const surface of SURFACES) {
@@ -1626,7 +1709,7 @@ test('the Log is a rule, a header, a head of 8 lines and a tail, children of a r
     // The root is at least as tall as the body, and has no height of its own.
     expect(tree.props, surface).toStrictEqual({ flexDirection: 'column', minHeight: 40 })
     // The Log's four parts are the last children of the root: no Box wraps them.
-    expect(childrenOf(tree), surface).toHaveLength(1 + 1 + 5 + 4)
+    expect(childrenOf(tree), surface).toHaveLength(1 + 1 + 5 + 4) // top block, Project, five sections, four Log parts
     const [rule, header, head, tail] = childrenOf(tree).slice(-4)
     expect(ruleCount(rule), surface).toBe(1)
     expect(headerRows(header).map(row => [row.id, row.label, row.title]), surface).toEqual([['log', '▾', 'Log']])
@@ -1640,6 +1723,8 @@ test('the Log is a rule, a header, a head of 8 lines and a tail, children of a r
     })
     expect(logRows(tail).map(rowText), surface).toEqual(named(9, 40))
     expect(logRows(tree), surface).toHaveLength(40)
+    // The scan for a Box of height 0, which the tests of a Log with no tail lean on, does see this one.
+    expect(hasZeroHeight(tree), surface).toBe(true)
   }
 })
 
@@ -1651,13 +1736,13 @@ test('a body too short for the head keeps the 8 lines and has no tail: the pane 
       // The root is as tall as the body at the least, and grows to its content: the engine scrolls it.
       expect(tree.props, where).toStrictEqual({ flexDirection: 'column', minHeight: bodyRows })
       // The head is the last child, with its 8 lines. No line past it is in the tree, and no tail.
-      const [rule, header, head] = childrenOf(tree).slice(-3)
+      const [rule, header, head] = lastThree(tree)
       expect(ruleCount(rule), where).toBe(1)
       expect(headerRows(header).map(row => row.id), where).toEqual(['log'])
       expect(head?.props, where).toStrictEqual({ flexDirection: 'column', flexShrink: 0 })
       expect(logRows(head).map(rowText), where).toEqual(named(1, 8))
       expect(logRows(tree), where).toHaveLength(8)
-      expect(flat(tree).some(({ node }) => node.props?.height === 0), where).toBe(false)
+      expect(hasZeroHeight(tree), where).toBe(false)
     }
   }
 })
@@ -1687,14 +1772,29 @@ test('with no height known the Log is a rule, a header and 15 lines in one Box, 
       expect(tree.props?.minHeight, where).toBeUndefined()
       expect(tree.props?.height, where).toBeUndefined()
       // The 15 lines are in one Box at their natural height: a tail would have no room to grow into.
-      const [rule, header, lines] = childrenOf(tree).slice(-3)
+      const [rule, header, lines] = lastThree(tree)
       expect(ruleCount(rule), where).toBe(1)
       expect(headerRows(header).map(row => row.id), where).toEqual(['log'])
       expect(lines?.props, where).toStrictEqual({ flexDirection: 'column' })
       expect(logRows(lines).map(rowText), where).toEqual(named(1, 15))
       expect(logRows(tree), where).toHaveLength(15)
-      expect(flat(tree).some(({ node }) => node.props?.height === 0), where).toBe(false)
+      expect(hasZeroHeight(tree), where).toBe(false)
     }
+  }
+})
+
+// The types say a Pane always has `scroll`, but a throw while the pane is drawn blanks it: a Pane handed without it is
+// drawn as one whose height is not known, as in 0.2.0.
+test('a Pane handed with no `scroll` draws as with no height known, and does not throw', () => {
+  for (const surface of SURFACES) {
+    const data = onSurface({ ...FULL, log: logLines(60) }, surface)
+    const render = (): Node =>
+      renderPane(PLAIN_ELEMENTS, data, { bodyColumns: 40 } as never, { onToggle: () => undefined }) as unknown as Node
+    expect(render, surface).not.toThrow()
+    const tree = render()
+    expect(tree.props?.minHeight, surface).toBeUndefined()
+    // The Log is the 15 lines of the unknown height, in one Box.
+    expect(logBoxes(tree).map(box => logRows(box).length), surface).toEqual([15])
   }
 })
 
@@ -1704,13 +1804,13 @@ test('with fewer lines than the head holds the Log is a head of them and has no 
       const where = `${surface} ${count} lines`
       const tree = draw(onSurface({ ...FULL, log: logLines(count) }, surface), 45, 40)
       expect(tree.props?.minHeight, where).toBe(40)
-      const [rule, header, head] = childrenOf(tree).slice(-3)
+      const [rule, header, head] = lastThree(tree)
       expect(ruleCount(rule), where).toBe(1)
       expect(headerRows(header).map(row => row.id), where).toEqual(['log'])
       expect(head?.props, where).toStrictEqual({ flexDirection: 'column', flexShrink: 0 })
       expect(logRows(head).map(rowText), where).toEqual(named(1, count))
       expect(logBoxes(tree), where).toHaveLength(1)
-      expect(flat(tree).some(({ node }) => node.props?.height === 0), where).toBe(false)
+      expect(hasZeroHeight(tree), where).toBe(false)
     }
   }
 })
@@ -1722,7 +1822,7 @@ test('a folded Log is its rule and its header, and a Log with no lines is nothin
     expect(ruleCount(rule), surface).toBe(1)
     expect(headerRows(header).map(row => [row.id, row.label, row.title]), surface).toEqual([['log', '▸', 'Log']])
     expect(logRows(folded), surface).toEqual([])
-    expect(flat(folded).some(({ node }) => node.props?.height === 0), surface).toBe(false)
+    expect(hasZeroHeight(folded), surface).toBe(false)
     expect(folded.props?.minHeight, surface).toBe(40)
 
     // No lines, folded or not: no rule and no header either, and the pane ends with the Context sources.
@@ -2239,6 +2339,41 @@ test('the numbers are drawn when a line was added or removed, and not when there
   }
 })
 
+test('a count that is a lower bound has a plus: `7+ files changed`, plural even for 1, and `+2061+` lines', () => {
+  for (const surface of SURFACES) {
+    const mark = surface === 'desktop' ? '' : '📝 '
+    const rowOf = (changes: PaneData['project']['changes']): Node | undefined =>
+      blockRows(draw(projectData({ changes }, surface))).changes
+    const more = { added: 2061, removed: 4, hasMoreAdded: true } as const
+
+    // A status that was cut gives the files of its whole entries and no lines: the label alone, with no numbers cell.
+    for (const files of [7, 1, 1204]) {
+      const row = rowOf({ files, hasMoreFiles: true, lines: null })
+      expect(textsOf(row), `${surface} ${files}`).toEqual([`${mark}${files}+ files changed`])
+      expect(childrenOf(row).filter(cell => isFixed(cell) && !hasWidth(cell)), `${surface} ${files}`).toEqual([])
+    }
+    // New files that were not all counted: a plus after the lines added, in the colour of the count, in one Text. The
+    // lines removed read as they do.
+    const numbers = childrenOf(rowOf({ files: 52, lines: more })).at(-1)
+    expect(childrenOf(numbers).map(el => [textsOf(el), el.props?.color]), surface).toEqual([
+      [['+2061+'], 'success'], [[SEP], undefined], [[`${MINUS}4`], 'error'],
+    ])
+    // The two marks are each their own: a row draws the ones it is given.
+    expect(textsOf(rowOf({ files: 52, hasMoreFiles: true, lines: more })), surface)
+      .toEqual([`${mark}52+ files changed`, '+2061+', SEP, `${MINUS}4`])
+    // The numbers cell keeps its rule: there are lines, and more than none. A plus is not a line.
+    const none = { added: 0, removed: 0, hasMoreAdded: true } as const
+    expect(numbersOf({ files: 2, lines: none }, surface), surface).toBeUndefined()
+    expect(numbersOf({ files: 2, lines: { ...none, removed: 3 } }, surface), surface).toBe(`+0+${SEP}${MINUS}3`)
+
+    // Exact counts carry no plus, whatever the number.
+    expect(textsOf(rowOf({ files: 12, lines: { added: 1204, removed: 387 } })), surface)
+      .toEqual([`${mark}12 files changed`, '+1204', SEP, `${MINUS}387`])
+    expect(textsOf(rowOf({ files: 1, lines: null })), surface).toEqual([`${mark}1 file changed`])
+    expect(textsOf(rowOf({ files: 2, lines: { added: 0, removed: 0 } })), surface).toEqual([`${mark}2 files changed`])
+  }
+})
+
 test('what is missing is left out: no changes, no changes row; no branch, no branch row; no name, no block', () => {
   for (const surface of SURFACES) {
     const noChanges = draw(projectData({ changes: null }, surface))
@@ -2310,6 +2445,8 @@ test('the Project block cannot outgrow the pane, and its numbers stay whole when
     {}, { branch: null }, { changes: null }, { branch: null, changes: null }, { name: PROJECT, branch: BRANCH },
     { changes: { files: 1, lines: null } }, { changes: { files: 2, lines: { added: 0, removed: 0 } } },
     { changes: { files: 99_999, lines: { added: 1_234_567, removed: 7_654_321 } } },
+    { changes: { files: 7, hasMoreFiles: true, lines: null } },
+    { changes: { files: 99_999, lines: { added: 1_234_567, removed: 7_654_321, hasMoreAdded: true } } },
   ]
   // At the narrowest and the widest body the tests use.
   for (const surface of SURFACES) {

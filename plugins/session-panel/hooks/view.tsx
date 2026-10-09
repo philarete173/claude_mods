@@ -11,7 +11,7 @@ import {
   fmtClock, fmtCountdown, fmtDuration, fmtPct, fmtRate, fmtTokens, fmtTtft, fmtUsd, orderAgents, shortType, splitCost,
   TYPE_MAX,
 } from './stats'
-import type { AgentRow, AgentStatus } from './stats'
+import type { AgentRow, AgentStatus, LogEntry } from './stats'
 
 export type SectionId = 'usage' | 'turn' | 'agents' | 'mcp' | 'sources' | 'log'
 
@@ -431,17 +431,25 @@ function topBlock(d: Draw): RenderElement {
 // ---- Project block (§6.3) ----
 
 // The lines added and removed, `+8 / −1`: three Texts in a fixed cell, so the numbers stay whole when the label beside
-// them is cut.
-function linesCell(d: Draw, lines: { added: number; removed: number }): RenderElement {
+// them is cut. A count that is a lower bound (`hasMoreAdded`) has a plus after it: `+8+ / −1`.
+function linesCell(d: Draw, lines: { added: number; removed: number; hasMoreAdded?: true }): RenderElement {
   const { Box, Text } = d.ui
 
   return (
     <Box flexDirection="row" flexShrink={0}>
-      <Text color={OK}>{`+${lines.added}`}</Text>
+      <Text color={OK}>{`+${lines.added}${lines.hasMoreAdded === true ? '+' : ''}`}</Text>
       <Text dimColor>{LINES_SEP}</Text>
       <Text color={BAD}>{`${MINUS}${lines.removed}`}</Text>
     </Box>
   )
+}
+
+// The label of the changes row: `1 file changed`, `12 files changed`. A count that is a lower bound (`hasMoreFiles`, a
+// status that was cut) has a plus after it, and the label is plural even for 1: `1+ files changed`.
+function filesLabel(changes: { files: number; hasMoreFiles?: true }): string {
+  if (changes.hasMoreFiles === true) return `${changes.files}+ files changed`
+
+  return changes.files === 1 ? '1 file changed' : `${changes.files} files changed`
 }
 
 // The project, as OpenChamber's Project block shows it: under a rule, the bold title with the folder dim at the right
@@ -475,7 +483,7 @@ function projectBlock(d: Draw): RenderElement | null {
       {changes !== null && (
         <Box flexDirection="row" alignItems="center" columnGap={1}>
           {iconSlot(d, ICON.changes, 'Changes')}
-          {growText(d, marked('📝', changes.files === 1 ? '1 file changed' : `${changes.files} files changed`))}
+          {growText(d, marked('📝', filesLabel(changes)))}
           {changes.lines !== null && changes.lines.added + changes.lines.removed > 0 && linesCell(d, changes.lines)}
         </Box>
       )}
@@ -657,9 +665,9 @@ function sourcesSection(d: Draw): RenderElement | null {
   return section(d, 'sources', 'Context sources', parts.join(' · '), rows)
 }
 
-// The Log, as the parts of the pane's root: its rule, its header and its lines, with no Box around them. That is the
-// layout the live desktop has verified, and it needs no chain of Boxes that grow. Folded, it is the rule and the
-// header; with no lines, nothing.
+// The Log, as the parts of the pane's root: its rule, its header and its lines, with no Box around them. Folded, it is
+// the rule and the header; with no lines, nothing. That is the layout the live desktop has verified, and it needs no
+// chain of Boxes that grow (the visual spec, §6.12 Log height).
 // The newest log lines: time, who, what, and how it went. Time and `who` are dim fixed columns, so every text starts
 // at the same x; the text is cut to one line. On the desktop `who` has a width of its own, so the text column does not
 // jump with the longest `who`; on the terminal it is the longest one there is, up to the most shortType keeps. The
@@ -671,6 +679,9 @@ function sourcesSection(d: Draw): RenderElement | null {
 // outcome]; then `who` gives way, [time, text, outcome]; then [time, text], where a line shows its outcome in front of
 // its text, so that the cut at the end keeps it. That one is also the layout when nothing fits. With no outcome among
 // the lines drawn there is no outcome cell, and a line shows its text alone.
+// Where `who` has no cell, a line of the person (`you`) or of the engine (`engine`) shows it in front of its text, as
+// `you › …`, for its text alone does not say whose it is; the other lines have no label. It comes after the outcome,
+// where a line shows that in front too.
 // The height: the lines drawn are the body's rows, MIN_LOG_ROWS at least, for a line past them could never show. The
 // first MIN_LOG_ROWS are the head, a Box that holds its height, so they always show. The rest are the tail, a Box with
 // no height of its own that grows into the rows the root leaves free (it is at least the body's height) and clips at
@@ -697,7 +708,15 @@ function logParts(d: Draw): RenderElement[] {
   const hasWho = textCells(true, hasOutcomes) >= MIN_LOG_TEXT_CELLS
   const hasOutcomeCell = hasOutcomes && (hasWho || textCells(false, true) >= MIN_LOG_TEXT_CELLS)
   const isTextOnly = !hasWho && !hasOutcomeCell
-  const rows = lines.map(line => (
+  // What the text cell shows, one string in one Text, so that the cut at its end keeps what leads: the outcome, where
+  // the row has no cell for it, then the label of a line of the person or of the engine, where it has none for `who`.
+  const textOf = (line: LogEntry): string => {
+    const outcome = hasOutcomeCell || line.outcome === undefined ? '' : `${line.outcome} `
+    const label = !hasWho && (line.who === 'you' || line.who === 'engine') ? `${line.who} › ` : ''
+
+    return `${outcome}${label}${line.text}`
+  }
+  const lineRows = lines.map(line => (
     <Box flexDirection="row" columnGap={LOG_GAP_CELLS}>
       <Box flexDirection="row" width={TIME_CELLS} flexShrink={0}>
         <Text dimColor>{fmtClock(line.at)}</Text>
@@ -712,9 +731,7 @@ function logParts(d: Draw): RenderElement[] {
         </Box>
       )}
       <Box flexDirection="row" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
-        <Text color={isTextOnly && line.kind === 'error' ? BAD : undefined} wrap="truncate">
-          {hasOutcomeCell || line.outcome === undefined ? line.text : `${line.outcome} ${line.text}`}
-        </Text>
+        <Text color={isTextOnly && line.kind === 'error' ? BAD : undefined} wrap="truncate">{textOf(line)}</Text>
       </Box>
       {hasOutcomeCell && (
         <Box flexDirection="row" width={outcomeCells} flexShrink={0} overflow="hidden" justifyContent="flex-end">
@@ -727,12 +744,12 @@ function logParts(d: Draw): RenderElement[] {
       )}
     </Box>
   ))
-  if (d.rows === 0) return [rule, header, <Box flexDirection="column">{rows}</Box>]
-  const parts = [rule, header, <Box flexDirection="column" flexShrink={0}>{rows.slice(0, MIN_LOG_ROWS)}</Box>]
-  if (rows.length > MIN_LOG_ROWS) {
+  if (d.rows === 0) return [rule, header, <Box flexDirection="column">{lineRows}</Box>]
+  const parts = [rule, header, <Box flexDirection="column" flexShrink={0}>{lineRows.slice(0, MIN_LOG_ROWS)}</Box>]
+  if (lineRows.length > MIN_LOG_ROWS) {
     parts.push(
       <Box flexDirection="column" height={0} flexGrow={1} flexShrink={1} overflow="hidden">
-        {rows.slice(MIN_LOG_ROWS)}
+        {lineRows.slice(MIN_LOG_ROWS)}
       </Box>,
     )
   }
@@ -748,7 +765,9 @@ export function renderPane(els: ElementTable, data: PaneData, props: PaneProps, 
   const { Box, Text, Button } = els
   const Svg = 'Svg' in els && data.surface !== 'terminal' ? els.Svg : undefined
   const cols = props.bodyColumns
-  const { bodyRows } = props.scroll
+  // The types say a Pane always has `scroll`, but a throw while the pane is drawn blanks it: an engine that hands none
+  // is read as one whose height is not known, and the pane is drawn as 0.2.0 drew it.
+  const bodyRows = props.scroll?.bodyRows
   const d: Draw = {
     ui: { Box, Text, Button, Svg },
     data,
