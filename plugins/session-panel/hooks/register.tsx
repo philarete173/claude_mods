@@ -434,7 +434,7 @@ async function readChanges($: EngineInterface, root: string, read: ChangesRead):
       // A top that cannot be had (the call was not made, as none was left of the budget; it was killed by the little
       // that was left; or it exited with anything but 0) leaves the new files uncounted, as a count that failed leaves
       // them: the lines of the diff stand, as a lower bound. Inside a repository whose status and diff worked, it
-      // cannot fail otherwise.
+      // fails only by the budget, its own timeout or the module's unload, and the lower bound is right in each case.
       hasMoreAdded = true
     } else {
       const top = toplevel.trim()
@@ -610,10 +610,11 @@ export const register: Register = on => {
         refreshUsage($).catch(() => undefined)
         // A file that changed outside Claude's tools (an editor, a terminal, a background command that ended after
         // its call returned) shows without a new turn. The gap rule keeps git to about a quarter of the time
-        // (PROJECT_GAP_FACTOR). The tick asks only for a pane in front, placed and shown: until 0.3.0 an idle session
-        // ran no git, and a pane that is closed, waits undrawn or is a tab behind another has no one to show the count
-        // to. The reads that follow the person's or the agent's work (turn ends, write calls, CwdChanged) are
-        // unchanged, and a pane that opens asks for one itself. A list of panes that cannot be read asks for nothing.
+        // (PROJECT_GAP_FACTOR). The tick asks only for a pane in front of the session's other plugin panes, placed and
+        // shown (the Session pane alone is always in front): until 0.3.0 an idle session ran no git, and a pane that is
+        // closed, waits undrawn or is a tab behind another plugin pane has no one to show the count to. The reads that
+        // follow the person's or the agent's work (turn ends, write calls, CwdChanged) are unchanged, and a pane that
+        // opens asks for one itself. A list of panes that cannot be read asks for nothing.
         $.clock.now()
           .then(async now => {
             const panes = await $.ui.panes()
@@ -631,7 +632,8 @@ export const register: Register = on => {
     const attached = await next(e)
     if (e.surface === 'desktop') {
       await $.ui.open({ id: PANE, title: 'Session' })
-      // The timer reads the project only for a pane in front (session.start), so a pane that opens asks for a read.
+      // The timer reads the project only for a pane in front of the session's other plugin panes (session.start), so a
+      // pane that opens asks for a read.
       inBackground($, () => requestProject($))
     }
 
@@ -656,9 +658,10 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // A pane that is placed and shown is closed. One that is open but not in front, a tab behind another or a pane that
-  // waits undrawn, is not closed: the person asks for it, so it is asked for again, which places a pane that waits, and
-  // with `focus`, which brings a tab forward (a request, which the surface may refuse).
+  // A pane that is placed and shown is closed. One that is open but not in front of the session's other plugin panes, a
+  // tab behind another plugin pane or a pane that waits undrawn, is not closed: the person asks for it, so it is asked
+  // for again, which places a pane that waits, and with `focus`, which brings a tab forward (a request, which the
+  // surface may refuse).
   on('command.run', { command: 'session-panel' }, async $ => {
     const pane = (await $.ui.panes()).find(listed => listed.id === PANE)
     if (pane?.isPlaced === true && pane.isShown) {
@@ -668,7 +671,8 @@ export const register: Register = on => {
     }
     const focus = pane === undefined ? {} : { focus: true as const }
     const opened = await $.ui.open({ id: PANE, title: 'Session', ...focus })
-    // As on an attach: a pane that opens asks for a read of the project, since the timer asks only for a pane in front.
+    // As on an attach: a pane that opens asks for a read of the project, since the timer asks only for a pane in front
+    // of the session's other plugin panes.
     inBackground($, () => requestProject($))
 
     return { text: opened.isPlaced ? 'Session pane opened.' : `Session pane is not shown: ${opened.reason}` }
