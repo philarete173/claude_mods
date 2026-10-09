@@ -132,6 +132,8 @@
   const TEXT_METER_CELLS = 10;
   const RULE_PX = 1600;
   const MAX_AGENT_ROWS = 8;
+  // The live Log draws the body's rows, 8 at least, of the last 60 events; this mock-up has no pane height, so it
+  // draws 15, as the live Log does where the height is not known (spec §6.12).
   const MAX_LOG_ROWS = 15;
   const BLUE = '#2f7de1';
   const AMBER = '#e0a030';
@@ -315,6 +317,7 @@
       contextMeterPx: contextMeterWidth(cols),
       limitMeterPx: limitMeterWidth(cols),
     };
+    // The live root also has minHeight = the body's rows, and the Log, which comes last, takes the rest (spec §6.12).
     return els.Box({ flexDirection: 'column' },
       topBlock(d), usageSection(d), turnSection(d), agentsSection(d), mcpSection(d), sourcesSection(d), logSection(d));
   }
@@ -537,7 +540,7 @@
     return section(d, 'sources', 'Context sources', parts.join(' · '), rows);
   }
 
-  // §6.10
+  // §6.10, §6.12: 15 lines at their natural height here; the live Log fills the free height, 8 lines at least.
   function logSection(d) {
     const { Box, Text, Svg } = d.ui;
     const lines = d.data.log.slice(0, MAX_LOG_ROWS);

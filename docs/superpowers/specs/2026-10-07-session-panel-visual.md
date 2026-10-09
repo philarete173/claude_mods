@@ -1,6 +1,12 @@
 # Session Panel: visual spec v2
 
-> Changes after the approved preview: every Svg carries a non-empty alt (§5.2, §11); the subagent `@type` sits in a column of its own (§6.7); the log's `who` column is 13 cells on the desktop; in a narrow pane the log drops `who` first and a subagent row drops `@type` below 12 description cells (§6.7, §6.10); the project is a block of its own, with a changes row (§6.3). The HTML preview `docs/design/session-panel-preview.html` stays the approved v2 mock-up and predates these changes.
+> Changes after the approved preview: every Svg carries a non-empty alt (§5.2, §11); the subagent `@type` sits in a
+> column of its own (§6.7); the log's `who` column is 13 cells on the desktop; in a narrow pane the log drops `who`
+> first and a subagent row drops `@type` below 12 description cells (§6.7, §6.10); the project is a block of its own,
+> with a changes row (§6.3); a count that is only a lower bound has a plus (§6.3); in a narrow log a prompt reads
+> `you › …` and an engine message `engine › …` (§6.10); the Log fills the pane's free height, 8 lines at least
+> (§6.12). The HTML preview `docs/design/session-panel-preview.html` stays the approved v2 mock-up and predates these
+> changes.
 
 Date: 2026-10-07. Status: proposal. The user approves the look in `docs/design/session-panel-preview.html` before implementation.
 
@@ -56,10 +62,12 @@ Elapsed                                             1m 18s
 
 - **Box numbers are character cells** (BoxProps, d.ts l.741–830).
 - **On a remote surface, a cell comes from the code font:** "the pane's width and height over the advance and line height of its code font" (RenderViewport, l.9698–9704). `props.bodyColumns` is "Cells across the body, inside the frame" (l.9646–9649).
-- **Measured on the live desktop (`current-pane-v1.png`), 1 cell = 8 px**, horizontally and vertically:
+- **Measured on the live desktop (`current-pane-v1.png`), 1 cell = 8 px** wide, and a margin cell is about 8 px tall:
   - `width={8}` + `columnGap={1}` put the meter 72 px from the left edge;
   - `width={1}` + `columnGap={1}` put the subagent descriptions 16 px in;
   - `marginTop={1}` adds about 8 px over the 19 px line.
+- **A height cell is one text line,** about 19 px, and `props.scroll.bodyRows` counts text lines: `height={10}` is 10
+  lines tall (measured live in the spikes of §6.12). So the 8 px is the width of a cell, not the unit of `height`.
 - **The old "12.5 px per column" was a planning guess.** v1 cannot refute it, because its meter is clamped at 180 px either way.
 - **`CELL_PX = 8`** is used only to turn `bodyColumns` into the px widths of the meters. Confirmed on the live pane on 2026-10-07 (§11, check 1).
 - **`Svg` `width` and `height` are CSS px** (l.11588–11595).
@@ -97,6 +105,8 @@ The desktop draws text in the system font, so character counts and padded string
 |---|---|
 | Seen working on the live desktop (v1) | theme keys `success`, `warning`, `error`; `dimColor`; raw hex; `bold`; `Svg` images; a `plain` `Button` drawn as a text row; Box `width`, `columnGap`, `marginTop`, `justifyContent` |
 | Declared in the d.ts, first used here | `minWidth`, `overflow`, `flexGrow`, `alignItems`, `marginBottom`, `paddingLeft`, `flexWrap`, `Button` `dimColor` (l.937–941) |
+| Seen working live, vertical use (§6.12) | `minHeight`, `height={0}`, `flexGrow`, `flexShrink`, `overflow="hidden"` |
+| Seen not working live (§6.12) | `height="100%"` on the root: it grows to its content |
 | Deliberately not used | `backgroundColor`, `borderStyle`, `borderColor` (§12) |
 
 No `key` on list Boxes. On a `Box`, `key` makes a hover scope (l.742–750), and v1 does not use it either. Button keys stay `toggle:<SectionId>`.
@@ -177,6 +187,10 @@ const TYPE_CELLS_MAX = TYPE_MAX + 1 // terminal: the `@` and the longest type th
 const TEXT_METER_CELLS = 10
 const RULE_PX = 1600 // the divider image; the Box around it cuts it to the pane
 const MAX_AGENT_ROWS = 8
+// The Log keeps at least this many lines, and when they do not fit the pane scrolls (the user's decision, 2026-10-08),
+// as the Subagents list shows up to 8.
+const MIN_LOG_ROWS = 8
+// The lines the Log draws where the body's height is not known; where it is, the body's rows (MIN_LOG_ROWS at least).
 const MAX_LOG_ROWS = 15
 const MIN_LOG_TEXT_CELLS = 8 // the least text a log line keeps: below it `who` gives way, then the outcome column
 // In a narrow pane the identity column gives way first, as in the log: a subagent row leaves out its `@type`, on
@@ -188,14 +202,25 @@ const AGENT_ROW_GAPS = 3 // the gaps of a subagent row that has its type: two be
 const TEXT_MARK_CELLS = 1 // the mark of a subagent row where there is no icon slot
 ```
 
-`Draw` gains the body width and the two meter widths, and loses `meterPx`:
+An excerpt of `view.tsx`, abridged where it says `in renderPane`: `Draw` gains the body's width and rows (`rows` is 0
+where the height is not known, §6.12) and the two meter widths, and loses `meterPx`:
 
 ```ts
-type Draw = { ui: Kit; data: PaneData; handlers: PaneHandlers; cols: number; contextMeterPx: number; limitMeterPx: number }
+type Draw = {
+  ui: Kit
+  data: PaneData
+  handlers: PaneHandlers
+  cols: number
+  rows: number
+  contextMeterPx: number
+  limitMeterPx: number
+}
 
 // in renderPane:
 const cols = props.bodyColumns
+const bodyRows = props.scroll?.bodyRows
 const d: Draw = { ui: { Box, Text, Button, Svg }, data, handlers, cols,
+  rows: Number.isFinite(bodyRows) && bodyRows > 0 ? bodyRows : 0,
   contextMeterPx: contextMeterWidth(cols), limitMeterPx: limitMeterWidth(cols) }
 ```
 
@@ -203,7 +228,7 @@ const d: Draw = { ui: { Box, Text, Button, Svg }, data, handlers, cols,
 
 ```tsx
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" minHeight={d.rows > 0 ? d.rows : undefined}>
       {topBlock(d)}
       {projectBlock(d)}
       {usageSection(d)}
@@ -211,18 +236,23 @@ const d: Draw = { ui: { Box, Text, Button, Svg }, data, handlers, cols,
       {agentsSection(d)}
       {mcpSection(d)}
       {sourcesSection(d)}
-      {logSection(d)}
+      {logParts(d)}
     </Box>
   )
 ```
 
 The Session card and the Project block never fold. The card has no rule above it; every other block begins with its own rule, so a block that is left out leaves no double rule.
 
+The root is at least as tall as the body (`minHeight`), and the Log, which comes last, takes the rest of it (§6.12). A
+body whose rows are not a positive number has no known height, and the root has no minimum then.
+
 The pane frame (title "Session", expand and close controls, outer padding, scroll) belongs to the app and is not ours.
 
 ## 5. Shared pieces
 
 ### 5.1 Divider
+
+An excerpt of `view.tsx`: `RULE_SVG` and `divider`, which are apart there.
 
 ```tsx
 const RULE_SVG =
@@ -310,28 +340,41 @@ function endText(d: Draw, text: string, style: Partial<TextProps> = {}): RenderE
 ### 5.4 Section and header
 
 ```tsx
-function section(d: Draw, id: SectionId, title: string, summary: string, body: RenderElement[]): RenderElement {
+const isFolded = (d: Draw, id: SectionId): boolean => d.data.collapsed[id] === true
+
+// The header row of a section: an icon, the bold title, a dim chevron that folds it, a dim summary at the right. The
+// title is a Text because a Button label cannot be bold; the chevron is a plain Button, dim at rest and full strength
+// under the pointer or the focus (§5.4, §12.1).
+function sectionHeader(d: Draw, id: SectionId, title: string, summary: string): RenderElement {
   const { Box, Text, Button } = d.ui
-  const isFolded = d.data.collapsed[id] === true
+
+  return (
+    <Box flexDirection="row" alignItems="center" columnGap={1}>
+      {iconSlot(d, ICON[id], title)}
+      <Box flexDirection="row" flexShrink={0}>
+        <Text bold>{title}</Text>
+      </Box>
+      <Button
+        plain
+        dimColor
+        key={`toggle:${id}`}
+        label={isFolded(d, id) ? '▸' : '▾'}
+        onPress={() => d.handlers.onToggle(id)}
+      />
+      {endText(d, summary, { dimColor: true })}
+    </Box>
+  )
+}
+
+// A section: a rule, then its header row, then the body unless folded. A folded section keeps its summary.
+function section(d: Draw, id: SectionId, title: string, summary: string, body: RenderElement[]): RenderElement {
+  const { Box } = d.ui
 
   return (
     <Box flexDirection="column">
       {divider(d)}
-      <Box flexDirection="row" alignItems="center" columnGap={1}>
-        {iconSlot(d, ICON[id], title)}
-        <Box flexDirection="row" flexShrink={0}>
-          <Text bold>{title}</Text>
-        </Box>
-        <Button
-          plain
-          dimColor
-          key={`toggle:${id}`}
-          label={isFolded ? '▸' : '▾'}
-          onPress={() => d.handlers.onToggle(id)}
-        />
-        {endText(d, summary, { dimColor: true })}
-      </Box>
-      {!isFolded && <Box flexDirection="column">{body}</Box>}
+      {sectionHeader(d, id, title, summary)}
+      {!isFolded(d, id) && <Box flexDirection="column">{body}</Box>}
     </Box>
   )
 }
@@ -341,6 +384,8 @@ function section(d: Draw, id: SectionId, title: string, summary: string, body: R
 - **Chevron.** A `plain` `dimColor` Button placed after the title, as in OpenChamber. It is dim at rest and full strength under the pointer or the focus (l.937–941). A one-glyph plain label is a control in its own right (l.929–934).
 - **Summary.** Pushed right and cut before it can collide with the title. A folded section keeps its summary.
 - **Body.** No extra gap between the header and the body.
+- **Header alone.** `sectionHeader` draws the header row on its own. The Log uses it directly: its parts are children of
+  the pane's root, not the body of a `section` (§6.10, §6.12).
 
 ## 6. Blocks
 
@@ -453,26 +498,45 @@ The Project block follows the top block and comes before Usage, as OpenChamber's
 - **U+2212.** The minus of the lines removed is the minus sign U+2212, not the hyphen.
 - **No-break spaces.** The slash has a no-break space at each side (`LINES_SEP`). With plain spaces at its edges the desktop may draw `+8/−1`, as it may drop a plain space at the end of a flex item (§6.8).
 - **Cut.** The folder name and the branch are cut from the end. The changes label gives way first, and the numbers never cut (§9).
+- **Marks.** A count that is only a lower bound has a plus:
+  - When git's status output was cut (it has a 4 MiB limit, which a `node_modules` that is not ignored can pass), the
+    label reads `N+ files changed`, always plural, so `1+ files changed` for one file. There are no numbers then: the
+    diffs are not run, and `lines` is null. `filesLabel` draws the label.
+  - When new files past the first 50, or one whose count failed, add no lines, the added count has a plus after it:
+    `+2061+ / −4`. `linesCell` draws it (`hasMoreAdded`).
 - **Left out.**
   - With no project name, the whole block.
   - With no branch, the branch row.
-  - Outside a repository, on a clean tree, when git failed, or when its list of files was over 4 MiB, the changes row.
+  - Outside a repository, on a clean tree, when git failed, or where the changes are not read, the changes row. They
+    are not read before the first turn of the main agent, nor for a folder whose `git status` has failed to run twice
+    in a row (a timeout, or a git that cannot start); the folder and the branch still show. A status over 4 MiB does
+    not leave the row out: it is marked above.
   - When the lines are unknown (an unborn HEAD, a failed diff) or both 0 (only binary files changed), the numbers: the count alone shows.
 - **Terminal.** No icon slots: the branch and changes rows start with an emoji instead, `🌿 main` and `📝 12 files changed` (§10).
 
 ```tsx
 // The lines added and removed, `+8 / −1`: three Texts in a fixed cell, so the numbers stay whole when the label beside
-// them is cut.
-function linesCell(d: Draw, lines: { added: number; removed: number }): RenderElement {
+// them is cut. A count that is a lower bound (`hasMoreAdded`) has a plus after it: `+8+ / −1`.
+function linesCell(d: Draw, lines: { added: number; removed: number; hasMoreAdded?: true }): RenderElement {
   const { Box, Text } = d.ui
 
   return (
     <Box flexDirection="row" flexShrink={0}>
-      <Text color={OK}>{`+${lines.added}`}</Text>
+      <Text color={OK}>{`+${lines.added}${lines.hasMoreAdded === true ? '+' : ''}`}</Text>
       <Text dimColor>{LINES_SEP}</Text>
       <Text color={BAD}>{`${MINUS}${lines.removed}`}</Text>
     </Box>
   )
+}
+```
+
+```tsx
+// The label of the changes row: `1 file changed`, `12 files changed`. A count that is a lower bound (`hasMoreFiles`, a
+// status that was cut) has a plus after it, and the label is plural even for 1: `1+ files changed`.
+function filesLabel(changes: { files: number; hasMoreFiles?: true }): string {
+  if (changes.hasMoreFiles === true) return `${changes.files}+ files changed`
+
+  return changes.files === 1 ? '1 file changed' : `${changes.files} files changed`
 }
 ```
 
@@ -508,7 +572,7 @@ function projectBlock(d: Draw): RenderElement | null {
       {changes !== null && (
         <Box flexDirection="row" alignItems="center" columnGap={1}>
           {iconSlot(d, ICON.changes, 'Changes')}
-          {growText(d, marked('📝', changes.files === 1 ? '1 file changed' : `${changes.files} files changed`))}
+          {growText(d, marked('📝', filesLabel(changes)))}
           {changes.lines !== null && changes.lines.added + changes.lines.removed > 0 && linesCell(d, changes.lines)}
         </Box>
       )}
@@ -539,6 +603,8 @@ function row(d: Draw, label: string, value: string, color?: string): RenderEleme
 Labels sit flush left, under the icons, as in OpenChamber. They are not indented. Values never cut; the label cuts first, and only in a very narrow pane.
 
 ### 6.5 Usage: limit row
+
+An excerpt of `usageSection`, de-indented:
 
 ```tsx
 const rows = rateLimits.map(limit => {
@@ -710,6 +776,9 @@ function mcpSection(d: Draw): RenderElement | null {
 ### 6.10 Log row
 
 ```tsx
+// The Log, as the parts of the pane's root: its rule, its header and its lines, with no Box around them. That is the
+// layout the live desktop has verified, and it needs no chain of Boxes that grow (the visual spec, §6.12 Log height).
+// Folded, it is the rule and the header; with no lines, nothing.
 // The newest log lines: time, who, what, and how it went. Time and `who` are dim fixed columns, so every text starts
 // at the same x; the text is cut to one line. On the desktop `who` has a width of its own, so the text column does not
 // jump with the longest `who`; on the terminal it is the longest one there is, up to the most shortType keeps. The
@@ -721,10 +790,23 @@ function mcpSection(d: Draw): RenderElement | null {
 // outcome]; then `who` gives way, [time, text, outcome]; then [time, text], where a line shows its outcome in front of
 // its text, so that the cut at the end keeps it. That one is also the layout when nothing fits. With no outcome among
 // the lines drawn there is no outcome cell, and a line shows its text alone.
-function logSection(d: Draw): RenderElement | null {
+// Where `who` has no cell, a line of the person (`you`) or of the engine (`engine`) shows it in front of its text, as
+// `you › …`, for its text alone does not say whose it is; the other lines have no label. It comes after the outcome,
+// where a line shows that in front too. MIN_LOG_TEXT_CELLS counts the text alone, not the label: at the edge of a
+// layout an engine line shows its label and none of its text.
+// The height: the lines drawn are the body's rows, MIN_LOG_ROWS at least, for a line past them could never show. The
+// first MIN_LOG_ROWS are the head, a Box that holds its height, so they always show. The rest are the tail, a Box with
+// no height of its own that grows into the rows the root leaves free (it is at least the body's height) and clips at
+// its bottom, so the oldest lines go first. When not even the head fits, the root grows to its content and the pane
+// scrolls, which the engine does. Where the body's height is not known the lines are MAX_LOG_ROWS, in one Box at their
+// natural height: a tail would have no room to grow into.
+function logParts(d: Draw): RenderElement[] {
   const { Box, Text, Svg } = d.ui
-  const lines = d.data.log.slice(0, MAX_LOG_ROWS)
-  if (lines.length === 0) return null
+  const lines = d.data.log.slice(0, d.rows > 0 ? Math.max(MIN_LOG_ROWS, d.rows) : MAX_LOG_ROWS)
+  if (lines.length === 0) return []
+  const rule = divider(d)
+  const header = sectionHeader(d, 'log', 'Log', '')
+  if (isFolded(d, 'log')) return [rule, header]
   const longestWho = Math.max(...lines.map(line => line.who.length))
   const whoCells = Svg === undefined ? Math.min(WHO_CELLS_MAX, longestWho) : WHO_CELLS
   const longestOutcome = Math.max(...lines.map(line => line.outcome?.length ?? 0))
@@ -738,7 +820,15 @@ function logSection(d: Draw): RenderElement | null {
   const hasWho = textCells(true, hasOutcomes) >= MIN_LOG_TEXT_CELLS
   const hasOutcomeCell = hasOutcomes && (hasWho || textCells(false, true) >= MIN_LOG_TEXT_CELLS)
   const isTextOnly = !hasWho && !hasOutcomeCell
-  const rows = lines.map(line => (
+  // What the text cell shows, one string in one Text, so that the cut at its end keeps what leads: the outcome, where
+  // the row has no cell for it, then the label of a line of the person or of the engine, where it has none for `who`.
+  const textOf = (line: LogEntry): string => {
+    const outcome = hasOutcomeCell || line.outcome === undefined ? '' : `${line.outcome} `
+    const label = !hasWho && (line.who === 'you' || line.who === 'engine') ? `${line.who} › ` : ''
+
+    return `${outcome}${label}${line.text}`
+  }
+  const lineRows = lines.map(line => (
     <Box flexDirection="row" columnGap={LOG_GAP_CELLS}>
       <Box flexDirection="row" width={TIME_CELLS} flexShrink={0}>
         <Text dimColor>{fmtClock(line.at)}</Text>
@@ -753,9 +843,7 @@ function logSection(d: Draw): RenderElement | null {
         </Box>
       )}
       <Box flexDirection="row" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
-        <Text color={isTextOnly && line.kind === 'error' ? BAD : undefined} wrap="truncate">
-          {hasOutcomeCell || line.outcome === undefined ? line.text : `${line.outcome} ${line.text}`}
-        </Text>
+        <Text color={isTextOnly && line.kind === 'error' ? BAD : undefined} wrap="truncate">{textOf(line)}</Text>
       </Box>
       {hasOutcomeCell && (
         <Box flexDirection="row" width={outcomeCells} flexShrink={0} overflow="hidden" justifyContent="flex-end">
@@ -768,8 +856,17 @@ function logSection(d: Draw): RenderElement | null {
       )}
     </Box>
   ))
+  if (d.rows === 0) return [rule, header, <Box flexDirection="column">{lineRows}</Box>]
+  const parts = [rule, header, <Box flexDirection="column" flexShrink={0}>{lineRows.slice(0, MIN_LOG_ROWS)}</Box>]
+  if (lineRows.length > MIN_LOG_ROWS) {
+    parts.push(
+      <Box flexDirection="column" height={0} flexGrow={1} flexShrink={1} overflow="hidden">
+        {lineRows.slice(MIN_LOG_ROWS)}
+      </Box>,
+    )
+  }
 
-  return section(d, 'log', 'Log', '', rows)
+  return parts
 }
 ```
 
@@ -793,6 +890,18 @@ function logSection(d: Draw): RenderElement | null {
   2. [time, text, outcome]: `who` has given way;
   3. [time, text]: the outcome goes in front of the text, as `✓ 0.3s Bash ls`, so that the cut at the end of the text keeps it. This is also the layout when nothing fits.
 - **Red text.** The last layout has neither a `who` nor an outcome cell to carry the red of an error, so the text of an error line is red there. In the other layouts the text stays primary.
+- **Labels.** Where the layout has no `who` cell (layouts 2 and 3), a line of the person (`you`) reads `you › …`, and a
+  line of the engine (`engine`: a tagged message such as `agent-message`) reads `engine › …`: its text alone does not
+  say whose it is. The other lines have no label. In [time, text] a line's outcome still comes first, and the label
+  follows it. The layout does not count the label: `MIN_LOG_TEXT_CELLS` counts the text alone, so at the edge of a
+  layout an engine line shows its label and none of its text.
+- **Columns.** The `who` and outcome columns are worked out from the longest `who` and the longest outcome among the
+  lines drawn. Those may be more than the lines shown (§6.12), so a long outcome lower down can make `who` give way for
+  every row. The rule stays: one layout for the head and the tail is what keeps their columns in line.
+- **Abandoned call.** A tool call that came back as an error while its call had been abandoned (the person interrupted
+  it, or a stop did) is a note, not a fault. It is kind `info`, so it is dim, and it shows its time alone, with no ✗, as
+  a stopped subagent's result does. This rests on the engine's `next.signal` (`ran.isError` and `next.signal.aborted`
+  after `await next(e)`), and is to be confirmed live (§11, check 9).
 
 ### 6.11 Empty and partial states
 
@@ -804,11 +913,45 @@ function logSection(d: Draw): RenderElement | null {
 | No completed turn | Turn stats header with no summary, body `No completed turn yet` (dim) |
 | No project name | no Project block (§6.3) |
 | No branch | the Project block without the branch row |
-| No repository, a clean tree, a failed git, or a status over 4 MiB | no changes row |
+| No repository, a clean tree, a failed git, or changes not read yet or given up (§6.3) | no changes row |
+| A status over 4 MiB, or new files not all counted | `N+ files changed` with no numbers, or `+2061+ / −4` (§6.3) |
 | Lines unknown (an unborn HEAD, a failed diff) or both 0 (only binary files changed) | the changes row with the count alone, no numbers |
 | Subagent cost unknown | dim `—` in the cost column |
 | More than 8 subagents | `+N more` (§6.7) |
 | No rate limits, MCP servers, sources or log | the section and its rule are left out |
+
+### 6.12 Log height
+
+The Log draws as many lines as the pane's body has rows, at least 8 (`MIN_LOG_ROWS`), of the last 60 events, newest
+first. The first 8 always show. The rest fill the height that the other blocks leave, and are cut at the bottom, so the
+oldest go first. Folding another section gives the Log its room. When not even 8 lines fit, the pane scrolls, and the
+engine does that. Where the body's height is not known (`bodyRows` 0), the Log draws 15 lines (`MAX_LOG_ROWS`) at their
+natural height, in one Box, as 0.2.0 did.
+
+- **Structure** (the root is in §4, `logParts` in §6.10):
+  - the root has `minHeight={bodyRows}`, and none when the height is not known;
+  - the Log's rule, header, head and tail are direct children of the root, with no Box around them;
+  - the head is a column Box with `flexShrink={0}` and the first 8 lines;
+  - the tail is a column Box with `height={0}`, `flexGrow={1}`, `flexShrink={1}` and `overflow="hidden"`. It has no
+    height of its own, grows into what the root leaves free, and cuts its lines at the bottom.
+- **The unit.** A desktop height cell is one text line, about 19 px, and `props.scroll.bodyRows` counts text lines
+  (§2.1). The 8 px is the width of a cell, and what `marginTop={1}` adds; it does not hold for `height`.
+- **What the engine does.**
+  - It scrolls a body that is taller than the pane, natively, with a scrollbar and the wheel.
+  - A change of `bodyRows` alone re-runs `ui.render`, on every frame of a resize.
+- **What did not work.** A root with `height="100%"` grows to its content: all 60 lines show, and the pane scrolls.
+- **Not verified.** The terminal (Ink/Yoga), and nested chains of growing Boxes, which the flat structure avoids.
+- **Evidence.** Two live spikes on the desktop, engine 2.1.288, 2026-10-08, with a throwaway mod that drew numbered log
+  lines and a footer line after them (the mod was deleted afterwards). Four of its modes matter:
+  - B, a root with `height={bodyRows}` and a `flexGrow` log with `overflow="hidden"`, worked exactly: at `bodyRows` 65
+    the footer touched the bottom edge, and the log's Box took exactly the rest and cut its extra lines at the bottom.
+  - C, a root with `height="100%"`, did not work: it grew to its content (see "What did not work").
+  - E, the structure above, worked: the footer touched the bottom edge and there was no scrollbar; the head showed
+    lines 1–8 and the tail the rest (lines 9–53 at `bodyRows` 65). When another panel opened and took `bodyRows` from
+    65 to 40, the footer came back to the bottom edge with no manual redraw: the render count rose from 292 to 337 in
+    20 s.
+  - F, E with 70 lines above the log, so that the content was taller than the body, worked: the root grew past the body
+    and the pane scrolled natively, the head kept its 8 lines, and the tail collapsed to nothing.
 
 ## 7. Icons
 
@@ -860,6 +1003,8 @@ const ICON: Record<SectionId | 'branch' | 'changes', string> = {
 ```
 
 Subagent status icons are shape-coded, so colour is never the only cue: a half-filled circle, a check, a cross, a stop square.
+
+The block is an excerpt of `view.tsx`: `GREEN` is apart from the icons there, and its long lines are wrapped.
 
 ```ts
 const GREEN = '#2ea043'
@@ -977,7 +1122,29 @@ Checks on the first live render, before the tests are frozen:
 4. **Empty alt.** If the transcript says a `ui.render` tree was refused and names `alt`, give each decorative icon the label of its row and the rule `alt="rule"`.
 5. **Chevron.** It is dim at rest and full strength under the pointer. A click folds the section and the header keeps its summary.
 6. **Lines separator.** On the desktop the changes row reads `+8 / −1`, with the spaces around the slash, not `+8/−1` (the no-break spaces of `LINES_SEP`, §6.3).
-7. **Changes refresh.** The changes row updates about a second after an edit or a command by any agent. A read-only command such as `ls` does not trigger it. In a big repository it comes later: four times the last read.
+7. **Changes refresh.** The changes row updates about a second after an edit or a command by any agent. A read-only
+   command such as `ls` does not trigger it. In a big repository it comes later: four times the last read. An edit made
+   outside Claude's tools (an editor, a terminal) shows within about a minute, with no new turn: the project is read on
+   every second tick of the 30-second timer. In a new session the changes row is absent until the first turn of the
+   main agent: before it only the folder and the branch show.
+
+Open checks since Tasks 11 and 12, for the 0.3.0 release:
+
+8. **The terminal under the new root.** The root has `minHeight` (§4), and Ink/Yoga has not been seen with it and with
+   the Log's tail of `height={0}` (§6.12). Docked (110 columns or more) and inline: the Log reaches the bottom of the
+   pane, and a pane too short for the head scrolls. If the terminal does not grow the tail, the hedge is `rows` 0 on the
+   terminal, which draws the tree of 0.2.0.
+9. **An abandoned call.** A tool call that is stopped (an agent on `sleep 120`, stopped after 20 s) logs a dim line with
+   its time and no ✗ (§6.10). The same for a subagent stopped with `TaskStop`: does `next.signal` fire for it, and has
+   it fired by the time `next(e)` returns the aborted result?
+10. **The real pane at three sizes.** The spikes drew throwaway content, so the pane as the mod draws it has not been
+    seen (§6.12). At three pane heights: the Log reaches the bottom edge, there is no scrollbar while the content fits,
+    and folding a section grows the Log.
+11. **The first frame.** If the engine hands `bodyRows` 0 on the first draw, the Log draws 15 lines in one Box until the
+    next `bodyRows` (§6.12). See whether the change shows as a jump.
+12. **A narrow pane, about 270 px.** The layout does not count the label (§6.10), so at the edge of a layout an engine
+    line shows `engine › ` and may show none of its text. See how much of the text shows after `engine › `, beside the
+    longest outcome.
 
 Results of the live renders (2026-10-07 and 2026-10-08):
 
@@ -989,6 +1156,11 @@ Results of the live renders (2026-10-07 and 2026-10-08):
 5. Pass. A click on the chevron folds the section, and the folded state survives a reload.
 6. Pending.
 7. Pending.
+8. Pending.
+9. Pending.
+10. Pending.
+11. Pending.
+12. Pending.
 
 ## 12. Compromises forced by the API
 
