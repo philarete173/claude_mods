@@ -22,14 +22,18 @@ share the `inline` file and write the whole map until they restart.
   unknown lines do (for example, a SHA-256 repository with only new files, or a first new-file count that failed). The
   changes are read from the first turn of the main agent on; before it only the folder and the branch show. They are
   read again about a second after an agent edits a file or runs a command that is not read-only, and once a minute while
-  the pane is in front (placed and shown, not a tab behind another), so that edits made outside Claude's tools (an
-  editor, a terminal, a background command that ended after its call returned) show without a new turn. Opening the
-  pane reads at once, and `/session-panel` on a pane that is open but behind another tab, or waits undrawn, brings it
-  forward and reads instead of closing it. After a slow read the next one waits four times as long as that read took,
-  at most four minutes, and the changes of one read have 30 s in all. A folder whose reads time out twice in a row (a
-  `git status`, or a `git diff` against HEAD, that times out or cannot start), such as a dotfiles repository in
-  `$HOME`, is given up for changes while the mod lives, whichever other folder is read; its branch still shows.
-  Outside a repository only the folder shows; a clean tree has no changes row.
+  the pane is placed and shown, so that edits made outside Claude's tools (an editor, a terminal, a background command
+  that ended after its call returned) show without a new turn. A pane counts as shown when it is in front of the
+  session's other plugin panes, so the Session pane, when it is alone, always is: in the usual setup every session whose
+  pane is open and placed keeps its minute read (bounded by the wait after a slow read and the 30 s budget below),
+  whichever tab or session the desktop has in front. Opening the pane reads at once, and `/session-panel` on a pane that
+  is open but not shown, or waits undrawn, asks to bring it forward and reads instead of closing it; the surface grants
+  that only while the prompt has the keys over an empty composer, and the pane then holds the keyboard until Esc. After
+  a slow read the next one waits four times as long as that read took, at most four minutes, and the changes of one read
+  have 30 s in all. A folder whose reads time out twice in a row (a `git status`, or a `git diff` against HEAD, that
+  times out or cannot start), such as a dotfiles repository in `$HOME`, is given up for changes while the mod lives,
+  whichever other folder is read; its branch still shows. Outside a repository only the folder shows; a clean tree has
+  no changes row.
 - **Usage**: the plan limits (5-hour, Weekly, Spend) as meters with a countdown to each reset. Hidden when the engine
   reports no plan limits, for example with an API key or a third-party provider.
 - **Turn stats**: the last finished turn of the main agent (a turn stopped before any response leaves the previous
@@ -54,8 +58,9 @@ share the `inline` file and write the whole map until they restart.
   interrupted it, or a stop did) is not drawn as an error: it is not red, its `who` and outcome are dim as on every line
   that is no error, and its outcome is the time alone, with no ✗; this rests on the engine's `next.signal`, and was
   seen live for a subagent stopped with `TaskStop` and for Esc on the main agent, while a call that fails by itself
-  stays red. A subagent's answer loses its markdown marks (a pair of `**` that no letter or digit touches on the
-  outside, so `2**10 and 3**4` stays; backticks; a heading's `#`).
+  stays red. A subagent's answer loses its markdown marks (a pair of `**`, unless an ASCII letter, digit or `_` touches
+  it on the outside, so `2**10 and 3**4` stays, and a letter of another script does not stop it: `这是**重要**的` gives
+  `这是重要的`; backticks; a heading's `#`).
   In auto mode a subagent's `done` line shows the report it handed back, even when auto mode withheld or flagged it;
   the text is masked as any other, and the main agent did not get it, a known limitation. In a narrow pane the `who`
   column gives way first, and then the outcome moves in front of the text; where there is no `who`, a prompt reads
@@ -63,10 +68,11 @@ share the `inline` file and write the whole map until they restart.
   shows in the Log only in its `spawned · type: …` line, if the cut leaves it: a known limit. Unicode format characters
   (the bidi controls, zero-width spaces, the BOM and the rest) are taken out of the branch, the folder name, the
   Subagents rows, the MCP server names and every log text, since a U+202E would reorder what the pane shows. A ZWJ or
-  ZWNJ stays only between two characters that are above U+007F and are no spaces, so emoji sequences stay whole and
-  Persian and Indic scripts keep their joiners. Beside an ASCII character, a space of any kind or an end of the text a
-  joiner would join nothing, and it could hide a character in a branch name or split a secret so that its mask misses
-  it, so it goes.
+  ZWNJ stays only between two characters that are above U+007F and are no spaces, so emoji sequences joined by ZWJ stay
+  whole and Persian and Indic scripts keep their joiners. The flags of England, Scotland and Wales lose their tag
+  characters (tags can carry invisible ASCII) and show as a plain black flag. Beside an ASCII character, a space of any
+  kind or an end of the text a joiner would join nothing, and it could hide a character in a branch name or split a
+  secret so that its mask misses it, so it goes.
   Common secret patterns (tokens, keys, passwords in URLs and flags) are masked.
 
 ## How costs are measured

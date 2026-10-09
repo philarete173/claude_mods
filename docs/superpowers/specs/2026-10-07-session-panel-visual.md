@@ -8,7 +8,7 @@
 > free height, 8 lines at least (§6.12); the rule above a section is one line high, with no margins (§5.1). The HTML
 > preview `docs/design/session-panel-preview.html` stays the approved v2 mock-up and predates these changes.
 
-Date: 2026-10-07. Status: implemented and shipped (0.3.0). The user approved the look in
+Date: 2026-10-07. Status: implemented and shipped (0.3.1). The user approved the look in
 `docs/design/session-panel-preview.html` before implementation.
 
 Scope: presentation only. The sections, their content, the formats and every formula of `2026-10-07-session-panel-design.md` §3–§4 stay as they are. Where the two specs differ on looks, this one replaces §3.1 of the main spec. Engine 2.1.288. "d.ts" below means `plugin-authoring/types/claude-code.d.ts` of that engine, cited by line.
@@ -1157,11 +1157,12 @@ Checks on the first live render, before the tests are frozen:
 7. **Changes refresh.** The changes row updates about a second after an edit or a command by any agent. A read-only
    command such as `ls` does not trigger it. In a big repository it comes later: four times the last read, which counts
    at most a minute, so the wait is at most four minutes. An edit made outside Claude's tools (an editor, a terminal)
-   shows within about a minute, with no new turn, while the pane is in front: the project is read on every second tick
-   of the 30-second timer, but only while the pane is placed and shown, not a tab behind another. Opening the pane
-   reads at once, and so does `/session-panel` on a pane behind another tab, which it brings forward instead of closing
-   it. In a new session the changes row is absent until the first turn of the main agent: before it only the folder and
-   the branch show.
+   shows within about a minute, with no new turn: the project is read on every second tick of the 30-second timer, while
+   the pane is placed and shown. The Session pane alone is always shown (`isShown` names only the plugin pane in front,
+   §4.1 of the main spec), so a session that is not in front reads too, unless the desktop unplaces its pane (check 13).
+   Opening the pane reads at once, and so does `/session-panel` on a pane that is not shown, which it asks to bring
+   forward instead of closing it. In a new session the changes row is absent until the first turn of the main agent:
+   before it only the folder and the branch show.
 
 Checks since Tasks 11 and 12, for the 0.3.0 release:
 
@@ -1181,6 +1182,14 @@ Checks since Tasks 11 and 12, for the 0.3.0 release:
 12. **A narrow pane, about 270 px.** The layout does not count the label (§6.10), so at the edge of a layout an engine
     line shows `engine › ` and may show none of its text. See how much of the text shows after `engine › `, beside the
     longest outcome.
+
+Check since the review of Task 13, for the 0.3.1 release:
+
+13. **A session in the background.** In the engine `isShown` names only which of a session's plugin panes is in front,
+    so the Session pane alone is always shown (§4.1 of the main spec). With two desktop sessions open, does the
+    background session's `$.ui.panes()` list the pane as placed and shown? And with a built-in tab of the desktop
+    (Diff, Terminal) in front? If it does, that session keeps its minute read, as in 0.3.0, and finding 2 of the 0.3.0
+    live check (every live session reads the tree once a minute) is not fixed.
 
 Results of the live renders (2026-10-07, 2026-10-08 and 2026-10-09):
 
@@ -1213,13 +1222,14 @@ Results of the live renders (2026-10-07, 2026-10-08 and 2026-10-09):
 11. Pending. The 0.3.0 live check does not mention the first frame.
 12. Seen in a narrow pane in the 0.3.0 live check: the lines read `you › …` and `engine › agent-message`. How much text
     follows `engine › ` at the edge of the layout was not recorded.
+13. Pending. The review before 0.3.1 read the engine's source (CLI 2.1.295); no desktop has been looked at.
 
 Not checked in the 0.3.0 live check, or pending a look:
 
 - the fix of finding 1, the rule one line high: the Log's last line has not been looked at since (check 2);
 - the fold state after a restart;
-- a pane hidden behind another tab (`isShown: false`): the minute read now skips it, and `/session-panel` brings it
-  forward instead of closing it;
+- a pane behind another plugin pane of its session (`isShown: false`): the minute read now skips it, and
+  `/session-panel` asks to bring it forward instead of closing it;
 - a branch change, a detached HEAD, `git stash`, an edit of a tracked file, `N+ files changed` (a status over 4 MiB), a
   root outside git, a SHA-256 repository;
 - Usage, `denied`, `/compact` and `/clear`.
