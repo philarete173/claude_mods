@@ -780,7 +780,12 @@ The row has four columns. The description and the `@type` column sit in one grou
    - Terminal: the longest `@type` drawn, at most `TYPE_CELLS_MAX` (15).
 4. **Cost** (FIXED, `COST_CELLS`, 7 cells, right-aligned). Costs line up on their right edge, and every description ends at the same x.
 
-**In a narrow pane the type gives way first**, as `who` does in the log (§6.10). `agentsSection` works out what a description would keep beside the type: the body less the mark (`markCellsOf(d)`: `ICON_CELLS` on the desktop, `TEXT_MARK_CELLS` on the terminal), the type column, `COST_CELLS` and the gaps of the row (`AGENT_ROW_GAPS` of `AGENT_GAP_CELLS` each: two between the cells and one in the group). With fewer than `MIN_AGENT_DESC_CELLS` (12) cells the type column leaves every row, not some of them: `agentRow` gets `typeCells` 0, and the description takes the whole group. The choice is made once per section, so every description still ends at the same x.
+**In a narrow pane the type gives way first**, as `who` does in the log (§6.10). `agentsSection` works out what a
+description would keep beside the type: the body less the mark (`markCellsOf(d)`: `ICON_CELLS` on the desktop,
+`TEXT_MARK_CELLS` on the terminal), the type column, `COST_CELLS` and the gaps of the row (`AGENT_ROW_GAPS` of
+`AGENT_GAP_CELLS` each: two between the cells and one in the group). With fewer than `MIN_AGENT_DESC_CELLS` (12) cells
+the type column leaves every row, not some of them: `agentRow` gets `typeCells` 0, and the description takes the whole
+group. The choice is made once per section, so every description still ends at the same x.
 
 The status icon's `alt` is the status word (`running`, `done`, `failed`, `stopped`): the icon is the only place that says it.
 
@@ -803,7 +808,9 @@ function moreLine(d: Draw, count: number, props: Partial<BoxProps> = {}): Render
 }
 ```
 
-The line starts at `markCellsOf(d)` + `AGENT_GAP_CELLS`, where the descriptions start whether or not the type column is drawn. On the desktop that is 3 cells = the 2-cell icon slot + the 1-cell gap. On the terminal it is 2 cells = the 1-cell mark + the 1-cell gap.
+The line starts at `markCellsOf(d)` + `AGENT_GAP_CELLS`, where the descriptions start whether or not the type column is
+drawn. On the desktop that is 3 cells = the 2-cell icon slot + the 1-cell gap. On the terminal it is 2 cells = the
+1-cell mark + the 1-cell gap.
 
 ### 6.8 MCP chips
 
@@ -893,8 +900,9 @@ function mcpSection(d: Draw): Block {
 // Where the body's height is not known the Log has MAX_LOG_ROWS.
 //
 // The count of the rows above is exact but for the chips of MCP (chipRows), which wrap, and that is made to err on the
-// high side. A count that is too high is harmless: the Log draws a line fewer than would have fit, an empty row is left
-// at the bottom of the pane, and `+N more` still counts every event that is not drawn. A count that is too low is not:
+// high side. A count that is too high is harmless: the Log draws a line fewer than would have fit; a spare row is left
+// above the `+N more` line, where the tail grows into it, or at the bottom of the pane when the Log has no tail or no
+// `+N more` line; and `+N more` still counts every event that is not drawn. A count that is too low is not:
 // the last line is drawn past the rows there are, the tail clips it, and N is one short of the events that are hidden.
 // So an error is allowed on the side of fewer lines only, and the tail's clip is what limits the damage of the other.
 function logLinesFit(d: Draw, above: number, total: number): number {
@@ -1080,7 +1088,8 @@ at their natural height, in one Box, and then the `+N more` line.
 - **How many lines fit** (`logLinesFit` in §6.10; the 0.4.0 spec, `2026-10-12-session-panel-v2-design.md`, §3.2):
   - `room = bodyRows − rows above − 2`, where the 2 are the Log's own rule and header;
   - if every event fits in `room`, the Log draws all of them, though never more than the 60 it holds;
-  - otherwise it draws `max(8, room − 1)` lines, and one row goes to the `+N more` line;
+  - otherwise it draws `max(8, room − 1)` lines, never more than the 60 it holds, and one row goes to the
+    `+N more` line;
   - N is the total less the lines drawn. The line shows exactly when N is above 0, and never for a folded Log, which
     keeps its count in the header.
 - **The rows above.**
@@ -1093,7 +1102,7 @@ at their natural height, in one Box, and then the `+N more` line.
     name's, counted by code point with every code point above U+007F as 2 cells (`nameCells`).
 - **Errors go one way.**
   - A count that is too high leaves a spare row. It sits between the last Log line and `+N more`, since the tail's
-    `flexGrow` takes the spare rows.
+    `flexGrow` takes the spare rows. When the Log has no tail or no `+N more` line, it is at the bottom of the pane.
   - A count that is too low draws a line past the rows there are. The tail clips it, and N is one short.
   - So the estimate errs high, and the tail stays as insurance.
 - **Structure** (the root is in §4, `logParts` in §6.10):

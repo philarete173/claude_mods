@@ -766,8 +766,9 @@ function sourcesSection(d: Draw): Block {
 // Where the body's height is not known the Log has MAX_LOG_ROWS.
 //
 // The count of the rows above is exact but for the chips of MCP (chipRows), which wrap, and that is made to err on the
-// high side. A count that is too high is harmless: the Log draws a line fewer than would have fit, an empty row is left
-// at the bottom of the pane, and `+N more` still counts every event that is not drawn. A count that is too low is not:
+// high side. A count that is too high is harmless: the Log draws a line fewer than would have fit; a spare row is left
+// above the `+N more` line, where the tail grows into it, or at the bottom of the pane when the Log has no tail or no
+// `+N more` line; and `+N more` still counts every event that is not drawn. A count that is too low is not:
 // the last line is drawn past the rows there are, the tail clips it, and N is one short of the events that are hidden.
 // So an error is allowed on the side of fewer lines only, and the tail's clip is what limits the damage of the other.
 function logLinesFit(d: Draw, above: number, total: number): number {

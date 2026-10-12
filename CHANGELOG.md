@@ -2,7 +2,7 @@
 
 ## 0.4.0 — 2026-10-12
 
-- The Log's header shows how many events the session has had. `/clear` and resume start the count over.
+- The Log's header shows how many events it has seen. `/clear`, resume and restarting Claude Code start the count over.
 - The Log draws as many lines as fit under the other blocks, at least 8, and a dim `+N more` line at its bottom counts
   the events it does not draw, as the Subagents list does.
 - The rows of the MCP chips are estimated on the high side, and a name's characters beyond ASCII count two cells each,

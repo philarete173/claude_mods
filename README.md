@@ -18,7 +18,7 @@ is a plugin marketplace, `philarete-mods`, that holds this one plugin.
 - **MCP**: the servers that have tools in the context, by name, with their count.
 - **Context sources**: how many skills and MCP servers feed the context.
 - **Log**: the last 60 events, newest first: prompts, tool calls, subagent spawns, resumes and results, compactions. Its
-  header counts every event, and a `+N more` line counts the ones that do not fit.
+  header counts the events it has seen, and a `+N more` line counts the ones that do not fit.
 
 Every section below the Session and Project blocks can be folded, and the fold state persists. Every rule is in
 [the plugin's README](plugins/session-panel/README.md).
