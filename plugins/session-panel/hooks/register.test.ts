@@ -84,6 +84,7 @@ const READER: Plugin = {
         lastTurn: (await $.state.get({ plugin: 'session-panel', key: 'lastTurn' } as const)).value,
         agents: (await $.state.get({ plugin: 'session-panel', key: 'agents' } as const)).value,
         log: (await $.state.get({ plugin: 'session-panel', key: 'log' } as const)).value,
+        logCount: (await $.state.get({ plugin: 'session-panel', key: 'logCount' } as const)).value,
         collapsed: (await $.state.get({ plugin: 'session-panel', key: 'collapsed' } as const)).value,
       }
 
@@ -4005,6 +4006,64 @@ test('a compaction is logged and refreshes usage; a skipped one and a subagent\'
     expect((await readState($)).log).toHaveLength(1)
   })
 
+// The count of every line put on the log, which the log's 60 lines do not hold once there are more.
+test('every path that puts a line on the log adds one to its count', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+
+  const paths: [name: string, run: () => Promise<unknown>][] = [
+    ['a prompt', () => $.turn.start({ text: 'fix it', turnId: 't1' })],
+    ['a call of a tool', () => drive(clock, $.tool.call(readCall()))],
+    ['the start of a subagent', () => $.agent.spawn(SPAWN)],
+    ['the end of a subagent', () => finish($, 'a1')],
+    ['a message that wakes the subagent', () => runStep($, clock, { turnId: 't1', index: 1, agentId: 'a1' })],
+    ['a compaction', () => $.session.compact({ trigger: 'manual', messages: MESSAGES })],
+  ]
+  let expected = 0
+  for (const [name, run] of paths) {
+    await run()
+    await clock.advance(10) // the line of a woken subagent is written a tick later, off the request
+    expected += 1
+    expect((await readState($)).logCount, name).toBe(expected)
+  }
+  expect((await readState($)).log).toHaveLength(expected)
+})
+
+test('after 65 events the log holds 60 lines and the count says 65', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+
+  for (let i = 1; i <= 65; i += 1) await $.turn.start({ text: `prompt ${i}`, turnId: `t${i}` })
+
+  const state = await readState($)
+  expect(state.log).toHaveLength(60)
+  expect(state.logCount).toBe(65)
+})
+
+// A hot reload raises session.start again, for the mod alone, and the values of `$.state` stay: the count goes on.
+test('a second session.start, which a hot reload raises, keeps the count and the log', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.agent.spawn(SPAWN)
+  const before = await readState($)
+  expect(before.logCount).toBe(2)
+
+  await $.session.start(START)
+  await clock.advance(1)
+  const after = await readState($)
+  expect([after.logCount, after.log]).toEqual([2, before.log])
+
+  await $.turn.start({ text: 'again', turnId: 't2' })
+  expect((await readState($)).logCount).toBe(3)
+})
+
 test('the first cost reading, and one under the last, only set the baseline', TICKING_READER, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = bottom(on, clock)
@@ -4040,6 +4099,7 @@ const checkStartsOver = async ($: Engine, on: On, reason: 'clear' | 'resume'): P
   expect(before.turn?.turnId).toBe('t2')
   expect(Object.keys(before.agents)).toEqual(['a1'])
   expect(before.log.length).toBeGreaterThan(0)
+  expect(before.logCount).toBe(before.log.length)
   expect(before.usage).toMatchObject({ contextTokens: 90_000, contextPct: 9 })
 
   // Any other end of the session leaves the panel as it is.
@@ -4048,7 +4108,7 @@ const checkStartsOver = async ($: Engine, on: On, reason: 'clear' | 'resume'): P
 
   expect(await $.session.end({ reason, sessionId: 's1', resume: { id: 's1' } })).toEqual({ sessionId: 's1' })
   const after = await readState($)
-  expect([after.turn, after.lastTurn, after.agents, after.log]).toEqual([null, null, {}, []])
+  expect([after.turn, after.lastTurn, after.agents, after.log, after.logCount]).toEqual([null, null, {}, [], 0])
   expect(after.project).toEqual(before.project)
   // The context reads empty until the next response; the window, the cost, the limits and the skills are the session's.
   const { contextTokens, contextPct, ...kept } = before.usage

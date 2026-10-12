@@ -106,6 +106,8 @@ declare module 'claude-code' {
       lastTurn: TurnStats | null
       agents: Record<string, AgentRow>
       log: LogEntry[]
+      // Every line put on the log since it was last emptied (a /clear or a resume); `log` keeps the newest 60.
+      logCount: number
       collapsed: Record<string, boolean>
     }
   }

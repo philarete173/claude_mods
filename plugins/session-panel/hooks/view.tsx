@@ -18,7 +18,9 @@ export type SectionId = 'usage' | 'turn' | 'agents' | 'mcp' | 'sources' | 'log'
 type State = PluginState['session-panel']
 
 // What the pane is drawn from: the atoms it shows, the time for the countdowns, and the surface it is drawn on.
-export type PaneData = Pick<State, 'usage' | 'project' | 'mcp' | 'lastTurn' | 'agents' | 'log' | 'collapsed'> & {
+export type PaneData = Pick<
+  State, 'usage' | 'project' | 'mcp' | 'lastTurn' | 'agents' | 'log' | 'logCount' | 'collapsed'
+> & {
   now: number
   surface: RenderSurface
 }
@@ -669,7 +671,8 @@ function sourcesSection(d: Draw): RenderElement | null {
 
 // The Log, as the parts of the pane's root: its rule, its header and its lines, with no Box around them. That is the
 // layout the live desktop has verified, and it needs no chain of Boxes that grow (the visual spec, §6.12 Log height).
-// Folded, it is the rule and the header; with no lines, nothing.
+// Folded, it is the rule and the header; with no lines, nothing. The summary of its header is logCount, the count of
+// every event (the lines are the newest of them), and a folded Log keeps it.
 // The newest log lines: time, who, what, and how it went. Time and `who` are dim fixed columns, so every text starts
 // at the same x; the text is cut to one line. On the desktop `who` has a width of its own, so the text column does not
 // jump with the longest `who`; on the terminal it is the longest one there is, up to the most shortType keeps. The
@@ -696,7 +699,7 @@ function logParts(d: Draw): RenderElement[] {
   const lines = d.data.log.slice(0, d.rows > 0 ? Math.max(MIN_LOG_ROWS, d.rows) : MAX_LOG_ROWS)
   if (lines.length === 0) return []
   const rule = divider(d)
-  const header = sectionHeader(d, 'log', 'Log', '')
+  const header = sectionHeader(d, 'log', 'Log', String(d.data.logCount))
   if (isFolded(d, 'log')) return [rule, header]
   const longestWho = Math.max(...lines.map(line => line.who.length))
   const whoCells = Svg === undefined ? Math.min(WHO_CELLS_MAX, longestWho) : WHO_CELLS

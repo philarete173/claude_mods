@@ -29,6 +29,7 @@ const turnAtom = atom({ plugin: 'session-panel', key: 'turn' } as const, null)
 const lastTurnAtom = atom({ plugin: 'session-panel', key: 'lastTurn' } as const, null)
 const agentsAtom = atom({ plugin: 'session-panel', key: 'agents' } as const, {})
 const logAtom = atom({ plugin: 'session-panel', key: 'log' } as const, [])
+const logCountAtom = atom({ plugin: 'session-panel', key: 'logCount' } as const, 0)
 const collapsedAtom = atom({ plugin: 'session-panel', key: 'collapsed' } as const, {})
 
 const PANE = 'session-panel'
@@ -215,13 +216,15 @@ function inBackground($: EngineInterface, job: () => Promise<void>): void {
   })
 }
 
-// Puts a line on top of the log. The outcome of an action, a mark and its time, is a field of its own; a line with
-// none has no such key.
+// Puts a line on top of the log, and counts it: the log keeps the newest 60 lines, the count every line since the log
+// was last emptied. The outcome of an action, a mark and its time, is a field of its own; a line with none has no such
+// key.
 async function addLog(
   $: EngineInterface, at: number, who: string, text: string, kind: LogKind, outcome?: string,
 ): Promise<void> {
   const entry: LogEntry = { at, who, text, kind, ...(outcome === undefined ? {} : { outcome }) }
   await update($, logAtom, list => pushLog(list, entry))
+  await update($, logCountAtom, count => count + 1)
 }
 
 // Whose line it is: `main`, or the type of the subagent that ran.
@@ -652,6 +655,7 @@ export const register: Register = on => {
       await update($, lastTurnAtom, () => lastTurnAtom.initial)
       await update($, agentsAtom, () => agentsAtom.initial)
       await update($, logAtom, () => logAtom.initial)
+      await update($, logCountAtom, () => logCountAtom.initial)
       await update($, usageAtom, held => ({ ...held, contextTokens: undefined, contextPct: undefined }))
     }
 
@@ -888,6 +892,7 @@ export const register: Register = on => {
       lastTurn: await read($, lastTurnAtom),
       agents: await read($, agentsAtom),
       log: await read($, logAtom),
+      logCount: await read($, logCountAtom),
       collapsed: await read($, collapsedAtom),
       now: await $.clock.now(),
       surface: e.surface,

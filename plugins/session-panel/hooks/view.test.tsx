@@ -358,6 +358,7 @@ const EMPTY: PaneData = {
   lastTurn: null,
   agents: {},
   log: [],
+  logCount: 0,
   collapsed: {},
   now: NOW,
   surface: 'desktop',
@@ -428,6 +429,7 @@ const FULL: PaneData = {
   },
   agents: Object.fromEntries(AGENTS.map(row => [row.id, row])),
   log: LOG,
+  logCount: 137, // every event of the session: many more than the lines the log keeps
   collapsed: {},
   now: NOW,
   surface: 'desktop',
@@ -512,8 +514,9 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
     expect((await ui.findAll({ type: 'Text' })).filter(el => el.props.bold === true).map(el => el.text)).toEqual([
       'Session', 'Project', ...TITLES,
     ])
+    // The Log counts the five events the seed makes: a prompt, a Bash call, two spawns and the end of one subagent.
     expect(await summaries(ui), surface).toStrictEqual({
-      usage: '5-hour 3%', turn: '~120 tok/s', agents: '1/2', mcp: '2', sources: '52 skills · 2 MCP', log: undefined,
+      usage: '5-hour 3%', turn: '~120 tok/s', agents: '1/2', mcp: '2', sources: '52 skills · 2 MCP', log: '5',
     })
     // Usage: both windows, with their countdowns.
     for (const text of ['5-hour', 'Weekly', '3%', '24%', '↻ 2h 13m', '↻ 5d 15h']) {
@@ -1840,6 +1843,17 @@ test('a folded Log is its rule and its header, and a Log with no lines is nothin
   }
 })
 
+test('the Log header shows the count of all the events, not the lines the log holds, folded or not', () => {
+  // The log holds the newest 60 lines: of 65 events, the 5 oldest have left it, and the count still has them.
+  const data = { ...FULL, log: logLines(60), logCount: 65 }
+  for (const surface of SURFACES) {
+    for (const collapsed of [{}, { log: true }] as Array<Record<string, boolean>>) {
+      const header = headerRows(draw(onSurface({ ...data, collapsed }, surface), 45, 40)).at(-1)
+      expect([header?.id, header?.summary], `${surface} ${JSON.stringify(collapsed)}`).toEqual(['log', '65'])
+    }
+  }
+})
+
 test('the columns of the Log are worked out over every line drawn, the tail\'s as well as the head\'s', () => {
   // Line 30 is the only one with the longest outcome and the longest `who`. It is drawn for a body of 40 rows, not 20.
   const log = logLines(60, i => (i === 29 ? { who: 'minimal-change', outcome: '✗ 1m 12s' } : { outcome: '✓ 0.1s' }))
@@ -1925,7 +1939,7 @@ test('a header is an icon, a bold title, a dim chevron that folds, and a summary
     expect(rows.map(row => row.id), surface).toEqual([...SECTIONS])
     expect(rows.map(row => row.title), surface).toEqual(TITLES)
     expect(rows.map(row => row.summary), surface).toEqual([
-      '5-hour 3%', '~62 tok/s', '2/10', '3', '77 skills · 3 MCP', undefined,
+      '5-hour 3%', '~62 tok/s', '2/10', '3', '77 skills · 3 MCP', '137',
     ])
     for (const { cells, label, title: name } of rows) {
       // On the desktop an icon slot comes first; the terminal draws none.
