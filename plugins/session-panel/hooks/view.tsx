@@ -74,8 +74,18 @@ const MAX_AGENT_ROWS = 8
 // The Log keeps at least this many lines, and when they do not fit the pane scrolls (the user's decision, 2026-10-08),
 // as the Subagents list shows up to 8.
 const MIN_LOG_ROWS = 8
-// The lines the Log draws where the body's height is not known; where it is, the body's rows (MIN_LOG_ROWS at least).
+// The lines the Log draws where the body's height is not known; where it is, logLinesFit works them out.
 const MAX_LOG_ROWS = 15
+// The rows a rule and a section header take in the body: one each, on the desktop as in the terminal (measured live:
+// the icon, the chevron and the summary share the line of the title). The builders of the blocks count their rows with
+// these, and the Log works out from the count how many of its lines fit. Both are in the 0.4.0 spec, §8.1 and §3.2
+// (docs/superpowers/specs/2026-10-12-session-panel-v2-design.md).
+const RULE_ROWS = 1
+const HEADER_ROWS = 1
+// The chips of MCP are this far apart (the `columnGap` of their Box), and chipRows keeps this many cells of a line
+// free.
+const CHIP_GAP_CELLS = 2
+const CHIP_MARGIN_CELLS = 2
 const MIN_LOG_TEXT_CELLS = 8 // the least text a log line keeps: below it `who` gives way, then the outcome column
 // In a narrow pane the identity column gives way first, as in the log: a subagent row leaves out its `@type`, on
 // every row, when the description would keep fewer cells than this beside it.
@@ -225,6 +235,27 @@ export function limitMeterWidth(bodyColumns: number): number {
 
 // ---- Shared pieces (§5) ----
 
+// A block of the pane as its builder returns it: the tree, and the rows of the body that it takes. A block that is left
+// out has no tree and no rows. A builder counts the rows from the very rows it puts in the tree, so that the two cannot
+// part: the Log needs the count to know how many of its lines fit below the blocks above it (logParts).
+type Block = { tree: RenderElement | null; rows: number }
+const NO_BLOCK: Block = { tree: null, rows: 0 }
+
+// The cells in front of the text of a row that has a mark: the mark's slot and the gap after it.
+const markCellsOf = (d: Draw): number => (d.ui.Svg === undefined ? TEXT_MARK_CELLS : ICON_CELLS)
+
+// The dim line that counts what a list does not show: `+3 more`. It starts where the text of the rows above it does,
+// after the mark and its gap, for the Subagents and for the Log alike (§6.7). `props` go to the Box that holds it.
+function moreLine(d: Draw, count: number, props: Partial<BoxProps> = {}): RenderElement {
+  const { Box, Text } = d.ui
+
+  return (
+    <Box flexDirection="row" paddingLeft={markCellsOf(d) + AGENT_GAP_CELLS} {...props}>
+      <Text dimColor>{`+${count} more`}</Text>
+    </Box>
+  )
+}
+
 // The meter: a vector bar where the surface draws one, ten cells of ▰▱ where it does not. The text bar is a fixed
 // cell, so a pane too narrow for it clips it (the Box around it) rather than wrapping it.
 function meter(d: Draw, pct: number, alt: string, widthPx: number): RenderElement {
@@ -346,17 +377,25 @@ function sectionHeader(d: Draw, id: SectionId, title: string, summary: string): 
   )
 }
 
-// A section: a rule, then its header row, then the body unless folded. A folded section keeps its summary.
-function section(d: Draw, id: SectionId, title: string, summary: string, body: RenderElement[]): RenderElement {
+// A section: a rule, then its header row, then the body unless folded. A folded section keeps its summary. Its rows are
+// the rule's, the header's and, unless it is folded, those of the body: one for each element of it, or `bodyRows` where
+// the caller knows that they take another number (the chips of MCP wrap).
+function section(
+  d: Draw, id: SectionId, title: string, summary: string, body: RenderElement[], bodyRows = body.length,
+): Block {
   const { Box } = d.ui
+  const isOpen = !isFolded(d, id)
 
-  return (
-    <Box flexDirection="column">
-      {divider(d)}
-      {sectionHeader(d, id, title, summary)}
-      {!isFolded(d, id) && <Box flexDirection="column">{body}</Box>}
-    </Box>
-  )
+  return {
+    tree: (
+      <Box flexDirection="column">
+        {divider(d)}
+        {sectionHeader(d, id, title, summary)}
+        {isOpen && <Box flexDirection="column">{body}</Box>}
+      </Box>
+    ),
+    rows: RULE_ROWS + HEADER_ROWS + (isOpen ? bodyRows : 0),
+  }
 }
 
 // ---- Top block (§6.1–§6.2) ----
@@ -403,33 +442,35 @@ function contextRows(d: Draw): RenderElement[] {
 }
 
 // Session and Total, the context, and the split of the cost when subagents ran. The card never folds and has no rule
-// above it. The total is primary weight: bold is for titles.
-function topBlock(d: Draw): RenderElement {
+// above it. The total is primary weight: bold is for titles. Its rows, one line each: Session with its total, the
+// context (two with a reading, the label and the meter), and the split.
+function topBlock(d: Draw): Block {
   const { Box, Text } = d.ui
   const { usage, agents } = d.data
   const subagentsUsd = Object.values(agents).reduce((sum, agent) => sum + (agent.costUsd ?? 0), 0)
   const split = splitCost(usage.costUsd, subagentsUsd)
-
-  return (
-    <Box flexDirection="column">
-      <Box flexDirection="row" justifyContent="space-between" columnGap={2}>
-        <Box flexDirection="row" flexShrink={0}>
-          <Text bold>Session</Text>
-        </Box>
-        {split.total !== null && (
-          <Box flexDirection="row" flexShrink={0}>
-            <Text>{fmtUsd(split.total)}</Text>
-          </Box>
-        )}
+  const rows: RenderElement[] = [
+    <Box flexDirection="row" justifyContent="space-between" columnGap={2}>
+      <Box flexDirection="row" flexShrink={0}>
+        <Text bold>Session</Text>
       </Box>
-      {contextRows(d)}
-      {split.session !== null && split.subagents > 0 && (
-        <Text dimColor wrap="truncate">
-          {`Session ${fmtUsd(split.session)} · Subagents ${fmtUsd(split.subagents)}`}
-        </Text>
+      {split.total !== null && (
+        <Box flexDirection="row" flexShrink={0}>
+          <Text>{fmtUsd(split.total)}</Text>
+        </Box>
       )}
-    </Box>
-  )
+    </Box>,
+    ...contextRows(d),
+  ]
+  if (split.session !== null && split.subagents > 0) {
+    rows.push(
+      <Text dimColor wrap="truncate">
+        {`Session ${fmtUsd(split.session)} · Subagents ${fmtUsd(split.subagents)}`}
+      </Text>,
+    )
+  }
+
+  return { tree: <Box flexDirection="column">{rows}</Box>, rows: rows.length }
 }
 
 // ---- Project block (§6.3) ----
@@ -461,49 +502,60 @@ function filesLabel(changes: { files: number; hasMoreFiles?: true }): string {
 // lines added and removed. Like the Session card it never folds, so its header has no icon and no chevron. A row is an
 // icon and its text on the desktop, and the text behind an emoji on the terminal, as v1 drew it. The block is left out
 // when there is no project name; the branch row when there is no branch; the changes row when there are no changes; the
-// numbers when the lines are unknown or are none (only binary files changed).
-function projectBlock(d: Draw): RenderElement | null {
+// numbers when the lines are unknown or are none (only binary files changed). Its rows are the rule and one line for
+// each row of the block.
+function projectBlock(d: Draw): Block {
   const { Box, Text, Svg } = d.ui
   // A value that an earlier build left in the state has no `changes`: it has none to show.
   const { name, branch, changes = null } = d.data.project
-  if (name === '') return null
+  if (name === '') return NO_BLOCK
   const marked = (emoji: string, text: string): string => (Svg === undefined ? `${emoji} ${text}` : text)
-
-  return (
-    <Box flexDirection="column">
-      {divider(d)}
-      <Box flexDirection="row" alignItems="center" columnGap={1}>
-        <Box flexDirection="row" flexShrink={0}>
-          <Text bold>Project</Text>
-        </Box>
-        {endText(d, name, { dimColor: true })}
+  const rows: RenderElement[] = [
+    <Box flexDirection="row" alignItems="center" columnGap={1}>
+      <Box flexDirection="row" flexShrink={0}>
+        <Text bold>Project</Text>
       </Box>
-      {branch !== null && (
-        <Box flexDirection="row" alignItems="center" columnGap={1}>
-          {iconSlot(d, ICON.branch, 'Branch')}
-          {shrinkText(d, marked('🌿', branch))}
-        </Box>
-      )}
-      {changes !== null && (
-        <Box flexDirection="row" alignItems="center" columnGap={1}>
-          {iconSlot(d, ICON.changes, 'Changes')}
-          {growText(d, marked('📝', filesLabel(changes)))}
-          {changes.lines !== null && changes.lines.added + changes.lines.removed > 0 && linesCell(d, changes.lines)}
-        </Box>
-      )}
-    </Box>
-  )
+      {endText(d, name, { dimColor: true })}
+    </Box>,
+  ]
+  if (branch !== null) {
+    rows.push(
+      <Box flexDirection="row" alignItems="center" columnGap={1}>
+        {iconSlot(d, ICON.branch, 'Branch')}
+        {shrinkText(d, marked('🌿', branch))}
+      </Box>,
+    )
+  }
+  if (changes !== null) {
+    rows.push(
+      <Box flexDirection="row" alignItems="center" columnGap={1}>
+        {iconSlot(d, ICON.changes, 'Changes')}
+        {growText(d, marked('📝', filesLabel(changes)))}
+        {changes.lines !== null && changes.lines.added + changes.lines.removed > 0 && linesCell(d, changes.lines)}
+      </Box>,
+    )
+  }
+
+  return {
+    tree: (
+      <Box flexDirection="column">
+        {divider(d)}
+        {rows}
+      </Box>
+    ),
+    rows: RULE_ROWS + rows.length,
+  }
 }
 
 // ---- Sections (§6.5–§6.10) ----
 
 // The rate-limit windows with the time to their reset; left out when the provider has none (an API key, a gateway).
 // The meters line up: the same label width and the same meter width on every row.
-function usageSection(d: Draw): RenderElement | null {
+function usageSection(d: Draw): Block {
   const { Box, Text } = d.ui
   const { rateLimits } = d.data.usage
   const lead = rateLimits.find(limit => limit.kind === 'five_hour') ?? rateLimits[0]
-  if (lead === undefined) return null
+  if (lead === undefined) return NO_BLOCK
   const label = (kind: string): string => LIMIT_LABELS[kind] ?? kind
   const rows = rateLimits.map(limit => {
     const pctText = fmtPct(limit.percentUsed, 0)
@@ -531,7 +583,7 @@ function usageSection(d: Draw): RenderElement | null {
 type Line = [label: string, value: string | null, color?: string]
 
 // The last finished turn; a row whose figure is unknown is left out. With none, a dim line that a narrow pane cuts.
-function turnSection(d: Draw): RenderElement {
+function turnSection(d: Draw): Block {
   const turn = d.data.lastTurn
   if (turn === null) {
     return section(d, 'turn', 'Turn stats', '', [shrinkText(d, 'No completed turn yet', { dimColor: true })])
@@ -597,10 +649,11 @@ function agentRow(d: Draw, agent: AgentRow, typeCells: number): RenderElement {
 }
 
 // The subagents, running ones first and then the newest; the ones that do not fit are counted, in line with the names.
-function agentsSection(d: Draw): RenderElement | null {
-  const { Box, Text, Svg } = d.ui
+// A row each, and the line that counts the rest is one more.
+function agentsSection(d: Draw): Block {
+  const { Svg } = d.ui
   const agents = orderAgents(Object.values(d.data.agents))
-  if (agents.length === 0) return null
+  if (agents.length === 0) return NO_BLOCK
   const running = agents.filter(agent => agent.status === 'running').length
   const summary = running > 0 ? `${running}/${agents.length}` : String(agents.length)
   const shown = agents.slice(0, MAX_AGENT_ROWS)
@@ -610,30 +663,47 @@ function agentsSection(d: Draw): RenderElement | null {
   const typeCells = Svg === undefined ? Math.min(TYPE_CELLS_MAX, longest) : TYPE_CELLS
   // What the description keeps beside the type: the body less the mark, the type, the cost and the gaps of a row. With
   // less than MIN_AGENT_DESC_CELLS the type is left out of every row.
-  const markCells = Svg === undefined ? TEXT_MARK_CELLS : ICON_CELLS
-  const descCells = d.cols - markCells - typeCells - COST_CELLS - AGENT_ROW_GAPS * AGENT_GAP_CELLS
+  const descCells = d.cols - markCellsOf(d) - typeCells - COST_CELLS - AGENT_ROW_GAPS * AGENT_GAP_CELLS
   const hasType = descCells >= MIN_AGENT_DESC_CELLS
   const rows = shown.map(agent => agentRow(d, agent, hasType ? typeCells : 0))
   const more = agents.length - MAX_AGENT_ROWS
-  if (more > 0) {
-    // The line starts where the descriptions do: after the mark and its gap.
-    rows.push(
-      <Box flexDirection="row" paddingLeft={markCells + AGENT_GAP_CELLS}>
-        <Text dimColor>{`+${more} more`}</Text>
-      </Box>,
-    )
-  }
+  // The line starts where the descriptions do: after the mark and its gap.
+  if (more > 0) rows.push(moreLine(d, more))
 
   return section(d, 'agents', 'Subagents', summary, rows)
 }
 
+// How many lines the chips of the MCP section wrap into in a body of `columns` cells: the one place where the rows of a
+// block are an estimate, since the layout engine does the wrapping. A chip is its dot and its name, measured as every
+// text of the view is, in `.length`. The chips go in the order they come, whole, onto a line while the next one fits it
+// with the gap that parts them, and a chip wider than the line (it is cut) is a line of its own. A line is the body
+// less CHIP_MARGIN_CELLS, so the estimate errs on the side of a row too many: the Log then draws a line fewer than
+// would fit, where a row too few would cut its last line (logLinesFit).
+export function chipRows(names: string[], columns: number): number {
+  const lineCells = columns - CHIP_MARGIN_CELLS
+  let rows = 0
+  let used = 0
+  for (const name of names) {
+    const chipCells = DOT.length + name.length
+    if (rows > 0 && used + CHIP_GAP_CELLS + chipCells <= lineCells) {
+      used += CHIP_GAP_CELLS + chipCells
+    } else {
+      rows += 1
+      used = chipCells
+    }
+  }
+
+  return rows
+}
+
 // The MCP servers, a green dot and the name each, wrapped whole; the summary is their count. The mod only learns which
 // servers have tools in the context (WaitForMcpServers is not there for a module), so it cannot tell a failed one
-// from a connected one: every dot is green. A name wider than the pane goes on its own line and is cut.
-function mcpSection(d: Draw): RenderElement | null {
+// from a connected one: every dot is green. A name wider than the pane goes on its own line and is cut. The chips are
+// the one body of a section that is more than one line high, as many as chipRows says.
+function mcpSection(d: Draw): Block {
   const { Box, Text } = d.ui
   const { mcp } = d.data
-  if (mcp === null || mcp.servers.length === 0) return null
+  if (mcp === null || mcp.servers.length === 0) return NO_BLOCK
   const chips = mcp.servers.map(server => (
     <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
       <Box flexDirection="row" flexShrink={0}>
@@ -642,19 +712,24 @@ function mcpSection(d: Draw): RenderElement | null {
       {shrinkText(d, server.name)}
     </Box>
   ))
+  const names = mcp.servers.map(server => server.name)
 
-  return section(d, 'mcp', 'MCP', String(mcp.servers.length), [
-    <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
-      {chips}
-    </Box>,
-  ])
+  return section(
+    d, 'mcp', 'MCP', String(names.length),
+    [
+      <Box flexDirection="row" flexWrap="wrap" columnGap={CHIP_GAP_CELLS}>
+        {chips}
+      </Box>,
+    ],
+    chipRows(names, d.cols),
+  )
 }
 
 // What feeds the context: the skills and the MCP servers that are counted.
-function sourcesSection(d: Draw): RenderElement | null {
+function sourcesSection(d: Draw): Block {
   const { skills } = d.data.usage
   const servers = d.data.mcp?.servers.length
-  if (skills === undefined && servers === undefined) return null
+  if (skills === undefined && servers === undefined) return NO_BLOCK
   const rows: RenderElement[] = []
   const parts: string[] = []
   if (skills !== undefined) {
@@ -669,10 +744,31 @@ function sourcesSection(d: Draw): RenderElement | null {
   return section(d, 'sources', 'Context sources', parts.join(' · '), rows)
 }
 
-// The Log, as the parts of the pane's root: its rule, its header and its lines, with no Box around them. That is the
-// layout the live desktop has verified, and it needs no chain of Boxes that grow (the visual spec, §6.12 Log height).
-// Folded, it is the rule and the header; with no lines, nothing. The summary of its header is logCount, the count of
-// every event (the lines are the newest of them), and a folded Log keeps it.
+// How many lines of the Log fit in the body (the 0.4.0 spec, 2026-10-12-session-panel-v2-design.md, §3.2). The Log has
+// the rows that the blocks above it leave: the body's, less theirs (`above`, which the builders count from the rows
+// they draw) and less its own rule and header. If all its `total` events fit in them, that many; if not, one row goes
+// to the `+N more` line and the Log has the rest, never fewer than MIN_LOG_ROWS lines: below that the pane scrolls. The
+// log holds the newest 60 events at most (pushLog), so the lines drawn are these or all it holds, whichever are fewer.
+// Where the body's height is not known the Log has MAX_LOG_ROWS.
+//
+// The count of the rows above is exact but for the chips of MCP (chipRows), which wrap, and that is made to err on the
+// high side. A count that is too high is harmless: the Log draws a line fewer than would have fit, an empty row is left
+// at the bottom of the pane, and `+N more` still counts every event that is not drawn. A count that is too low is not:
+// the last line is drawn past the rows there are, the tail clips it, and N is one short of the events that are hidden.
+// So an error is allowed on the side of fewer lines only, and the tail's clip is what limits the damage of the other.
+function logLinesFit(d: Draw, above: number, total: number): number {
+  if (d.rows === 0) return MAX_LOG_ROWS
+  const room = d.rows - above - RULE_ROWS - HEADER_ROWS
+
+  return total <= room ? total : Math.max(MIN_LOG_ROWS, room - 1)
+}
+
+// The Log, as the parts of the pane's root: its rule, its header, its lines and the line that counts the events that
+// are not drawn, with no Box around them. That is the layout the live desktop has verified, and it needs no chain of
+// Boxes that grow (the visual spec, §6.12 Log height).
+// Folded, it is the rule and the header; with no lines, nothing. The summary of its header is the count of every event
+// (the lines are the newest of them): logCount, or the lines the log holds where the count is behind them. A folded Log
+// keeps it, and has no `+N more` line.
 // The newest log lines: time, who, what, and how it went. Time and `who` are dim fixed columns, so every text starts
 // at the same x; the text is cut to one line. On the desktop `who` has a width of its own, so the text column does not
 // jump with the longest `who`; on the terminal it is the longest one there is, up to the most shortType keeps. The
@@ -688,19 +784,26 @@ function sourcesSection(d: Draw): RenderElement | null {
 // `you › …`, for its text alone does not say whose it is; the other lines have no label. It comes after the outcome,
 // where a line shows that in front too. MIN_LOG_TEXT_CELLS counts the text alone, not the label: at the edge of a
 // layout an engine line shows its label and none of its text.
-// The height: the lines drawn are the body's rows, MIN_LOG_ROWS at least, for a line past them could never show. The
-// first MIN_LOG_ROWS are the head, a Box that holds its height, so they always show. The rest are the tail, a Box with
-// no height of its own that grows into the rows the root leaves free (it is at least the body's height) and clips at
-// its bottom, so the oldest lines go first. When not even the head fits, the root grows to its content and the pane
-// scrolls, which the engine does. Where the body's height is not known the lines are MAX_LOG_ROWS, in one Box at their
-// natural height: a tail would have no room to grow into.
-function logParts(d: Draw): RenderElement[] {
+// The height: the lines drawn are as many as fit under the blocks above the Log (logLinesFit), MIN_LOG_ROWS at least.
+// The first MIN_LOG_ROWS are the head, a Box that holds its height, so they always show. The rest are the tail, a Box
+// with no height of its own that grows into the rows the root leaves free (it is at least the body's height) and clips
+// at its bottom, so the oldest lines go first; with the count of the rows right it clips nothing, and it is the
+// insurance for the day it is not. After the tail comes the line that counts the events that are not drawn: a child of
+// the root, that holds its size, so that the tail's growing leaves it its row and it ends the pane. When not even the
+// head fits, the root grows to its content and the pane scrolls, which the engine does. Where the body's height is not
+// known the lines are MAX_LOG_ROWS, in one Box at their natural height (a tail would have no room to grow into), and
+// the line that counts the rest follows it.
+function logParts(d: Draw, above: number): RenderElement[] {
   const { Box, Text, Svg } = d.ui
-  const lines = d.data.log.slice(0, d.rows > 0 ? Math.max(MIN_LOG_ROWS, d.rows) : MAX_LOG_ROWS)
-  if (lines.length === 0) return []
+  const { log } = d.data
+  if (log.length === 0) return []
+  // Every event of the session: the count, and at least the lines the log holds. A session that began on an earlier
+  // build and has this one loaded into it has lines on its log that the count never saw: it starts at 0.
+  const total = Math.max(d.data.logCount, log.length)
   const rule = divider(d)
-  const header = sectionHeader(d, 'log', 'Log', String(d.data.logCount))
+  const header = sectionHeader(d, 'log', 'Log', String(total))
   if (isFolded(d, 'log')) return [rule, header]
+  const lines = log.slice(0, logLinesFit(d, above, total))
   const longestWho = Math.max(...lines.map(line => line.who.length))
   const whoCells = Svg === undefined ? Math.min(WHO_CELLS_MAX, longestWho) : WHO_CELLS
   const longestOutcome = Math.max(...lines.map(line => line.outcome?.length ?? 0))
@@ -750,7 +853,10 @@ function logParts(d: Draw): RenderElement[] {
       )}
     </Box>
   ))
-  if (d.rows === 0) return [rule, header, <Box flexDirection="column">{lineRows}</Box>]
+  // The events that are not drawn, counted: N is all of them less the lines, and the line is there when there are any.
+  const hidden = total - lines.length
+  const counted = hidden > 0 ? [moreLine(d, hidden, { flexShrink: 0 })] : []
+  if (d.rows === 0) return [rule, header, <Box flexDirection="column">{lineRows}</Box>, ...counted]
   const parts = [rule, header, <Box flexDirection="column" flexShrink={0}>{lineRows.slice(0, MIN_LOG_ROWS)}</Box>]
   if (lineRows.length > MIN_LOG_ROWS) {
     parts.push(
@@ -760,13 +866,14 @@ function logParts(d: Draw): RenderElement[] {
     )
   }
 
-  return parts
+  return [...parts, ...counted]
 }
 
 // The whole pane. `els` is the element table of the surface, `data` the state, `props` the Pane props, and `handlers`
 // what the presses run. Each section begins with its own rule, so a section that is left out leaves no double rule. The
-// root is at least the body's height, and the Log, which comes last, takes the rest of it (logParts). A body whose rows
-// are not a positive number has no known height: the root has no minimum then.
+// root is at least the body's height, and the Log, which comes last, takes the rest of it (logParts), told how many
+// rows the blocks above it take. A body whose rows are not a positive number has no known height: the root has no
+// minimum then.
 export function renderPane(els: ElementTable, data: PaneData, props: PaneProps, handlers: PaneHandlers): RenderElement {
   const { Box, Text, Button } = els
   const Svg = 'Svg' in els && data.surface !== 'terminal' ? els.Svg : undefined
@@ -784,16 +891,15 @@ export function renderPane(els: ElementTable, data: PaneData, props: PaneProps, 
     limitMeterPx: limitMeterWidth(cols),
   }
 
+  const blocks = [
+    topBlock(d), projectBlock(d), usageSection(d), turnSection(d), agentsSection(d), mcpSection(d), sourcesSection(d),
+  ]
+  const above = blocks.reduce((sum, block) => sum + block.rows, 0)
+
   return (
     <Box flexDirection="column" minHeight={d.rows > 0 ? d.rows : undefined}>
-      {topBlock(d)}
-      {projectBlock(d)}
-      {usageSection(d)}
-      {turnSection(d)}
-      {agentsSection(d)}
-      {mcpSection(d)}
-      {sourcesSection(d)}
-      {logParts(d)}
+      {blocks.flatMap(block => (block.tree === null ? [] : [block.tree]))}
+      {logParts(d, above)}
     </Box>
   )
 }
