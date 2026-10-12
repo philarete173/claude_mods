@@ -2492,9 +2492,9 @@ test('the MCP servers wrap as whole chips: a green dot, the name in the plain co
   }
 })
 
-// A chip is its dot (the `●` and a no-break space: 2 cells) and its name, measured as the view measures every text, and
-// the chips are 2 cells apart. A line holds the body's columns less 2, so that an estimate that is wrong is wrong
-// upwards: the Log draws a line fewer for a row too many, and cuts its last line for a row too few.
+// A chip is its dot (the `●` and a no-break space: 2 cells) and its name, and the chips are 2 cells apart. A line holds
+// the body's columns less 2, so that an estimate that is wrong is wrong upwards: the Log draws a line fewer for a row
+// too many, and cuts its last line for a row too few. The names of these cases are ASCII, a cell a character.
 test('chipRows counts the lines of chips: whole chips in order, as many on a line as the body less 2 holds', () => {
   const names = (...cells: number[]): string[] => cells.map(count => 'x'.repeat(count))
 
@@ -2529,6 +2529,30 @@ test('chipRows counts the lines of chips: whole chips in order, as many on a lin
   for (const columns of [2, 0, -5, Number.NaN]) {
     expect(chipRows(names(1, 1), columns), String(columns)).toBe(2)
   }
+})
+
+// The name of a chip is counted high, for the same reason: a name measured short is a row too few. Every code point
+// above U+007F counts as 2 cells (CJK and emoji are drawn wide, and so are some that are not, an accented letter),
+// every other as 1; by code point, not by UTF-16 unit, which is what `.length` counts.
+test('chipRows counts a name high: a code point above U+007F is 2 cells, any other 1, by code point', () => {
+  // `データ` is 3 characters and 6 cells, so its chip is 8 cells. With `abcd` (a chip of 6) and the 2 between them that
+  // is 16: a line of 16 holds them (18 columns) and one of 15 does not. By `.length` its chip would be 5 cells and the
+  // two would be 13, and 17 columns would hold them: a row too few.
+  expect(chipRows(['abcd', 'データ'], 18)).toBe(1)
+  expect(chipRows(['abcd', 'データ'], 17)).toBe(2)
+  // An astral emoji is one code point and 2 cells, not the 4 that its two UTF-16 units would make at 2 cells each: its
+  // chip is 4 cells, and with `abcd` and the gap they are 12, which 14 columns hold and 13 do not.
+  expect(chipRows(['abcd', '😀'], 14)).toBe(1)
+  expect(chipRows(['abcd', '😀'], 13)).toBe(2)
+  // A name of every kind: `a`, an emoji, `é` (U+00E9) and `日` are 1 + 2 + 2 + 2 = 7 cells (`.length` says 5), so its
+  // chip is 9 and with `abcd` and the gap they are 17: 19 columns hold them and 18 do not.
+  const mixed = 'a\u{1F600}é日'
+  expect(chipRows(['abcd', mixed], 19)).toBe(1)
+  expect(chipRows(['abcd', mixed], 18)).toBe(2)
+  // The edge of the rule: U+007F is 1 cell, and U+0080 is the first code point that counts 2.
+  expect(chipRows(['abcd', '\u007f'], 13)).toBe(1)
+  expect(chipRows(['abcd', '\u0080'], 13)).toBe(2)
+  expect(chipRows(['abcd', '\u0080'], 14)).toBe(1)
 })
 
 test('the top block is the session and its total, the context and the cost split, with no project in it', () => {

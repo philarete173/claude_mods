@@ -378,10 +378,11 @@ function sectionHeader(d: Draw, id: SectionId, title: string, summary: string): 
 }
 
 // A section: a rule, then its header row, then the body unless folded. A folded section keeps its summary. Its rows are
-// the rule's, the header's and, unless it is folded, those of the body: one for each element of it, or `bodyRows` where
-// the caller knows that they take another number (the chips of MCP wrap).
+// the rule's, the header's and, unless it is folded, those of what the body holds: one for each element of it, or
+// `contentRows` where the caller knows that they take another number (the chips of MCP wrap). These are the rows of the
+// section's own body, not the Pane's `bodyRows`, the rows the whole pane has.
 function section(
-  d: Draw, id: SectionId, title: string, summary: string, body: RenderElement[], bodyRows = body.length,
+  d: Draw, id: SectionId, title: string, summary: string, body: RenderElement[], contentRows = body.length,
 ): Block {
   const { Box } = d.ui
   const isOpen = !isFolded(d, id)
@@ -394,7 +395,7 @@ function section(
         {isOpen && <Box flexDirection="column">{body}</Box>}
       </Box>
     ),
-    rows: RULE_ROWS + HEADER_ROWS + (isOpen ? bodyRows : 0),
+    rows: RULE_ROWS + HEADER_ROWS + (isOpen ? contentRows : 0),
   }
 }
 
@@ -673,18 +674,31 @@ function agentsSection(d: Draw): Block {
   return section(d, 'agents', 'Subagents', summary, rows)
 }
 
+// The cells that the name of a chip takes, counted high, because the estimate of chipRows must err on the side of more
+// rows (the 0.4.0 spec, §3.2): `.length` counts a CJK character as one cell, and it is drawn two wide. Every code point
+// above U+007F counts as 2 cells (the wide ones, CJK and emoji, and some that are not, an accented letter), every other
+// as 1. It goes by code point, not by UTF-16 unit: an astral emoji is one code point and 2 cells, where its two units
+// would make 4.
+const nameCells = (name: string): number => {
+  let cells = 0
+  for (const char of name) cells += (char.codePointAt(0) ?? 0) > 0x7f ? 2 : 1
+
+  return cells
+}
+
 // How many lines the chips of the MCP section wrap into in a body of `columns` cells: the one place where the rows of a
-// block are an estimate, since the layout engine does the wrapping. A chip is its dot and its name, measured as every
-// text of the view is, in `.length`. The chips go in the order they come, whole, onto a line while the next one fits it
-// with the gap that parts them, and a chip wider than the line (it is cut) is a line of its own. A line is the body
-// less CHIP_MARGIN_CELLS, so the estimate errs on the side of a row too many: the Log then draws a line fewer than
-// would fit, where a row too few would cut its last line (logLinesFit).
+// block are an estimate, since the layout engine does the wrapping. A chip is its dot (DOT.length cells) and its name,
+// which nameCells counts high: a name measured short would make the estimate a row short, and that is the side it
+// must not err on. The chips go in the order they come, whole, onto a line while the next one fits it with the gap that
+// parts them, and a chip wider than the line (it is cut) is a line of its own. A line is the body less
+// CHIP_MARGIN_CELLS, so the estimate errs on the side of a row too many: the Log then draws a line fewer than would
+// fit, where a row too few would cut its last line (logLinesFit).
 export function chipRows(names: string[], columns: number): number {
   const lineCells = columns - CHIP_MARGIN_CELLS
   let rows = 0
   let used = 0
   for (const name of names) {
-    const chipCells = DOT.length + name.length
+    const chipCells = DOT.length + nameCells(name)
     if (rows > 0 && used + CHIP_GAP_CELLS + chipCells <= lineCells) {
       used += CHIP_GAP_CELLS + chipCells
     } else {
@@ -855,8 +869,8 @@ function logParts(d: Draw, above: number): RenderElement[] {
   ))
   // The events that are not drawn, counted: N is all of them less the lines, and the line is there when there are any.
   const hidden = total - lines.length
-  const counted = hidden > 0 ? [moreLine(d, hidden, { flexShrink: 0 })] : []
-  if (d.rows === 0) return [rule, header, <Box flexDirection="column">{lineRows}</Box>, ...counted]
+  const moreParts = hidden > 0 ? [moreLine(d, hidden, { flexShrink: 0 })] : []
+  if (d.rows === 0) return [rule, header, <Box flexDirection="column">{lineRows}</Box>, ...moreParts]
   const parts = [rule, header, <Box flexDirection="column" flexShrink={0}>{lineRows.slice(0, MIN_LOG_ROWS)}</Box>]
   if (lineRows.length > MIN_LOG_ROWS) {
     parts.push(
@@ -866,7 +880,7 @@ function logParts(d: Draw, above: number): RenderElement[] {
     )
   }
 
-  return [...parts, ...counted]
+  return [...parts, ...moreParts]
 }
 
 // The whole pane. `els` is the element table of the surface, `data` the state, `props` the Pane props, and `handlers`
