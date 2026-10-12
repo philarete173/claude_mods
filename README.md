@@ -17,7 +17,8 @@ is a plugin marketplace, `philarete-mods`, that holds this one plugin.
 - **Subagents**: up to 8 rows, running ones first: a status mark, the description, `@type` and cost.
 - **MCP**: the servers that have tools in the context, by name, with their count.
 - **Context sources**: how many skills and MCP servers feed the context.
-- **Log**: the last 60 events, newest first: prompts, tool calls, subagent spawns, resumes and results, compactions.
+- **Log**: the last 60 events, newest first: prompts, tool calls, subagent spawns, resumes and results, compactions. Its
+  header counts every event, and a `+N more` line counts the ones that do not fit.
 
 Every section below the Session and Project blocks can be folded, and the fold state persists. Every rule is in
 [the plugin's README](plugins/session-panel/README.md).
@@ -84,7 +85,8 @@ After installing the plugin from the marketplace, delete the session's dev copy
 
 To release, bump `version` in `plugins/session-panel/.claude-plugin/plugin.json` only, add an entry to
 [CHANGELOG.md](CHANGELOG.md), and run `claude plugin tag plugins/session-panel`, which checks that the manifests agree
-and creates the tag `session-panel--vX.Y.Z`.
+and creates the tag `session-panel--vX.Y.Z`. Push `main` and the tag, then publish a GitHub Release from the tag, titled
+`session-panel X.Y.Z`, with the CHANGELOG entry as its notes.
 
 The design docs are in [docs/README.md](docs/README.md).
 

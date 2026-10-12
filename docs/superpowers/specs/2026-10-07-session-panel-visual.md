@@ -5,10 +5,11 @@
 > first and a subagent row drops `@type` below 12 description cells (§6.7, §6.10); the project is a block of its own,
 > with a changes row (§6.3); a count that is only a lower bound has a plus, but a lower bound of no lines has no numbers
 > (§6.3); in a narrow log a prompt reads `you › …` and an engine message `engine › …` (§6.10); the Log fills the pane's
-> free height, 8 lines at least (§6.12); the rule above a section is one line high, with no margins (§5.1). The HTML
-> preview `docs/design/session-panel-preview.html` stays the approved v2 mock-up and predates these changes.
+> free height, 8 lines at least (§6.12); the rule above a section is one line high, with no margins (§5.1); the Log's
+> header counts every event, and a dim `+N more` line counts the ones it does not draw (§6.12). The HTML preview
+> `docs/design/session-panel-preview.html` stays the approved v2 mock-up and predates these changes.
 
-Date: 2026-10-07. Status: implemented and shipped (0.3.1). The user approved the look in
+Date: 2026-10-07. Status: implemented and shipped (0.4.0). The user approved the look in
 `docs/design/session-panel-preview.html` before implementation.
 
 Scope: presentation only. The sections, their content, the formats and every formula of `2026-10-07-session-panel-design.md` §3–§4 stay as they are. Where the two specs differ on looks, this one replaces §3.1 of the main spec. Engine 2.1.288. "d.ts" below means `plugin-authoring/types/claude-code.d.ts` of that engine, cited by line.
@@ -53,7 +54,7 @@ Elapsed                                             1m 18s
 ✓  Re-review Task 4 fix round 1 @code-reviewer        $1.93
 …
 ──────────────────────────────────────────────────────────
-≡  Log ▾
+≡  Log ▾                                               137
 22:09:07  minimal-change  Edit .claude-plugin/mar…  ✓ 0.3s
 ```
 
@@ -195,8 +196,18 @@ const MAX_AGENT_ROWS = 8
 // The Log keeps at least this many lines, and when they do not fit the pane scrolls (the user's decision, 2026-10-08),
 // as the Subagents list shows up to 8.
 const MIN_LOG_ROWS = 8
-// The lines the Log draws where the body's height is not known; where it is, the body's rows (MIN_LOG_ROWS at least).
+// The lines the Log draws where the body's height is not known; where it is, logLinesFit works them out.
 const MAX_LOG_ROWS = 15
+// The rows a rule and a section header take in the body: one each, on the desktop as in the terminal (measured live:
+// the icon, the chevron and the summary share the line of the title). The builders of the blocks count their rows with
+// these, and the Log works out from the count how many of its lines fit. Both are in the 0.4.0 spec, §8.1 and §3.2
+// (docs/superpowers/specs/2026-10-12-session-panel-v2-design.md).
+const RULE_ROWS = 1
+const HEADER_ROWS = 1
+// The chips of MCP are this far apart (the `columnGap` of their Box), and chipRows keeps this many cells of a line
+// free.
+const CHIP_GAP_CELLS = 2
+const CHIP_MARGIN_CELLS = 2
 const MIN_LOG_TEXT_CELLS = 8 // the least text a log line keeps: below it `who` gives way, then the outcome column
 // In a narrow pane the identity column gives way first, as in the log: a subagent row leaves out its `@type`, on
 // every row, when the description would keep fewer cells than this beside it.
@@ -232,16 +243,15 @@ const d: Draw = { ui: { Box, Text, Button, Svg }, data, handlers, cols,
 ## 4. Pane skeleton
 
 ```tsx
+  const blocks = [
+    topBlock(d), projectBlock(d), usageSection(d), turnSection(d), agentsSection(d), mcpSection(d), sourcesSection(d),
+  ]
+  const above = blocks.reduce((sum, block) => sum + block.rows, 0)
+
   return (
     <Box flexDirection="column" minHeight={d.rows > 0 ? d.rows : undefined}>
-      {topBlock(d)}
-      {projectBlock(d)}
-      {usageSection(d)}
-      {turnSection(d)}
-      {agentsSection(d)}
-      {mcpSection(d)}
-      {sourcesSection(d)}
-      {logParts(d)}
+      {blocks.flatMap(block => (block.tree === null ? [] : [block.tree]))}
+      {logParts(d, above)}
     </Box>
   )
 ```
@@ -353,6 +363,16 @@ function endText(d: Draw, text: string, style: Partial<TextProps> = {}): RenderE
 
 ### 5.4 Section and header
 
+Every builder of a block returns a `Block` (§6.12):
+
+```tsx
+// A block of the pane as its builder returns it: the tree, and the rows of the body that it takes. A block that is left
+// out has no tree and no rows. A builder counts the rows from the very rows it puts in the tree, so that the two cannot
+// part: the Log needs the count to know how many of its lines fit below the blocks above it (logParts).
+type Block = { tree: RenderElement | null; rows: number }
+const NO_BLOCK: Block = { tree: null, rows: 0 }
+```
+
 ```tsx
 const isFolded = (d: Draw, id: SectionId): boolean => d.data.collapsed[id] === true
 
@@ -380,17 +400,26 @@ function sectionHeader(d: Draw, id: SectionId, title: string, summary: string): 
   )
 }
 
-// A section: a rule, then its header row, then the body unless folded. A folded section keeps its summary.
-function section(d: Draw, id: SectionId, title: string, summary: string, body: RenderElement[]): RenderElement {
+// A section: a rule, then its header row, then the body unless folded. A folded section keeps its summary. Its rows are
+// the rule's, the header's and, unless it is folded, those of what the body holds: one for each element of it, or
+// `contentRows` where the caller knows that they take another number (the chips of MCP wrap). These are the rows of the
+// section's own body, not the Pane's `bodyRows`, the rows the whole pane has.
+function section(
+  d: Draw, id: SectionId, title: string, summary: string, body: RenderElement[], contentRows = body.length,
+): Block {
   const { Box } = d.ui
+  const isOpen = !isFolded(d, id)
 
-  return (
-    <Box flexDirection="column">
-      {divider(d)}
-      {sectionHeader(d, id, title, summary)}
-      {!isFolded(d, id) && <Box flexDirection="column">{body}</Box>}
-    </Box>
-  )
+  return {
+    tree: (
+      <Box flexDirection="column">
+        {divider(d)}
+        {sectionHeader(d, id, title, summary)}
+        {isOpen && <Box flexDirection="column">{body}</Box>}
+      </Box>
+    ),
+    rows: RULE_ROWS + HEADER_ROWS + (isOpen ? contentRows : 0),
+  }
 }
 ```
 
@@ -406,32 +435,36 @@ function section(d: Draw, id: SectionId, title: string, summary: string, body: R
 ### 6.1 Top block
 
 ```tsx
-function topBlock(d: Draw): RenderElement {
+// Session and Total, the context, and the split of the cost when subagents ran. The card never folds and has no rule
+// above it. The total is primary weight: bold is for titles. Its rows, one line each: Session with its total, the
+// context (two with a reading, the label and the meter), and the split.
+function topBlock(d: Draw): Block {
   const { Box, Text } = d.ui
   const { usage, agents } = d.data
   const subagentsUsd = Object.values(agents).reduce((sum, agent) => sum + (agent.costUsd ?? 0), 0)
   const split = splitCost(usage.costUsd, subagentsUsd)
-
-  return (
-    <Box flexDirection="column">
-      <Box flexDirection="row" justifyContent="space-between" columnGap={2}>
-        <Box flexDirection="row" flexShrink={0}>
-          <Text bold>Session</Text>
-        </Box>
-        {split.total !== null && (
-          <Box flexDirection="row" flexShrink={0}>
-            <Text>{fmtUsd(split.total)}</Text>
-          </Box>
-        )}
+  const rows: RenderElement[] = [
+    <Box flexDirection="row" justifyContent="space-between" columnGap={2}>
+      <Box flexDirection="row" flexShrink={0}>
+        <Text bold>Session</Text>
       </Box>
-      {contextRows(d)}
-      {split.session !== null && split.subagents > 0 && (
-        <Text dimColor wrap="truncate">
-          {`Session ${fmtUsd(split.session)} · Subagents ${fmtUsd(split.subagents)}`}
-        </Text>
+      {split.total !== null && (
+        <Box flexDirection="row" flexShrink={0}>
+          <Text>{fmtUsd(split.total)}</Text>
+        </Box>
       )}
-    </Box>
-  )
+    </Box>,
+    ...contextRows(d),
+  ]
+  if (split.session !== null && split.subagents > 0) {
+    rows.push(
+      <Text dimColor wrap="truncate">
+        {`Session ${fmtUsd(split.session)} · Subagents ${fmtUsd(split.subagents)}`}
+      </Text>,
+    )
+  }
+
+  return { tree: <Box flexDirection="column">{rows}</Box>, rows: rows.length }
 }
 ```
 
@@ -563,38 +596,49 @@ function filesLabel(changes: { files: number; hasMoreFiles?: true }): string {
 // lines added and removed. Like the Session card it never folds, so its header has no icon and no chevron. A row is an
 // icon and its text on the desktop, and the text behind an emoji on the terminal, as v1 drew it. The block is left out
 // when there is no project name; the branch row when there is no branch; the changes row when there are no changes; the
-// numbers when the lines are unknown or are none (only binary files changed).
-function projectBlock(d: Draw): RenderElement | null {
+// numbers when the lines are unknown or are none (only binary files changed). Its rows are the rule and one line for
+// each row of the block.
+function projectBlock(d: Draw): Block {
   const { Box, Text, Svg } = d.ui
   // A value that an earlier build left in the state has no `changes`: it has none to show.
   const { name, branch, changes = null } = d.data.project
-  if (name === '') return null
+  if (name === '') return NO_BLOCK
   const marked = (emoji: string, text: string): string => (Svg === undefined ? `${emoji} ${text}` : text)
-
-  return (
-    <Box flexDirection="column">
-      {divider(d)}
-      <Box flexDirection="row" alignItems="center" columnGap={1}>
-        <Box flexDirection="row" flexShrink={0}>
-          <Text bold>Project</Text>
-        </Box>
-        {endText(d, name, { dimColor: true })}
+  const rows: RenderElement[] = [
+    <Box flexDirection="row" alignItems="center" columnGap={1}>
+      <Box flexDirection="row" flexShrink={0}>
+        <Text bold>Project</Text>
       </Box>
-      {branch !== null && (
-        <Box flexDirection="row" alignItems="center" columnGap={1}>
-          {iconSlot(d, ICON.branch, 'Branch')}
-          {shrinkText(d, marked('🌿', branch))}
-        </Box>
-      )}
-      {changes !== null && (
-        <Box flexDirection="row" alignItems="center" columnGap={1}>
-          {iconSlot(d, ICON.changes, 'Changes')}
-          {growText(d, marked('📝', filesLabel(changes)))}
-          {changes.lines !== null && changes.lines.added + changes.lines.removed > 0 && linesCell(d, changes.lines)}
-        </Box>
-      )}
-    </Box>
-  )
+      {endText(d, name, { dimColor: true })}
+    </Box>,
+  ]
+  if (branch !== null) {
+    rows.push(
+      <Box flexDirection="row" alignItems="center" columnGap={1}>
+        {iconSlot(d, ICON.branch, 'Branch')}
+        {shrinkText(d, marked('🌿', branch))}
+      </Box>,
+    )
+  }
+  if (changes !== null) {
+    rows.push(
+      <Box flexDirection="row" alignItems="center" columnGap={1}>
+        {iconSlot(d, ICON.changes, 'Changes')}
+        {growText(d, marked('📝', filesLabel(changes)))}
+        {changes.lines !== null && changes.lines.added + changes.lines.removed > 0 && linesCell(d, changes.lines)}
+      </Box>,
+    )
+  }
+
+  return {
+    tree: (
+      <Box flexDirection="column">
+        {divider(d)}
+        {rows}
+      </Box>
+    ),
+    rows: RULE_ROWS + rows.length,
+  }
 }
 ```
 
@@ -701,10 +745,12 @@ function agentRow(d: Draw, agent: AgentRow, typeCells: number): RenderElement {
 ```
 
 ```tsx
-function agentsSection(d: Draw): RenderElement | null {
-  const { Box, Text, Svg } = d.ui
+// The subagents, running ones first and then the newest; the ones that do not fit are counted, in line with the names.
+// A row each, and the line that counts the rest is one more.
+function agentsSection(d: Draw): Block {
+  const { Svg } = d.ui
   const agents = orderAgents(Object.values(d.data.agents))
-  if (agents.length === 0) return null
+  if (agents.length === 0) return NO_BLOCK
   const running = agents.filter(agent => agent.status === 'running').length
   const summary = running > 0 ? `${running}/${agents.length}` : String(agents.length)
   const shown = agents.slice(0, MAX_AGENT_ROWS)
@@ -714,19 +760,12 @@ function agentsSection(d: Draw): RenderElement | null {
   const typeCells = Svg === undefined ? Math.min(TYPE_CELLS_MAX, longest) : TYPE_CELLS
   // What the description keeps beside the type: the body less the mark, the type, the cost and the gaps of a row. With
   // less than MIN_AGENT_DESC_CELLS the type is left out of every row.
-  const markCells = Svg === undefined ? TEXT_MARK_CELLS : ICON_CELLS
-  const descCells = d.cols - markCells - typeCells - COST_CELLS - AGENT_ROW_GAPS * AGENT_GAP_CELLS
+  const descCells = d.cols - markCellsOf(d) - typeCells - COST_CELLS - AGENT_ROW_GAPS * AGENT_GAP_CELLS
   const hasType = descCells >= MIN_AGENT_DESC_CELLS
   const rows = shown.map(agent => agentRow(d, agent, hasType ? typeCells : 0))
   const more = agents.length - MAX_AGENT_ROWS
-  if (more > 0) {
-    // The line starts where the descriptions do: after the mark and its gap.
-    rows.push(
-      <Box flexDirection="row" paddingLeft={markCells + AGENT_GAP_CELLS}>
-        <Text dimColor>{`+${more} more`}</Text>
-      </Box>,
-    )
-  }
+  // The line starts where the descriptions do: after the mark and its gap.
+  if (more > 0) rows.push(moreLine(d, more))
 
   return section(d, 'agents', 'Subagents', summary, rows)
 }
@@ -741,30 +780,78 @@ The row has four columns. The description and the `@type` column sit in one grou
    - Terminal: the longest `@type` drawn, at most `TYPE_CELLS_MAX` (15).
 4. **Cost** (FIXED, `COST_CELLS`, 7 cells, right-aligned). Costs line up on their right edge, and every description ends at the same x.
 
-**In a narrow pane the type gives way first**, as `who` does in the log (§6.10). `agentsSection` works out what a description would keep beside the type: the body less the mark (`markCells`: `ICON_CELLS` on the desktop, `TEXT_MARK_CELLS` on the terminal), the type column, `COST_CELLS` and the gaps of the row (`AGENT_ROW_GAPS` of `AGENT_GAP_CELLS` each: two between the cells and one in the group). With fewer than `MIN_AGENT_DESC_CELLS` (12) cells the type column leaves every row, not some of them: `agentRow` gets `typeCells` 0, and the description takes the whole group. The choice is made once per section, so every description still ends at the same x.
+**In a narrow pane the type gives way first**, as `who` does in the log (§6.10). `agentsSection` works out what a description would keep beside the type: the body less the mark (`markCellsOf(d)`: `ICON_CELLS` on the desktop, `TEXT_MARK_CELLS` on the terminal), the type column, `COST_CELLS` and the gaps of the row (`AGENT_ROW_GAPS` of `AGENT_GAP_CELLS` each: two between the cells and one in the group). With fewer than `MIN_AGENT_DESC_CELLS` (12) cells the type column leaves every row, not some of them: `agentRow` gets `typeCells` 0, and the description takes the whole group. The choice is made once per section, so every description still ends at the same x.
 
 The status icon's `alt` is the status word (`running`, `done`, `failed`, `stopped`): the icon is the only place that says it.
 
 **"+N more"** aligns with the descriptions:
 
 ```tsx
-    // The line starts where the descriptions do: after the mark and its gap.
-    rows.push(
-      <Box flexDirection="row" paddingLeft={markCells + AGENT_GAP_CELLS}>
-        <Text dimColor>{`+${more} more`}</Text>
-      </Box>,
-    )
+// The cells in front of the text of a row that has a mark: the mark's slot and the gap after it.
+const markCellsOf = (d: Draw): number => (d.ui.Svg === undefined ? TEXT_MARK_CELLS : ICON_CELLS)
+
+// The dim line that counts what a list does not show: `+3 more`. It starts where the text of the rows above it does,
+// after the mark and its gap, for the Subagents and for the Log alike (§6.7). `props` go to the Box that holds it.
+function moreLine(d: Draw, count: number, props: Partial<BoxProps> = {}): RenderElement {
+  const { Box, Text } = d.ui
+
+  return (
+    <Box flexDirection="row" paddingLeft={markCellsOf(d) + AGENT_GAP_CELLS} {...props}>
+      <Text dimColor>{`+${count} more`}</Text>
+    </Box>
+  )
+}
 ```
 
-The line starts at `markCells` + `AGENT_GAP_CELLS`, where the descriptions start whether or not the type column is drawn. On the desktop that is 3 cells = the 2-cell icon slot + the 1-cell gap. On the terminal it is 2 cells = the 1-cell mark + the 1-cell gap.
+The line starts at `markCellsOf(d)` + `AGENT_GAP_CELLS`, where the descriptions start whether or not the type column is drawn. On the desktop that is 3 cells = the 2-cell icon slot + the 1-cell gap. On the terminal it is 2 cells = the 1-cell mark + the 1-cell gap.
 
 ### 6.8 MCP chips
 
 ```tsx
-function mcpSection(d: Draw): RenderElement | null {
+// The cells that the name of a chip takes, counted high, because the estimate of chipRows must err on the side of more
+// rows (the 0.4.0 spec, §3.2): `.length` counts a CJK character as one cell, and it is drawn two wide. Every code point
+// above U+007F counts as 2 cells (the wide ones, CJK and emoji, and some that are not, an accented letter), every other
+// as 1. It goes by code point, not by UTF-16 unit: an astral emoji is one code point and 2 cells, where its two units
+// would make 4.
+const nameCells = (name: string): number => {
+  let cells = 0
+  for (const char of name) cells += (char.codePointAt(0) ?? 0) > 0x7f ? 2 : 1
+
+  return cells
+}
+
+// How many lines the chips of the MCP section wrap into in a body of `columns` cells: the one place where the rows of a
+// block are an estimate, since the layout engine does the wrapping. A chip is its dot (DOT.length cells) and its name,
+// which nameCells counts high: a name measured short would make the estimate a row short, and that is the side it
+// must not err on. The chips go in the order they come, whole, onto a line while the next one fits it with the gap that
+// parts them, and a chip wider than the line (it is cut) is a line of its own. A line is the body less
+// CHIP_MARGIN_CELLS, so the estimate errs on the side of a row too many: the Log then draws a line fewer than would
+// fit, where a row too few would cut its last line (logLinesFit).
+export function chipRows(names: string[], columns: number): number {
+  const lineCells = columns - CHIP_MARGIN_CELLS
+  let rows = 0
+  let used = 0
+  for (const name of names) {
+    const chipCells = DOT.length + nameCells(name)
+    if (rows > 0 && used + CHIP_GAP_CELLS + chipCells <= lineCells) {
+      used += CHIP_GAP_CELLS + chipCells
+    } else {
+      rows += 1
+      used = chipCells
+    }
+  }
+
+  return rows
+}
+
+// The MCP servers, a green dot and the name each, wrapped whole; the summary is their count. The mod only learns which
+// servers have tools in the context (WaitForMcpServers is not there for a module), so it cannot tell a failed one
+// from a connected one: every dot is green. A name wider than the pane goes on its own line and is cut. The chips are
+// the one body of a section that is more than one line high, as many as chipRows says.
+function mcpSection(d: Draw): Block {
   const { Box, Text } = d.ui
   const { mcp } = d.data
-  if (mcp === null || mcp.servers.length === 0) return null
+  if (mcp === null || mcp.servers.length === 0) return NO_BLOCK
   const chips = mcp.servers.map(server => (
     <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
       <Box flexDirection="row" flexShrink={0}>
@@ -773,12 +860,17 @@ function mcpSection(d: Draw): RenderElement | null {
       {shrinkText(d, server.name)}
     </Box>
   ))
+  const names = mcp.servers.map(server => server.name)
 
-  return section(d, 'mcp', 'MCP', String(mcp.servers.length), [
-    <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
-      {chips}
-    </Box>,
-  ])
+  return section(
+    d, 'mcp', 'MCP', String(names.length),
+    [
+      <Box flexDirection="row" flexWrap="wrap" columnGap={CHIP_GAP_CELLS}>
+        {chips}
+      </Box>,
+    ],
+    chipRows(names, d.cols),
+  )
 }
 ```
 
@@ -793,9 +885,31 @@ function mcpSection(d: Draw): RenderElement | null {
 ### 6.10 Log row
 
 ```tsx
-// The Log, as the parts of the pane's root: its rule, its header and its lines, with no Box around them. That is the
-// layout the live desktop has verified, and it needs no chain of Boxes that grow (the visual spec, §6.12 Log height).
-// Folded, it is the rule and the header; with no lines, nothing.
+// How many lines of the Log fit in the body (the 0.4.0 spec, 2026-10-12-session-panel-v2-design.md, §3.2). The Log has
+// the rows that the blocks above it leave: the body's, less theirs (`above`, which the builders count from the rows
+// they draw) and less its own rule and header. If all its `total` events fit in them, that many; if not, one row goes
+// to the `+N more` line and the Log has the rest, never fewer than MIN_LOG_ROWS lines: below that the pane scrolls. The
+// log holds the newest 60 events at most (pushLog), so the lines drawn are these or all it holds, whichever are fewer.
+// Where the body's height is not known the Log has MAX_LOG_ROWS.
+//
+// The count of the rows above is exact but for the chips of MCP (chipRows), which wrap, and that is made to err on the
+// high side. A count that is too high is harmless: the Log draws a line fewer than would have fit, an empty row is left
+// at the bottom of the pane, and `+N more` still counts every event that is not drawn. A count that is too low is not:
+// the last line is drawn past the rows there are, the tail clips it, and N is one short of the events that are hidden.
+// So an error is allowed on the side of fewer lines only, and the tail's clip is what limits the damage of the other.
+function logLinesFit(d: Draw, above: number, total: number): number {
+  if (d.rows === 0) return MAX_LOG_ROWS
+  const room = d.rows - above - RULE_ROWS - HEADER_ROWS
+
+  return total <= room ? total : Math.max(MIN_LOG_ROWS, room - 1)
+}
+
+// The Log, as the parts of the pane's root: its rule, its header, its lines and the line that counts the events that
+// are not drawn, with no Box around them. That is the layout the live desktop has verified, and it needs no chain of
+// Boxes that grow (the visual spec, §6.12 Log height).
+// Folded, it is the rule and the header; with no lines, nothing. The summary of its header is the count of every event
+// (the lines are the newest of them): logCount, or the lines the log holds where the count is behind them. A folded Log
+// keeps it, and has no `+N more` line.
 // The newest log lines: time, who, what, and how it went. Time and `who` are dim fixed columns, so every text starts
 // at the same x; the text is cut to one line. On the desktop `who` has a width of its own, so the text column does not
 // jump with the longest `who`; on the terminal it is the longest one there is, up to the most shortType keeps. The
@@ -811,19 +925,26 @@ function mcpSection(d: Draw): RenderElement | null {
 // `you › …`, for its text alone does not say whose it is; the other lines have no label. It comes after the outcome,
 // where a line shows that in front too. MIN_LOG_TEXT_CELLS counts the text alone, not the label: at the edge of a
 // layout an engine line shows its label and none of its text.
-// The height: the lines drawn are the body's rows, MIN_LOG_ROWS at least, for a line past them could never show. The
-// first MIN_LOG_ROWS are the head, a Box that holds its height, so they always show. The rest are the tail, a Box with
-// no height of its own that grows into the rows the root leaves free (it is at least the body's height) and clips at
-// its bottom, so the oldest lines go first. When not even the head fits, the root grows to its content and the pane
-// scrolls, which the engine does. Where the body's height is not known the lines are MAX_LOG_ROWS, in one Box at their
-// natural height: a tail would have no room to grow into.
-function logParts(d: Draw): RenderElement[] {
+// The height: the lines drawn are as many as fit under the blocks above the Log (logLinesFit), MIN_LOG_ROWS at least.
+// The first MIN_LOG_ROWS are the head, a Box that holds its height, so they always show. The rest are the tail, a Box
+// with no height of its own that grows into the rows the root leaves free (it is at least the body's height) and clips
+// at its bottom, so the oldest lines go first; with the count of the rows right it clips nothing, and it is the
+// insurance for the day it is not. After the tail comes the line that counts the events that are not drawn: a child of
+// the root, that holds its size, so that the tail's growing leaves it its row and it ends the pane. When not even the
+// head fits, the root grows to its content and the pane scrolls, which the engine does. Where the body's height is not
+// known the lines are MAX_LOG_ROWS, in one Box at their natural height (a tail would have no room to grow into), and
+// the line that counts the rest follows it.
+function logParts(d: Draw, above: number): RenderElement[] {
   const { Box, Text, Svg } = d.ui
-  const lines = d.data.log.slice(0, d.rows > 0 ? Math.max(MIN_LOG_ROWS, d.rows) : MAX_LOG_ROWS)
-  if (lines.length === 0) return []
+  const { log } = d.data
+  if (log.length === 0) return []
+  // Every event of the session: the count, and at least the lines the log holds. A session that began on an earlier
+  // build and has this one loaded into it has lines on its log that the count never saw: it starts at 0.
+  const total = Math.max(d.data.logCount, log.length)
   const rule = divider(d)
-  const header = sectionHeader(d, 'log', 'Log', '')
+  const header = sectionHeader(d, 'log', 'Log', String(total))
   if (isFolded(d, 'log')) return [rule, header]
+  const lines = log.slice(0, logLinesFit(d, above, total))
   const longestWho = Math.max(...lines.map(line => line.who.length))
   const whoCells = Svg === undefined ? Math.min(WHO_CELLS_MAX, longestWho) : WHO_CELLS
   const longestOutcome = Math.max(...lines.map(line => line.outcome?.length ?? 0))
@@ -873,7 +994,10 @@ function logParts(d: Draw): RenderElement[] {
       )}
     </Box>
   ))
-  if (d.rows === 0) return [rule, header, <Box flexDirection="column">{lineRows}</Box>]
+  // The events that are not drawn, counted: N is all of them less the lines, and the line is there when there are any.
+  const hidden = total - lines.length
+  const moreParts = hidden > 0 ? [moreLine(d, hidden, { flexShrink: 0 })] : []
+  if (d.rows === 0) return [rule, header, <Box flexDirection="column">{lineRows}</Box>, ...moreParts]
   const parts = [rule, header, <Box flexDirection="column" flexShrink={0}>{lineRows.slice(0, MIN_LOG_ROWS)}</Box>]
   if (lineRows.length > MIN_LOG_ROWS) {
     parts.push(
@@ -883,7 +1007,7 @@ function logParts(d: Draw): RenderElement[] {
     )
   }
 
-  return parts
+  return [...parts, ...moreParts]
 }
 ```
 
@@ -915,8 +1039,9 @@ function logParts(d: Draw): RenderElement[] {
   column and no label, so it is visible nowhere in the Log but in its `spawned · type: …` line, if the cut does not
   take it: a known limit (finding 11 of the 0.3.0 live check).
 - **Columns.** The `who` and outcome columns are worked out from the longest `who` and the longest outcome among the
-  lines drawn. Those may be more than the lines shown (§6.12), so a long outcome lower down can make `who` give way for
-  every row. The rule stays: one layout for the head and the tail is what keeps their columns in line.
+  lines drawn. The lines drawn are the lines that fit (§6.12); only a row count that is too low draws one more, which
+  the tail clips. A long outcome lower down can make `who` give way for every row. The rule stays: one layout for the
+  head and the tail is what keeps their columns in line.
 - **Abandoned call.** A tool call that came back as an error while its call had been abandoned (the person interrupted
   it, or a stop did) is a note, not a fault. It is kind `info`, so it is not red: its text is drawn as on any line that
   is no error, its `who` and outcome are dim as on every such line, and its outcome is the time alone, with no ✗, as a
@@ -940,36 +1065,59 @@ function logParts(d: Draw): RenderElement[] {
 | Lines unknown (an unborn HEAD, a failed diff) or both 0 (only binary files changed) | the changes row with the count alone, no numbers |
 | Subagent cost unknown | dim `—` in the cost column |
 | More than 8 subagents | `+N more` (§6.7) |
+| Events the Log does not draw | a dim `+N more` at its bottom; none when all are drawn or the Log is folded (§6.12) |
 | No rate limits, MCP servers, sources or log | the section and its rule are left out |
 
 ### 6.12 Log height
 
-The Log draws as many lines as the pane's body has rows, at least 8 (`MIN_LOG_ROWS`), of the last 60 events, newest
-first. The first 8 always show. The rest fill the height that the other blocks leave, and are cut at the bottom, so the
-oldest go first. Folding another section gives the Log its room. When not even 8 lines fit, the pane scrolls, and the
-engine does that. Where the body's height is not known (`bodyRows` 0), the Log draws 15 lines (`MAX_LOG_ROWS`) at their
-natural height, in one Box, as 0.2.0 did.
+The Log draws as many lines as fit under the blocks above it, at least 8 (`MIN_LOG_ROWS`), of the last 60 events, newest
+first. A dim `+N more` line at its bottom counts the events it does not draw. The header's summary is the count of every
+event, `max(logCount, lines held)`: a session that began on an earlier build has lines that its count never saw. The
+first 8 lines always show. Folding another section gives the Log its room. When not even 8 lines fit, the pane scrolls,
+and the engine does that. Where the body's height is not known (`bodyRows` 0), the Log draws 15 lines (`MAX_LOG_ROWS`)
+at their natural height, in one Box, and then the `+N more` line.
 
+- **How many lines fit** (`logLinesFit` in §6.10; the 0.4.0 spec, `2026-10-12-session-panel-v2-design.md`, §3.2):
+  - `room = bodyRows − rows above − 2`, where the 2 are the Log's own rule and header;
+  - if every event fits in `room`, the Log draws all of them, though never more than the 60 it holds;
+  - otherwise it draws `max(8, room − 1)` lines, and one row goes to the `+N more` line;
+  - N is the total less the lines drawn. The line shows exactly when N is above 0, and never for a folded Log, which
+    keeps its count in the header.
+- **The rows above.**
+  - Every builder returns a `Block = { tree, rows }` (§5.4) and counts the rows from the very rows it puts in the tree,
+    so that the two cannot part.
+  - A rule and a section header take one row each (`RULE_ROWS`, `HEADER_ROWS`), measured on the desktop (the 0.4.0
+    spec, §8.1). A folded section is its rule and header. A block that is left out is 0 rows.
+  - The one estimate is the chips of MCP (`chipRows`, §6.8), because the layout engine wraps them: whole chips, greedy,
+    over `bodyColumns − 2` (`CHIP_MARGIN_CELLS`), 2 cells apart (`CHIP_GAP_CELLS`). A chip is the dot's 2 cells and the
+    name's, counted by code point with every code point above U+007F as 2 cells (`nameCells`).
+- **Errors go one way.**
+  - A count that is too high leaves a spare row. It sits between the last Log line and `+N more`, since the tail's
+    `flexGrow` takes the spare rows.
+  - A count that is too low draws a line past the rows there are. The tail clips it, and N is one short.
+  - So the estimate errs high, and the tail stays as insurance.
 - **Structure** (the root is in §4, `logParts` in §6.10):
   - the root has `minHeight={bodyRows}`, and none when the height is not known;
   - the Log's rule, header, head and tail are direct children of the root, with no Box around them;
   - the head is a column Box with `flexShrink={0}` and the first 8 lines;
   - the tail is a column Box with `height={0}`, `flexGrow={1}`, `flexShrink={1}` and `overflow="hidden"`. It has no
-    height of its own, grows into what the root leaves free, and cuts its lines at the bottom.
+    height of its own, grows into what the root leaves free, and cuts its lines at the bottom;
+  - the `+N more` line (`moreLine`, §6.7) is a direct child of the root after the tail, with `flexShrink={0}`, and has
+    the same indent as the Subagents' line.
 - **The unit.** A desktop height cell is one text line, about 19 px, and `props.scroll.bodyRows` counts text lines
   (§2.1). The 8 px is the width of a cell, and what a margin of 1 adds; it does not hold for `height`.
 - **The rules.** The rule above a section is one line high (`height={1}`, §5.1), so every block is a whole number of
   lines and the Log's last line is whole at the bottom of the pane. The rule was two margins and the 1 px line, 17 px,
-  and each one cut 2 px off that line: with 6 or 7 rules, about a third of it (finding 1 of the 0.3.0 live check). A
-  look at the fix on the desktop is pending (§11, check 2). If a strip remains, the next suspect is the Button's height
-  in the section header.
+  and each one cut 2 px off that line: with 6 or 7 rules, about a third of it (finding 1 of the 0.3.0 live check). The
+  0.4.0 spike measured the fix on the desktop (§11, check 2; the 0.4.0 spec, §8.1): a rule, a section header and a chips
+  row took one row each, and at `bodyRows` 65 exactly 65 rows of 19 px fit.
 - **What the engine does.**
   - It scrolls a body that is taller than the pane, natively, with a scrollbar and the wheel.
   - A change of `bodyRows` alone re-runs `ui.render`, on every frame of a resize.
 - **What did not work.** A root with `height="100%"` grows to its content: all 60 lines show, and the pane scrolls.
-- **Not verified.** The terminal (Ink/Yoga); the real pane at three heights, though the 0.3.0 live check saw it fill the
-  pane (§11, check 10); the Log's last line since the rule became one line high (§11, check 2); and nested chains of
-  growing Boxes, which the flat structure avoids.
+- **Not verified.** The 0.4.0 layout on the live desktop (the release's live check, the 0.4.0 spec, §3.4); the terminal
+  (Ink/Yoga); the real pane at three heights, though the 0.3.0 live check saw it fill the pane (§11, check 10); and
+  nested chains of growing Boxes, which the flat structure avoids.
 - **Evidence.** Two live spikes on the desktop, engine 2.1.288, 2026-10-08, with a throwaway mod that drew numbered log
   lines and a footer line after them (the mod was deleted afterwards). Four of its modes matter:
   - B, a root with `height={bodyRows}` and a `flexGrow` log with `overflow="hidden"`, worked exactly: at `bodyRows` 65
@@ -1191,12 +1339,13 @@ Check since the review of Task 13, for the 0.3.1 release:
     (Diff, Terminal) in front? If it does, that session keeps its minute read, as in 0.3.0, and finding 2 of the 0.3.0
     live check (every live session reads the tree once a minute) is not fixed.
 
-Results of the live renders (2026-10-07, 2026-10-08 and 2026-10-09):
+Results of the live renders (2026-10-07, 2026-10-08, 2026-10-09 and 2026-10-12):
 
 1. Pass. At ~300 px the bar ends ~18 px left of the percent; `CELL_PX` 8 stays.
 2. Pass for the rule of two margins: 12–14 px between the ink and the rule on each side, ≈ 17 px box to box. That rule
    was not a whole line: the 0.3.0 live check saw it cut 2 px off the Log's last line for each rule (finding 1, §6.12).
-   The rule is one line high now (§5.1), and a look at the fix on the desktop is pending.
+   The rule is one line high now (§5.1). Pass for that fix, in the 0.4.0 spike (2026-10-12): a rule took one row, and at
+   `bodyRows` 65 exactly 65 rows of 19 px fit (the 0.4.0 spec, §8.1).
 3. Pass. At ~300 px no row crosses the edge; descriptions and log text end in `…`. Since Task 8 the log's outcome column gives way when the text would keep fewer than 8 cells (about 40 columns on the desktop), so at ~300 px the log shows the outcome at the end of the text, by design.
    - Task 9 changed the narrow rules (§6.7, §6.10) and replaces the Task 8 rule above: in a narrow pane `who` gives way
      first, then the outcome moves in front of the text, and a subagent row drops `@type` when its description would
@@ -1218,8 +1367,8 @@ Results of the live renders (2026-10-07, 2026-10-08 and 2026-10-09):
    agent (`Bash sleep 30`, `4.6s`) each logged a line with the time alone, no ✗ and not red, while `Bash false` stayed
    red. So `next.signal` fires for both, and by the time `next(e)` returns the aborted result.
 10. Partly, in the 0.3.0 live check. The Log filled the pane (33 lines instead of 15) and grew when a section was
-    folded. Its last line was cut by the rules above it (finding 1): that is fixed (§5.1), and a look at the fix is
-    pending (check 2). The three heights and the scrollbar were not recorded.
+    folded. Its last line was cut by the rules above it (finding 1): that is fixed (§5.1), and the 0.4.0 spike settled
+    the fix (check 2). The three heights and the scrollbar were not recorded.
 11. Pending. The 0.3.0 live check does not mention the first frame.
 12. Seen in a narrow pane in the 0.3.0 live check: the lines read `you › …` and `engine › agent-message`. How much text
     follows `engine › ` at the edge of the layout was not recorded.
@@ -1227,7 +1376,7 @@ Results of the live renders (2026-10-07, 2026-10-08 and 2026-10-09):
 
 Not checked in the 0.3.0 live check, or pending a look:
 
-- the fix of finding 1, the rule one line high: the Log's last line has not been looked at since (check 2);
+- the fix of finding 1, the rule one line high: settled by the 0.4.0 spike, exactly 65 rows of 19 px fit (check 2);
 - the fold state after a restart;
 - a pane behind another plugin pane of its session (`isShown: false`): the minute read now skips it, and
   `/session-panel` asks to bring it forward instead of closing it;

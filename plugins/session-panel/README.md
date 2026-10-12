@@ -51,10 +51,12 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
 - **MCP**: the servers that have tools in the context, by name, with their count. The desktop app's own servers
   (`ccd_*`, `Claude_Browser`, `scheduled-tasks`, `terminal`) are hidden and not counted.
 - **Context sources**: how many skills and MCP servers feed the context.
-- **Log**: the last 60 events, newest first, as many lines as the pane's body has rows and at least 8: the first 8
-  always show, and the rest fill the height that the other blocks leave and are cut at the bottom, so the oldest go
-  first. Folding another section gives the Log its room; when not even 8 lines fit, the pane scrolls; where the body's
-  height is not known, it draws 15 lines. The events are prompts, tool calls, subagent spawns, resumes
+- **Log**: the last 60 events, newest first, as many lines as fit under the other blocks and at least 8. A dim `+N more`
+  line at the bottom counts the events that are not drawn, and the header counts every event of the session (`/clear`
+  and resume start it over). Folding another section gives the Log its room; when not even 8 lines fit, the pane
+  scrolls; where the body's height is not known, it draws 15 lines. The panel counts the rows of the blocks above the
+  Log itself; only the wrap of the MCP chips is an estimate, made on the high side, so a wrong guess leaves a blank row
+  rather than cutting the last line. The events are prompts, tool calls, subagent spawns, resumes
   and results (a successful Agent call, a SendMessage to a known subagent or a subagent's `SubagentHandback` is not
   logged: their lines say it), compactions. Tool calls and subagent results both carry their outcome (✓/✗ and the
   time, or denied) in a right-aligned column. A call that comes back as an error because it was abandoned (you
