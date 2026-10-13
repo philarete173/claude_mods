@@ -91,7 +91,8 @@ export type PanelProject = {
   // Null when there is nothing to show: outside a git repository, on a clean tree, or when git failed. Also null from
   // the moment the name changes until the changes of the new folder are read: a count is never kept under another name.
   // And null where they are not read: before the first turn of the main agent, and for a folder whose reads had a
-  // `git status`, or a `git diff` against HEAD, that threw (a timeout, or git that cannot be started) twice in a row.
+  // `git status`, or a `git diff` against HEAD, that threw (a timeout, or git that cannot be started) twice in a row:
+  // it is left unread until 15 minutes pass, then one read tries again (READ_RETRY_MS in register.tsx).
   changes: PanelChanges | null
 }
 export type PanelMcp = { servers: { name: string }[] }

@@ -42,6 +42,7 @@ const PROJECT_GAP_FACTOR = 4
 const READ_MS_MAX = 60_000 // the most that one read counts for in the gap rule, whatever the clock says it took
 const CHANGES_TIMEOUT_MS = 10_000 // the most that one git call that reads the changes may run
 const READ_BUDGET_MS = 30_000 // the most that the changes of one read may take in all, counted from the start of them
+const READ_RETRY_MS = 15 * 60_000 // how long a root whose reads were stopped waits, from the read that stopped them
 const GIT_READ = [
   'git', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'diff.autoRefreshIndex=false',
 ]
@@ -218,10 +219,36 @@ const FRACTIONAL_CLOCK: Plugin = {
     })
   },
 }
+// A plugin above the mod's that holds one write of the log, or of its count, as a host that is slow to answer may:
+// after `arm-hold`, the first such write lands, and the writer is answered 100 ms later. The hook of the mod that made
+// the write waits meanwhile, which is the time between the two writes of a line, so a /clear that comes then lands
+// there, whichever of the two the mod writes first. Like any plugin of a test it closes over nothing of this file.
+const WRITE_HOLDER: Plugin = {
+  name: 'write-holder',
+  tier: 'prepend',
+  register(on) {
+    let isArmed = false
+    on('command.run', { command: 'arm-hold' }, async () => {
+      isArmed = true
+
+      return { text: 'armed' }
+    })
+    on('state.set', async ($, e, next) => {
+      const written = await next(e)
+      if (isArmed && e.plugin === 'session-panel' && (e.key === 'log' || e.key === 'logCount')) {
+        isArmed = false
+        await $.clock.sleep(100)
+      }
+
+      return written
+    })
+  },
+}
 const WITH_ABANDONER = { plugins: [READER, ABANDONER], timeoutMs: 30_000 }
 const WITH_INTERRUPTER = { plugins: [READER, INTERRUPTER], timeoutMs: 30_000 }
 const WITH_FRACTIONAL_CLOCK = { plugins: [READER, FRACTIONAL_CLOCK], timeoutMs: 30_000 }
 const WITH_STORE = { plugins: [READER, OTHER_SESSION], timeoutMs: 30_000 }
+const WITH_WRITE_HOLDER = { plugins: [READER, WRITE_HOLDER], timeoutMs: 30_000 }
 const WITH_SUSPENDER = { plugins: [SUSPENDER] }
 const PANE_PROPS: RenderPropsOf['Pane'] = {
   title: 'Session', isFocused: false, bodyColumns: 40, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {},
@@ -659,7 +686,7 @@ test('session.start registers the command and opens the pane when a desktop is a
   expect(await $.session.start(START)).toEqual({ cwd: ROOT })
   // The command only touches panes, so it may run while a turn is in flight.
   expect(w.registered).toEqual([
-    { name: 'session-panel', description: 'Open or close the session stats pane', immediate: true },
+    { name: 'session-panel', description: 'Open the session stats pane', immediate: true },
   ])
   expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session' }])
 })
@@ -899,89 +926,87 @@ test('a press made while the map of the store is loaded at the start-up survives
     await ui.unmount()
   })
 
-test('the command opens the pane, closes it when it is placed and shown, and says why when it is not placed',
-  async ($, on) => {
-    const w = bottom(on, mock.clock(on))
-    const run = async (): Promise<string | undefined> =>
-      (await $.command.run({ ...RUN, command: 'session-panel' })).text
+test('the command opens a pane that is not open, with no focus, and says why when it is not placed', async ($, on) => {
+  const w = bottom(on, mock.clock(on))
+  const run = async (): Promise<string | undefined> =>
+    (await $.command.run({ ...RUN, command: 'session-panel' })).text
 
-    // The pane is not open, or another one is: it is opened, with no `focus`.
-    expect(await run()).toBe('Session pane opened.')
-    expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session' }])
-    w.panes = [{ ...PANE_UP, id: 'other' }]
-    expect(await run()).toBe('Session pane opened.')
-    expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session' }, { id: 'session-panel', title: 'Session' }])
-    // It is placed and shown: it is closed.
-    w.panes = [PANE_UP]
-    expect(await run()).toBe('Session pane closed.')
-    expect(w.closed).toEqual(['session-panel'])
-    expect(w.opened).toHaveLength(2)
+  // The pane is not open, or another one is: it is opened, with no `focus`.
+  expect(await run()).toBe('Session pane opened.')
+  expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session' }])
+  w.panes = [{ ...PANE_UP, id: 'other' }]
+  expect(await run()).toBe('Session pane opened.')
+  expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session' }, { id: 'session-panel', title: 'Session' }])
 
-    // A pane that is open but waits undrawn is not shown: the person asks for it, so it is asked for again, with
-    // `focus`. Such a pane lists as not shown; one that listed as shown while it waited would be no different.
-    for (const waiting of [{ ...PANE_UP, isPlaced: false }, { ...PANE_UP, isPlaced: false, isShown: false }]) {
-      w.panes = [waiting]
-      w.opened.length = 0
-      expect(await run()).toBe('Session pane opened.')
+  w.panes = []
+  w.placed = { isPlaced: false, reason: 'the terminal is too narrow' }
+  expect(await run()).toBe('Session pane is not shown: the terminal is too narrow')
+  expect(w.closed).toEqual([])
+})
+
+// A pane that is open, as the engine lists it in each of its states. The command closes none of them: `UiPane.isShown`
+// ranks this plugin's panes only, so a lone pane counts as shown even where a built-in desktop tab such as Terminal
+// covers it (the 0.4.0 live check), and the command cannot tell a pane in front from one that is hidden. The person
+// asks for the pane, so it is asked for again, with `focus`: that places a pane that waits and brings a tab forward (a
+// request, which the surface may refuse); as for any pane that opens, it asks for a read of the project. A pane that
+// waits undrawn lists as not shown; one that listed as shown while it waited would be no different.
+const OPEN_PANES: Array<[what: string, panes: UiPane[]]> = [
+  ['placed and shown', [PANE_UP]],
+  ['placed and shown, with another pane open beside it', [{ ...PANE_UP, id: 'other', isShown: false }, PANE_UP]],
+  ['a tab behind another', [{ ...PANE_UP, isShown: false }]],
+  ['waiting undrawn', [{ ...PANE_UP, isPlaced: false }]],
+  ['waiting undrawn and listed as not shown', [{ ...PANE_UP, isPlaced: false, isShown: false }]],
+]
+for (const [what, panes] of OPEN_PANES) {
+  test(`the command on a pane that is ${what} asks for it with focus, closes nothing and asks for a read`,
+    async ($, on) => {
+      const clock = mock.clock(on)
+      const w = bottom(on, clock)
+      w.panes = panes
+
+      const ran = await $.command.run({ ...RUN, command: 'session-panel' })
+
+      expect(ran.text).toBe('Session pane opened.')
       expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session', focus: true }])
-      expect(w.closed).toEqual(['session-panel']) // none closed again
-    }
+      expect(w.closed).toEqual([])
+      expect(reads(w)).toBe(0) // the hook asks and returns
+      await clock.advance(1)
+      expect(reads(w)).toBe(1)
+    })
+}
 
-    w.panes = []
-    w.placed = { isPlaced: false, reason: 'the terminal is too narrow' }
-    expect(await run()).toBe('Session pane is not shown: the terminal is too narrow')
-  })
+test('the command on an open pane that the surface cannot place says why, and closes nothing', async ($, on) => {
+  const w = bottom(on, mock.clock(on))
+  w.panes = [PANE_UP]
+  w.placed = { isPlaced: false, reason: 'the terminal is too narrow' }
 
-// A pane that is placed but is a tab behind another one is not in front: the command does not close it, it brings it
-// forward, which asks for the pane again with `focus`; as for any pane that opens, it asks for a read of the project.
-test('the command on a pane that is a tab behind another opens it with focus, does not close it, and asks for a read',
+  const ran = await $.command.run({ ...RUN, command: 'session-panel' })
+
+  expect(ran.text).toBe('Session pane is not shown: the terminal is too narrow')
+  expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session', focus: true }])
+  expect(w.closed).toEqual([])
+})
+
+// The timer asks for a read of the project only while the pane is shown, so a pane that opens asks for one itself; the
+// command opens the pane whatever state it is in, so every run asks for one, and none closes anything.
+test('every run of the command asks for a read of the project, one on a pane that is placed and shown too',
   async ($, on) => {
     const clock = mock.clock(on)
     const w = bottom(on, clock)
-    w.panes = [{ ...PANE_UP, isShown: false }]
+    const run = () => $.command.run({ ...RUN, command: 'session-panel' })
 
-    const ran = await $.command.run({ ...RUN, command: 'session-panel' })
-
-    expect(ran.text).toBe('Session pane opened.')
-    expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session', focus: true }])
-    expect(w.closed).toEqual([])
+    await run() // opens it
     expect(reads(w)).toBe(0) // the hook asks and returns
     await clock.advance(1)
     expect(reads(w)).toBe(1)
+
+    w.panes = [PANE_UP]
+    await run() // asks for it again, with focus
+    expect(reads(w)).toBe(1) // the hook asks and returns
+    await clock.advance(1)
+    expect(reads(w)).toBe(2)
+    expect(w.closed).toEqual([])
   })
-
-test('the command on a pane that is placed and shown closes it, with another pane open beside it, and asks for no read',
-  async ($, on) => {
-    const clock = mock.clock(on)
-    const w = bottom(on, clock)
-    w.panes = [{ ...PANE_UP, id: 'other', isShown: false }, PANE_UP]
-
-    const ran = await $.command.run({ ...RUN, command: 'session-panel' })
-
-    expect(ran.text).toBe('Session pane closed.')
-    expect(w.closed).toEqual(['session-panel'])
-    expect(w.opened).toEqual([])
-    await clock.advance(5 * PROJECT_DELAY_MS)
-    expect(reads(w)).toBe(0)
-  })
-
-// The timer asks for a read of the project only while the pane is shown, so a pane that opens asks for one itself; one
-// that closes asks for none.
-test('opening the pane with the command asks for a read of the project; closing it asks for none', async ($, on) => {
-  const clock = mock.clock(on)
-  const w = bottom(on, clock)
-  const run = () => $.command.run({ ...RUN, command: 'session-panel' })
-
-  await run() // opens it
-  expect(reads(w)).toBe(0) // the hook asks and returns
-  await clock.advance(1)
-  expect(reads(w)).toBe(1)
-
-  w.panes = [PANE_UP]
-  await run() // closes it
-  await clock.advance(5 * PROJECT_DELAY_MS)
-  expect(reads(w)).toBe(1)
-})
 
 test('start-up reads project, branch, skills and MCP servers in the background', WITH_READER, async ($, on) => {
   const clock = mock.clock(on)
@@ -1471,10 +1496,18 @@ const askRead = async ($: Engine, clock: MockClock): Promise<void> => {
   await clock.advance(1)
 }
 
-// Two reads in a row, for one root, that had a status that threw stop the reads of its changes: a huge tree (a dotfiles
-// repository in $HOME) would spend the whole timeout on each read. The branch is still read. A diff against HEAD that
-// throws counts as a status that does (see below), and the count is each root's own.
-test('two status calls in a row that throw stop the changes reads for that root, for as long as the module lives',
+// The same, asked so that the read starts at the time `at`: the clock goes to a ms short of it, and the read that the
+// change of the folder asks for starts a ms later.
+const askReadAt = async ($: Engine, clock: MockClock, at: number): Promise<void> => {
+  await clock.set(at - 1)
+  await askRead($, clock)
+}
+
+// Two reads in a row, for one root, that had a status that threw stop the reads of its changes for 15 minutes
+// (READ_RETRY_MS): a huge tree (a dotfiles repository in $HOME) would spend the whole timeout on each read. The branch
+// is still read. A diff against HEAD that throws counts as a status that does (see below), and the count is each
+// root's own.
+test('two status calls in a row that throw stop the changes reads for that root, until 15 minutes have passed',
   WITH_READER, async ($, on) => {
     const clock = mock.clock(on)
     const w = bottom(on, clock)
@@ -1504,6 +1537,166 @@ test('two status calls in a row that throw stop the changes reads for that root,
     expect(reads(w)).toBeGreaterThanOrEqual(3)
     expect(statusRuns(w)).toBe(0)
     expect((await readState($)).project.changes).toBeNull()
+  })
+
+// A root that was stopped is not given up for good: READ_RETRY_MS after the read whose throw stopped it, one read
+// tries again. A throw in that read leaves the root waiting another READ_RETRY_MS, and a read that ends without one
+// starts the count over, as it does at any time. The wait is the root's own, and it is measured on `$.clock.now()`, so
+// a computer that wakes from sleep past it reads at its next read. `givenUpWorld` stops ROOT with the two reads of the
+// test above (the status throws in each, and takes no time, so the wait starts at the time its last read began) and
+// then lets the status work again; its changes are one modified file of 3 lines added and 1 removed.
+const givenUpWorld = async (
+  $: Engine, on: On, panes: UiPane[] = [],
+): Promise<{ clock: MockClock; w: World; givenUpAt: number }> => {
+  const clock = mock.clock(on)
+  const w = bottom(on, clock)
+  w.panes = panes // the timer asks while a pane is shown
+  w.status = ok(' M a.ts\0')
+  w.diff = ok('3\t1\ta.ts\n')
+  await $.session.start(START)
+  await clock.advance(1)
+  w.statusThrows = true // the status times out, as in a tree that git cannot walk in 10 s
+  await openTree($, clock, w)
+  await askRead($, clock)
+  expect(statusRuns(w)).toBe(2) // two throws in a row: the root is stopped
+  w.statusThrows = false
+
+  return { clock, w, givenUpAt: clock.now() }
+}
+const CHANGES_BACK = { files: 1, lines: { added: 3, removed: 1 } }
+
+test('a root that was stopped is read again once 15 minutes have passed, and not a moment before', WITH_READER,
+  async ($, on) => {
+    const { clock, w, givenUpAt } = await givenUpWorld($, on)
+
+    // A ms short of the 15 minutes: the branch alone, and no changes.
+    w.runs.length = 0
+    await askReadAt($, clock, givenUpAt + READ_RETRY_MS - 1)
+    expect(w.runs).toEqual([BRANCH_RUN])
+    expect((await readState($)).project.changes).toBeNull()
+
+    // At 15 minutes one read runs, with its status and its diff, and the changes are back.
+    w.runs.length = 0
+    await askReadAt($, clock, givenUpAt + READ_RETRY_MS)
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, DIFF_RUN])
+    expect((await readState($)).project.changes).toEqual(CHANGES_BACK)
+  })
+
+test('a clock far past the wait, as when a computer wakes from sleep, has the root read at the next request',
+  WITH_READER, async ($, on) => {
+    const { clock, w, givenUpAt } = await givenUpWorld($, on)
+
+    w.runs.length = 0
+    await askReadAt($, clock, givenUpAt + 4 * READ_RETRY_MS)
+
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, DIFF_RUN])
+    expect((await readState($)).project.changes).toEqual(CHANGES_BACK)
+  })
+
+test('a read that throws when the root is tried again leaves it waiting another 15 minutes', WITH_READER,
+  async ($, on) => {
+    const { clock, w, givenUpAt } = await givenUpWorld($, on)
+
+    // The try at 15 minutes throws as the first two did: the status runs, and the diff does not.
+    w.statusThrows = true
+    w.runs.length = 0
+    await askReadAt($, clock, givenUpAt + READ_RETRY_MS)
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN])
+    const triedAt = clock.now()
+    w.statusThrows = false
+
+    // The wait is 15 minutes from that try, and the count is still at its max: the branch alone, a ms short of it.
+    w.runs.length = 0
+    await askReadAt($, clock, triedAt + READ_RETRY_MS - 1)
+    expect(w.runs).toEqual([BRANCH_RUN])
+    expect((await readState($)).project.changes).toBeNull()
+
+    // At it the next try runs, and now it works.
+    w.runs.length = 0
+    await askReadAt($, clock, triedAt + READ_RETRY_MS)
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, DIFF_RUN])
+    expect((await readState($)).project.changes).toEqual(CHANGES_BACK)
+  })
+
+test('a read that ends well when the root is tried again starts the count over: every request is read, a throw is one',
+  WITH_READER, async ($, on) => {
+    const { clock, w, givenUpAt } = await givenUpWorld($, on)
+
+    await askReadAt($, clock, givenUpAt + READ_RETRY_MS) // the try, and it works
+    expect(statusRuns(w)).toBe(3)
+
+    // Every request is read now, none waits for 15 minutes.
+    await askRead($, clock)
+    await askRead($, clock)
+    expect(statusRuns(w)).toBe(5)
+
+    // One throw does not stop the root again, as at the start: the next request is read, and it works.
+    w.statusThrows = true
+    await askRead($, clock)
+    w.statusThrows = false
+    await askRead($, clock)
+    expect(statusRuns(w)).toBe(7)
+    expect((await readState($)).project.changes).toEqual(CHANGES_BACK)
+
+    // Two in a row do, and the root waits for 15 minutes again.
+    w.statusThrows = true
+    await askRead($, clock)
+    await askRead($, clock)
+    expect(statusRuns(w)).toBe(9)
+    const stoppedAt = clock.now()
+    w.statusThrows = false
+    w.runs.length = 0
+    await askReadAt($, clock, stoppedAt + READ_RETRY_MS - 1)
+    expect(w.runs).toEqual([BRANCH_RUN])
+  })
+
+test('each root has its own wait: the one stopped later is tried later, and a read of one does not shorten the other',
+  WITH_READER, async ($, on) => {
+    const { clock, w, givenUpAt } = await givenUpWorld($, on)
+    const other = '/work/other_repo'
+    const commands = (): Array<string | undefined> => w.runs.map(run => gitCommand(run.argv))
+
+    // Another root is stopped five minutes later.
+    w.root = other
+    await clock.set(givenUpAt + 5 * 60_000)
+    w.statusThrows = true
+    await askRead($, clock)
+    await askRead($, clock)
+    const otherGivenUpAt = clock.now()
+    w.statusThrows = false
+
+    // ROOT is tried at its own time: its status runs. The other root, read just after, still waits.
+    w.root = ROOT
+    w.runs.length = 0
+    await askReadAt($, clock, givenUpAt + READ_RETRY_MS)
+    expect(w.runs).toEqual([BRANCH_RUN, STATUS_RUN, DIFF_RUN])
+    w.root = other
+    w.runs.length = 0
+    await askRead($, clock)
+    expect(commands()).toEqual(['branch'])
+
+    // It is tried when its own 15 minutes are over.
+    w.runs.length = 0
+    await askReadAt($, clock, otherGivenUpAt + READ_RETRY_MS)
+    expect(commands()).toEqual(['branch', 'status', 'diff'])
+  })
+
+// The minute read of a pane that is shown asks for a read of the project on its own; it is the one that finds the root
+// ready again, with no other request.
+test('the minute read of a shown pane tries a stopped root again after 15 minutes, with no other request',
+  WITH_READER, async ($, on) => {
+    const { clock, w, givenUpAt } = await givenUpWorld($, on, [PANE_UP])
+
+    // The minute reads meanwhile read the branch, and no status.
+    await clock.set(givenUpAt + READ_RETRY_MS - 1)
+    expect(reads(w)).toBeGreaterThanOrEqual(10) // several were asked for, so this is no empty check
+    expect(statusRuns(w)).toBe(2)
+    expect((await readState($)).project.changes).toBeNull()
+
+    // The next one after the 15 minutes runs the status, and the changes are back.
+    await clock.advance(2 * 60_000)
+    expect(statusRuns(w)).toBeGreaterThan(2)
+    expect((await readState($)).project.changes).toEqual(CHANGES_BACK)
   })
 
 test('a throw, a status that works and a throw again do not stop the reads: only a second throw in a row does',
@@ -4150,3 +4343,36 @@ test('a /clear or a resume drops a message handed back and not read yet; any oth
       expect((await readState($)).log[0]?.text, reason).toBe(shown)
     }
   })
+
+// A /clear or a resume that lands between the two writes of a log line, the line and its count. The total that the
+// header shows is `max(logCount, lines held)` and the pane says `+N more` for what the lines do not show, so the count
+// must not be left above the lines: the line written first and then the reset would leave the count of a line that the
+// reset emptied, and the next line would show `+1 more` for the rest of the conversation (the 0.4.0 live check). The
+// holder lets the first write of a line land and stops the hook there; the reset lands in that gap.
+for (const reason of ['clear', 'resume'] as const) {
+  test(`a ${reason} that lands between the two writes of a log line leaves no stray +N more on the next line`,
+    WITH_WRITE_HOLDER, async ($, on) => {
+      const clock = mock.clock(on, { now: 1_000_000 })
+      bottom(on, clock)
+      await $.session.start(START)
+      await clock.advance(1)
+      await $.command.run({ ...RUN, command: 'arm-hold' })
+
+      const first = $.turn.start({ text: 'one', turnId: 't1' })
+      await clock.settle() // one write of its line has landed, and the hook waits for the answer to it
+      const between = await readState($)
+      expect((between.log ?? []).length + (between.logCount ?? 0)).toBe(1) // one of the two, the other not yet
+      await $.session.end({ reason, sessionId: 's1', resume: { id: 's1' } })
+      await clock.advance(100) // the answer comes, and the hook writes the other
+      await first
+      await $.turn.start({ text: 'two', turnId: 't2' })
+
+      // The count is not above the lines that the log holds, so the pane has no event to count that it does not show.
+      const { log, logCount } = await readState($)
+      expect(log[0]?.text).toBe('two')
+      expect(Math.max(logCount, log.length) - log.length).toBe(0)
+      const ui = await mountPane($)
+      expect(await ui.find({ type: 'Text', text: /^\+\d+ more$/ })).toBeUndefined()
+      await ui.unmount()
+    })
+}

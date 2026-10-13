@@ -1,4 +1,4 @@
-// Wiring of the session-panel mod: engine events fill the `$.state` atoms, a command toggles the pane, and view.tsx
+// Wiring of the session-panel mod: engine events fill the `$.state` atoms, a command opens the pane, and view.tsx
 // draws the pane from the atoms. Every hook only observes: it returns what next(e) returned (the command hook answers
 // its own command).
 // `claude plugin validate` follows `$` only into top-level functions of this file, so every helper that takes `$`
@@ -96,8 +96,14 @@ const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 const NO_INDEX_ENV: Record<string, string> = { ...GIT_READ_ENV, GIT_ATTR_SOURCE: EMPTY_TREE }
 
 // How many reads in a row may have a status, or a diff against HEAD, that threw, for one root, before its changes are
-// no longer read (readThrows).
+// left unread until READ_RETRY_MS has passed (readThrows).
 const READ_THROWS_MAX = 2
+
+// How long the changes of a root are left unread once its reads have reached READ_THROWS_MAX, in ms (15 minutes),
+// counted from the start of the read whose throw brought it there (readRetryAt). One read then tries again. A tree that
+// git cannot walk in time stays slow, but a throw can also come of a computer that went to sleep, or of a disk that was
+// busy for a while, so a folder is not given up for good.
+const READ_RETRY_MS = 15 * 60_000
 
 // How many new files have their lines counted. A new file is in no diff against HEAD, so each takes a git call of its
 // own; the files past this many add no lines, so past it the plus is a lower bound.
@@ -151,12 +157,20 @@ let hasMainTurn = false
 
 // For each root, how many reads in a row had a status, or a diff against HEAD, that threw. A throw is a timeout or a
 // git that cannot be started; a non-zero exit, as outside a repository, is none. The count of a root rises by one for
-// each read that had a throw, and a read whose status and diff both ended without one starts it over. Past
-// READ_THROWS_MAX the changes of that root are not read again while the module lives, and the branch still is: a
-// session inside a huge tree, such as a dotfiles repository in $HOME, would otherwise spend the whole timeout on every
-// read. A read of another root leaves the count of this one as it is. A call also throws when the hook's signal
-// aborts, as when the module unloads, and that counts too; it is harmless, since a new module starts its counts over.
+// each read that had a throw, up to READ_THROWS_MAX, and a read whose status and diff both ended without one starts it
+// over. At READ_THROWS_MAX the changes of that root are left unread until READ_RETRY_MS has passed (readRetryAt), and
+// the branch still is read: a session inside a huge tree, such as a dotfiles repository in $HOME, would otherwise
+// spend the whole timeout on every read. A read of another root leaves the count of this one as it is. A call also
+// throws when the hook's signal aborts, as when the module unloads, and that counts too; it is harmless, since a new
+// module starts its counts over.
 const readThrows = new Map<string, number>()
+
+// For each root at READ_THROWS_MAX, the time from which its changes are read again: READ_RETRY_MS after the start of
+// the read whose throw brought it there, by the clock of `$.clock.now()`, so a computer that wakes from sleep past it
+// reads at its next read. A read that comes earlier reads nothing, and the changes are none for it, with no mark. At or
+// after that time one read runs: a throw in it sets the time anew and leaves the count at the max, and a read that ends
+// without one starts the count over and drops the time. A root that has no time is not waiting.
+const readRetryAt = new Map<string, number>()
 
 // ISO 8601 to epoch ms, which is what the `usage` value keeps; undefined when there is none or it does not parse.
 const toMs = (iso: string | undefined): number | undefined => {
@@ -218,13 +232,17 @@ function inBackground($: EngineInterface, job: () => Promise<void>): void {
 
 // Puts a line on top of the log, and counts it: the log keeps the newest 60 lines, the count every line since the log
 // was last emptied. The outcome of an action, a mark and its time, is a field of its own; a line with none has no such
-// key.
+// key. The count is written first. The header's total is max(logCount, lines held), and the pane says `+N more` for the
+// events that its lines do not show, so with the count first a /clear or a resume whose reset lands between the two
+// writes leaves the count behind the line, and no stray `+1 more`, whichever way it interleaves; with the line first
+// the reset would empty the log and the count would then rise above it for the rest of the conversation (the 0.4.0
+// live check, finding 7).
 async function addLog(
   $: EngineInterface, at: number, who: string, text: string, kind: LogKind, outcome?: string,
 ): Promise<void> {
   const entry: LogEntry = { at, who, text, kind, ...(outcome === undefined ? {} : { outcome }) }
-  await update($, logAtom, list => pushLog(list, entry))
   await update($, logCountAtom, count => count + 1)
+  await update($, logAtom, list => pushLog(list, entry))
 }
 
 // Whose line it is: `main`, or the type of the subagent that ran.
@@ -380,22 +398,34 @@ async function gitStatus($: EngineInterface, root: string, read: ChangesRead): P
 }
 
 // What differs from HEAD in the working tree: the files that changed, and the lines added and removed. Null when there
-// is nothing to show: outside a git repository, on a clean tree, when there is no status to read (gitStatus), or when
-// the reads of this root have stopped. A status that was cut gives the files it listed whole as a lower bound
+// is nothing to show: outside a git repository, on a clean tree, when there is no status to read (gitStatus), or while
+// the reads of this root wait (readRetryAt). A status that was cut gives the files it listed whole as a lower bound
 // (`hasMoreFiles`) and no lines. The lines are null when they cannot be had (an unborn HEAD has no HEAD to diff
 // against); `hasMoreAdded` says that `added` is a lower bound.
 // Two rules bound the cost. A read has READ_BUDGET_MS in all, from here: a call that finds none left is not made, and
 // the read ends as that call's failure would (readChanges). And the reads of a root stop once READ_THROWS_MAX of them
 // in a row had a status, or a diff against HEAD, that threw (readThrows): one count for each read, so that a status
-// that is fine does not clear a diff that keeps timing out. A read whose status and diff both ended without a throw
-// starts the count over; a throw of a later call of the read (the top of the repository, a new file) is none for the
-// root.
+// that is fine does not clear a diff that keeps timing out. The root then waits READ_RETRY_MS, counted from the start
+// of the read that stopped it, and gives no changes meanwhile (no mark in the pane); the first read at or after that
+// time tries again: with a throw the root waits another READ_RETRY_MS, and with none the count starts over. A read
+// whose status and diff both ended without a throw starts the count over; a throw of a later call of the read (the top
+// of the repository, a new file) is none for the root.
 async function gitChanges($: EngineInterface, root: string): Promise<Changes> {
   const held = readThrows.get(root) ?? 0
-  if (held >= READ_THROWS_MAX) return null
-  const read: ChangesRead = { endsAt: (await $.clock.now()) + READ_BUDGET_MS, isSpent: false, hasThrown: false }
+  const now = await $.clock.now()
+  const retryAt = readRetryAt.get(root)
+  if (retryAt !== undefined && now < retryAt) return null
+  const read: ChangesRead = { endsAt: now + READ_BUDGET_MS, isSpent: false, hasThrown: false }
   const changes = await readChanges($, root, read)
-  readThrows.set(root, read.hasThrown ? held + 1 : 0)
+  if (read.hasThrown) {
+    // The count stops at the max: a read that tries again after the wait, and throws, leaves it there.
+    const thrown = Math.min(held + 1, READ_THROWS_MAX)
+    readThrows.set(root, thrown)
+    if (thrown === READ_THROWS_MAX) readRetryAt.set(root, now + READ_RETRY_MS)
+  } else {
+    readThrows.set(root, 0)
+    readRetryAt.delete(root)
+  }
 
   return changes
 }
@@ -593,7 +623,7 @@ export const register: Register = on => {
     const started = await next(e)
     // The command only touches panes, so it may run while a turn is in flight.
     await $.command.register({
-      name: 'session-panel', description: 'Open or close the session stats pane', immediate: true,
+      name: 'session-panel', description: 'Open the session stats pane', immediate: true,
     })
     // The baseline, and the first Total. A reading that fails must not stop the timer or the opening of the pane.
     await chargeCost($, undefined).catch(() => undefined)
@@ -662,17 +692,14 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // A pane that is placed and shown is closed. One that is open but not in front of the session's other plugin panes, a
-  // tab behind another plugin pane or a pane that waits undrawn, is not closed: the person asks for it, so it is asked
-  // for again, which places a pane that waits, and with `focus`, which brings a tab forward (a request, which the
-  // surface may refuse).
+  // The command only opens. `UiPane.isShown` only ranks this plugin's panes, so a lone pane counts as shown even when a
+  // built-in desktop tab such as Terminal covers it (the 0.4.0 live check): the command cannot tell a pane in front
+  // from a hidden one, so it never closes, and the tab's own close mark closes the pane. The person asks for the pane,
+  // so it is asked for: a pane that is not open is opened, and one that is open in any state (in front, a tab behind
+  // another plugin pane, or waiting undrawn) is asked for again with `focus`, which places a pane that waits and brings
+  // a tab forward (a request, which the surface may refuse).
   on('command.run', { command: 'session-panel' }, async $ => {
     const pane = (await $.ui.panes()).find(listed => listed.id === PANE)
-    if (pane?.isPlaced === true && pane.isShown) {
-      await $.ui.close({ id: PANE })
-
-      return { text: 'Session pane closed.' }
-    }
     const focus = pane === undefined ? {} : { focus: true as const }
     const opened = await $.ui.open({ id: PANE, title: 'Session', ...focus })
     // As on an attach: a pane that opens asks for a read of the project, since the timer asks only for a pane in front
