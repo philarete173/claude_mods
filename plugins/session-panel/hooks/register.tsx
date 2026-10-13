@@ -81,15 +81,18 @@ const GIT_READ: string[] = [
 
 // The variables that such a call runs with, set over the process's own. git 2.44 and later, and some distributions'
 // 2.43 builds (a backport), honour GIT_NO_LAZY_FETCH; other git ignores it. GIT_CEILING_DIRECTORIES is not set: the mod
-// reads no env, so it cannot know $HOME, and a ceiling at the session root would hide the repository of a session that
-// starts in one of its folders.
+// reads no env, so it does not know $HOME. A ceiling at $HOME would only keep a folder outside git below it from
+// reading a repository at $HOME itself (git never holds the folder it starts in against a ceiling), and a ceiling at
+// the session root would hide the repository of a session that starts in one of its folders. So a session in such a
+// folder reads that repository, as `git status` there would, within READ_BUDGET_MS.
 const GIT_READ_ENV: Record<string, string> = { GIT_NO_LAZY_FETCH: '1' }
 
 // git's empty tree. As the source of attributes (GIT_ATTR_SOURCE) it leaves no .gitattributes in force, so no
 // attribute-selected filter (a clean or process filter, Git LFS among them) runs on an untracked file that a --no-index
-// call reads. `.git/info/attributes` and the person's own attributes file still apply, and a git that has no
-// GIT_ATTR_SOURCE ignores it. A SHA-256 repository rejects this id: git dies there, so its new files count no lines,
-// and the loop that counts them marks that (hasMoreAdded).
+// call reads. `.git/info/attributes` and the attributes file that `core.attributesFile` names (in the person's config,
+// or in the repository's own .git/config) still apply, and a git that has no GIT_ATTR_SOURCE ignores it. A SHA-256
+// repository rejects this id: git dies there, so its new files count no lines, and the loop that counts them marks that
+// (hasMoreAdded).
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 
 // What every --no-index call runs with: GIT_READ_ENV, and the empty tree as the source of attributes.
@@ -346,12 +349,13 @@ type ChangesRead = { endsAt: number; isSpent: boolean; hasThrown: boolean }
 // the diff against HEAD that counts toward the stop all the same, and it is harmless, since a new module starts its
 // counts over. A call that reads the tree (GIT_READ) passes `--no-optional-locks`: a plain one may refresh the index
 // and take index.lock, which makes the git commands of the person or the agent fail. So the index is never refreshed,
-// and a status and a diff each hash again the files whose stat data changed, on every read; the budget and the gap rule
-// (PROJECT_GAP_FACTOR) bound that. It passes `-c core.fsmonitor=false` too, or git may run the fsmonitor hook that the
-// person configured, or start its own daemon, and `-c diff.autoRefreshIndex=false`, or a diff of the tree refreshes the
-// index all the same, taking index.lock and rewriting .git/index. The `env` it is given, GIT_READ_ENV or, for a
-// `--no-index` call, NO_INDEX_ENV, keeps a partial clone from fetching the objects it lacks from its remote, which is
-// network.
+// and each status (two when the first lists an untracked folder) and the diff hash again the files whose stat data
+// changed, on every read, so a clean filter may run on a changed tracked file up to four times in a read; the budget
+// and the gap rule (PROJECT_GAP_FACTOR) bound that. It passes `-c core.fsmonitor=false` too, or git may run the
+// fsmonitor hook that the person configured, or start its own daemon, and `-c diff.autoRefreshIndex=false`, or a diff
+// of the tree refreshes the index all the same, taking index.lock and rewriting .git/index. The `env` it is given,
+// GIT_READ_ENV or, for a `--no-index` call, NO_INDEX_ENV, keeps a partial clone from fetching the objects it lacks from
+// its remote, which is network.
 async function gitRun(
   $: EngineInterface, argv: string[], cwd: string, read: ChangesRead, env?: Record<string, string>,
 ): Promise<ProcessRunResult | null> {
@@ -713,7 +717,7 @@ export const register: Register = on => {
     // usual. The finally lowers resetsRunning when a write throws too, as one does when the signal of the hook aborts:
     // it would stay above 0 otherwise, and no call would count again for the rest of the module's life. The count is
     // emptied before the log, as addLog writes the line before the count, so that the count never stands above the
-    // lines: not between the two writes, and not when a write between them throws.
+    // lines: not between the two writes, and not when the second of them throws.
     if (e.reason === 'clear' || e.reason === 'resume') {
       lastUsd = null
       handbacks.clear()

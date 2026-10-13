@@ -1739,7 +1739,7 @@ test('the minute read of a shown pane tries a stopped root again after 15 minute
 // is the usual one. Here the clock is set back by 45 minutes after the root was stopped, and the read is made at the
 // time that puts the clock at the start of the wait, a ms before it, or half an hour before it.
 const SET_BACK_CLOCKS: Array<[what: string, ahead: number, isRead: boolean]> = [
-  ['at the time the wait began', 0, false],
+  ['the time the wait began', 0, false],
   ['a ms before the wait began', -1, true],
   ['half an hour before the wait began', -30 * 60_000, true],
 ]
@@ -4648,6 +4648,7 @@ test('a reset seen between the first and the second of its two log writes has no
     await reset
     expect(Number(between.log.length === 0) + Number(between.logCount === 0)).toBe(1) // one of the two is emptied
     expect(Math.max(between.logCount, between.log.length) - between.log.length).toBe(0) // none counted but the lines
+    // No pin, only a guard: an empty log draws no Log section, so the old order showed no `+N more` here either.
     expect(more).toBeUndefined()
     const after = await readState($)
     expect([after.log, after.logCount]).toEqual([[], 0])
