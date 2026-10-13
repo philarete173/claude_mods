@@ -236,26 +236,30 @@ const CLOCK_SKEW: Plugin = {
     on('clock.now', async (_$, e, next) => ({ value: ((await next(e)) as { value: number }).value + offset }))
   },
 }
-// A plugin above the mod's that holds one write of the log, or of its count, as a host that is slow to answer may:
-// after `arm-hold`, the first such write lands, and the writer is answered 100 ms later. The hook of the mod that made
-// the write waits meanwhile, which is the time between the two writes of a line, so a /clear that comes then lands
-// there, whichever of the two the mod writes first. Like any plugin of a test it closes over nothing of this file.
+// A plugin above the mod's that holds one write of the mod's values, as a host that is slow to answer may. `arm-hold`
+// takes the options in JSON (`keys`: the values to watch, the log and its count when left out; `ms`: how long, 100 when
+// left out; `mode`: `after`, the default, lets the write land and answers the writer `ms` later, `before` holds the
+// write itself, which lands after `ms`, and `refuse` fails it), and the first such write after that is the one it
+// holds. The hook of the mod that made the write waits meanwhile, which is the time between its writes, so a /clear
+// that comes then lands there. Like any plugin of a test it closes over nothing of this file.
 const WRITE_HOLDER: Plugin = {
   name: 'write-holder',
   tier: 'prepend',
   register(on) {
-    let isArmed = false
-    on('command.run', { command: 'arm-hold' }, async () => {
-      isArmed = true
+    let armed: { keys: string[]; ms: number; mode: string } | null = null
+    on('command.run', { command: 'arm-hold' }, async (_$, e) => {
+      armed = { keys: ['log', 'logCount'], ms: 100, mode: 'after', ...JSON.parse(e.args === '' ? '{}' : e.args) }
 
       return { text: 'armed' }
     })
     on('state.set', async ($, e, next) => {
+      const hold = armed !== null && e.plugin === 'session-panel' && armed.keys.includes(e.key) ? armed : null
+      if (hold === null) return next(e)
+      armed = null
+      if (hold.mode === 'refuse') return { deny: 'refused' }
+      if (hold.mode === 'before') await $.clock.sleep(hold.ms)
       const written = await next(e)
-      if (isArmed && e.plugin === 'session-panel' && (e.key === 'log' || e.key === 'logCount')) {
-        isArmed = false
-        await $.clock.sleep(100)
-      }
+      if (hold.mode === 'after') await $.clock.sleep(hold.ms)
 
       return written
     })
@@ -290,6 +294,11 @@ const writeStore = ($: Engine, value: unknown) =>
 const mountPane = ($: Engine) => $.ui.mount({
   plugin: 'session-panel', surface: 'desktop', component: 'Pane', requestId: 'session-panel', props: PANE_PROPS,
 })
+
+// Arms WRITE_HOLDER for the next write of one of `keys` (the log or its count when none are given): see the plugin.
+const armHold = (
+  $: Engine, options: { keys?: string[]; ms?: number; mode?: 'after' | 'before' | 'refuse' } = {},
+) => $.command.run({ ...RUN, command: 'arm-hold', args: JSON.stringify(options) })
 
 // claude-code/testing has no toBeCloseTo, so a tolerance is checked by hand.
 function expectNear(actual: number | null | undefined, expected: number, eps = 1e-9): void {
@@ -4397,7 +4406,7 @@ test('between the two writes of a log line the pane draws no +N more', WITH_WRIT
   await $.session.start(START)
   await clock.advance(1)
   await $.turn.start({ text: 'one', turnId: 't1' })
-  await $.command.run({ ...RUN, command: 'arm-hold' })
+  await armHold($)
 
   const second = $.turn.start({ text: 'two', turnId: 't2' })
   await clock.settle() // one write of its line has landed, and the hook waits for the answer to it
@@ -4428,7 +4437,7 @@ for (const reason of ['clear', 'resume'] as const) {
       bottom(on, clock)
       await $.session.start(START)
       await clock.advance(1)
-      await $.command.run({ ...RUN, command: 'arm-hold' })
+      await armHold($)
 
       const first = $.turn.start({ text: 'one', turnId: 't1' })
       await clock.settle() // one write of its line has landed, and the hook waits for the answer to it
@@ -4450,3 +4459,134 @@ for (const reason of ['clear', 'resume'] as const) {
       await ui.unmount()
     })
 }
+
+// What a reset does to the log, and what a call that writes a line while it runs may leave behind: a count above the
+// lines, which stands for the rest of the conversation as a stray `+1 more` on every line after (the 0.4.0 live check,
+// finding 7). A call counts only when no reset was running when it started and none has started since, and the second
+// check is in the update of the count, which runs again when its write misses. The tests below put a call and a
+// reset in the interleavings that the rule has to meet with the holder, and end with one more line, which must be the
+// first one counted: one line held, and a count of 1.
+const endSession = ($: Engine, reason: 'clear' | 'resume' = 'clear') =>
+  $.session.end({ reason, sessionId: 's1', resume: { id: 's1' } })
+
+// A call starts while a reset runs. The reset has raised the epoch, so the call takes the new one, and its write of the
+// log has not come yet: the line of the call lands, the reset empties the log, and the count of the call, which lands
+// after the end of the reset, would stand one above the lines. So a call that finds a reset running at its start leaves
+// its count out. The first hold keeps the reset after its write of `agents`, the second keeps the call after its line
+// has landed, until the reset is over. With two resets one of them has ended by the time the call starts and the other
+// still runs: a flag, or the parity of the epoch, would take that end for the end of both.
+const RESETS_AT_THE_START: Array<[what: string, more: number]> = [
+  ['a reset runs', 0],
+  ['two resets overlap and one of them has ended', 1],
+]
+for (const [what, more] of RESETS_AT_THE_START) {
+  test(`a call that starts when ${what} leaves its count out: the next line is the first one counted`,
+    WITH_WRITE_HOLDER, async ($, on) => {
+      const clock = mock.clock(on, { now: 1_000_000 })
+      bottom(on, clock)
+      await $.session.start(START)
+      await clock.advance(1)
+
+      await armHold($, { keys: ['agents'], ms: 100 })
+      const reset = endSession($) // it has started, and waits after its write of `agents`: the log is not emptied yet
+      await clock.settle()
+      for (let i = 0; i < more; i += 1) await endSession($, 'resume') // another reset runs, and ends
+      await armHold($, { ms: 200 })
+      const call = $.turn.start({ text: 'one', turnId: 't1' }) // it starts while the first reset runs
+      await clock.settle() // its line has landed, and its hook waits for the answer to that write
+      const between = await readState($)
+
+      await clock.advance(100) // the reset goes on: it empties the log and the count, and ends
+      await reset
+      await clock.advance(100) // the call goes on: its count
+      await call
+      expect([between.agents, (between.log ?? []).length]).toEqual([{}, 1]) // `agents` was written, the log not yet
+      await $.turn.start({ text: 'two', turnId: 't2' })
+
+      const { log, logCount } = await readState($)
+      expect([log.map(line => line.text), logCount]).toEqual([['two'], 1])
+      const ui = await mountPane($)
+      expect(await ui.find({ type: 'Text', text: /^\+\d+ more$/ })).toBeUndefined()
+      await ui.unmount()
+    })
+}
+
+// A count that has been read before a reset and is written after it: the write misses, since the reset wrote the count,
+// and the update runs again on what the reset left. The check of the call must be in the update, where that retry meets
+// it, and not before it, or the retry adds one to the 0 that the reset wrote. The hold keeps the write of the count,
+// which the update has made from its read, while a whole reset runs.
+test('a count read before a reset, whose write misses after it, adds nothing when the update runs again',
+  WITH_WRITE_HOLDER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+
+    await armHold($, { keys: ['logCount'], mode: 'before' })
+    const call = $.turn.start({ text: 'one', turnId: 't1' })
+    await clock.settle() // its line has landed, and the write of its count waits: the count it read was 0
+    const between = await readState($)
+    await endSession($) // a whole reset, which writes the count too
+    await clock.advance(100) // the write of the call goes on: it misses, and the update runs again
+    await call
+    expect([(between.log ?? []).length, between.logCount ?? 0]).toEqual([1, 0]) // the line has landed, the count not
+    await $.turn.start({ text: 'two', turnId: 't2' })
+
+    const { log, logCount } = await readState($)
+    expect([log.map(line => line.text), logCount]).toEqual([['two'], 1])
+    const ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: /^\+\d+ more$/ })).toBeUndefined()
+    await ui.unmount()
+  })
+
+// The same, with the retry coming after the count of the reset but before its end: the reset began after the call did,
+// and is still running, so it is the epoch that tells the call, raised at the start of the reset and not at its end.
+// The first hold keeps the write of the count of the call, as above; the second keeps the reset after its last write,
+// the one to `usage`, until the call has gone on.
+test('a count whose update runs again after the count of a reset, with the reset still running, adds nothing',
+  WITH_WRITE_HOLDER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+
+    await armHold($, { keys: ['logCount'], mode: 'before', ms: 100 })
+    const call = $.turn.start({ text: 'one', turnId: 't1' })
+    await clock.settle() // its line has landed, and the write of its count waits: the count it read was 0
+    await armHold($, { keys: ['usage'], ms: 200 })
+    const reset = endSession($) // it has written the log and the count, and waits after its last write
+    await clock.settle()
+    const between = await readState($)
+
+    await clock.advance(100) // the write of the call goes on: it misses, the reset is not over, the update runs again
+    await call
+    await clock.advance(100) // the reset ends
+    await reset
+    expect([between.log, between.logCount]).toEqual([[], 0]) // the reset had emptied both, and was not over
+    await $.turn.start({ text: 'two', turnId: 't2' })
+
+    const { log, logCount } = await readState($)
+    expect([log.map(line => line.text), logCount]).toEqual([['two'], 1])
+  })
+
+// A write of the reset that fails, as one does when the signal of the hook aborts: the hook fails, which the engine
+// takes as a hook to skip, with the epoch raised and the log not emptied. The reset counts itself as running while its
+// writes go on, and must stop counting itself when they end by a failure too, or no call would count again for the
+// rest of the module's life.
+test('a reset that is cut short by a write that fails is over: the lines after it are counted', WITH_WRITE_HOLDER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.turn.start({ text: 'zero', turnId: 't0' })
+
+    await armHold($, { keys: ['agents'], mode: 'refuse' })
+    await endSession($) // its write of `agents` fails, and the reset with it: the engine skips the hook that failed
+    const cut = await readState($)
+    await $.turn.start({ text: 'one', turnId: 't1' })
+
+    expect((cut.log ?? []).map(line => line.text)).toEqual(['zero']) // the reset did not get as far as the log
+    const { log, logCount } = await readState($)
+    expect([log.map(line => line.text), logCount]).toEqual([['one', 'zero'], 2])
+  })

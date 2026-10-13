@@ -118,11 +118,18 @@ let lastUsd: number | null = null
 // hand-back so far, so a different shape only leaves the answer out. It is emptied with the ledger.
 const handbacks = new Map<string, string>()
 
-// How many times a /clear or a resume has emptied the log since this module loaded. The reset raises it before it
-// empties the atoms, and addLog takes it when it starts: a call that finds it changed when its count is due began
-// before a reset, which has emptied the log and the count under it, so the call leaves its count out. A reload of the
-// module starts it over; a call of the old module compares with the old module's own.
+// How many times a /clear or a resume has started since this module loaded. The reset raises it once, at its start,
+// before it writes any atom, and addLog takes it when it starts: a call that finds it changed when it counts began
+// before a reset that has started since, which empties the log and the count under it, and the call does not count. A
+// reload of the module starts it over; a call of the old module compares with the old module's own.
 let logEpoch = 0
+
+// How many resets are between their start and their end. The reset raises it with logEpoch and lowers it when its
+// writes are over, whether they all landed or one threw (a write fails when the signal of the hook aborts, say), so
+// that a failure cannot stop all counting for the rest of the module's life. A call that starts while it is above 0
+// does not count: the write of the reset to the log may still come after the line of the call, and empty it. It is a
+// count, not a flag, and not the parity of logEpoch: resets that overlap are each running until their own end.
+let resetsRunning = 0
 
 // The model's context window that the last session.measure brought. It is null until a measure sets it: the first one
 // after the module loads only stores it, since session.start has read the breakdown already.
@@ -241,18 +248,23 @@ function inBackground($: EngineInterface, job: () => Promise<void>): void {
 // was last emptied. The outcome of an action, a mark and its time, is a field of its own; a line with none has no such
 // key. The line goes first. The header's total is max(logCount, lines held) and the pane says `+N more` for the events
 // that its lines do not show, so a count written first would stand one above the lines between the two writes, and a
-// redraw there would flash a `+1 more` on each of the first 60 events of a conversation. A /clear or a resume that
-// lands between the writes empties the log and the count under this call, and a count written after it would stand one
-// above the lines for the rest of the conversation (the 0.4.0 live check, finding 7). So the call takes logEpoch when
-// it starts, and leaves its count out when a reset has raised it since. A line of the old conversation may then land in
-// the new one, which the header's total takes in: it is max(logCount, lines held).
+// redraw there would flash a `+1 more` on each of the first 60 events of a conversation. A /clear or a resume empties
+// the log and the count, and a count that lands after the reset's own write to it would stand one above the lines for
+// the rest of the conversation (the 0.4.0 live check, finding 7). So a call counts only when no reset was running when
+// it started and none has started since (resetsRunning, logEpoch). A reset that runs at the start matters because its
+// write to the log may still come after the line of the call, and empty it. The second check is in the update of the
+// count, not before it: that update runs again when its write misses, as it does when a reset wrote the count after the
+// update had read it, and the retry has to meet the reset. A call that does not count writes the count as it was. A
+// line of the old conversation may land in the new one then; the count stands behind the lines, never above them, and
+// the header's total takes the lines in: it is max(logCount, lines held).
 async function addLog(
   $: EngineInterface, at: number, who: string, text: string, kind: LogKind, outcome?: string,
 ): Promise<void> {
   const entry: LogEntry = { at, who, text, kind, ...(outcome === undefined ? {} : { outcome }) }
   const epoch = logEpoch
+  const isResetting = resetsRunning > 0
   await update($, logAtom, list => pushLog(list, entry))
-  if (epoch === logEpoch) await update($, logCountAtom, count => count + 1)
+  await update($, logCountAtom, count => (!isResetting && epoch === logEpoch ? count + 1 : count))
 }
 
 // Whose line it is: `main`, or the type of the subagent that ran.
@@ -690,19 +702,26 @@ export const register: Register = on => {
     // A /clear or a resume starts the conversation over, and a resume puts another conversation in place of this one.
     // The module, its timers and the pane carry on; the ledger starts over and the hand-backs not read are dropped,
     // and the context reads empty until the next response (the window, the cost and the limits are the session's
-    // still). The log epoch goes up first, before any atom is emptied: an addLog that began earlier then leaves its
-    // count out (the log and the count it would add to are the old conversation's), and one that begins later takes the
-    // new epoch, so its line and its count are the new conversation's.
+    // still). The reset marks itself before it writes any atom: logEpoch goes up, and resetsRunning with it until the
+    // writes are over. An addLog that began earlier, or that begins while the reset runs, leaves its count out (its
+    // line may land in the log before the reset empties it, or after), and one that begins after the end counts as
+    // usual. The finally lowers resetsRunning when a write throws too, as one does when the signal of the hook aborts:
+    // it would stay above 0 otherwise, and no call would count again for the rest of the module's life.
     if (e.reason === 'clear' || e.reason === 'resume') {
       lastUsd = null
       handbacks.clear()
       logEpoch += 1
-      await update($, turnAtom, () => turnAtom.initial)
-      await update($, lastTurnAtom, () => lastTurnAtom.initial)
-      await update($, agentsAtom, () => agentsAtom.initial)
-      await update($, logAtom, () => logAtom.initial)
-      await update($, logCountAtom, () => logCountAtom.initial)
-      await update($, usageAtom, held => ({ ...held, contextTokens: undefined, contextPct: undefined }))
+      resetsRunning += 1
+      try {
+        await update($, turnAtom, () => turnAtom.initial)
+        await update($, lastTurnAtom, () => lastTurnAtom.initial)
+        await update($, agentsAtom, () => agentsAtom.initial)
+        await update($, logAtom, () => logAtom.initial)
+        await update($, logCountAtom, () => logCountAtom.initial)
+        await update($, usageAtom, held => ({ ...held, contextTokens: undefined, contextPct: undefined }))
+      } finally {
+        resetsRunning -= 1
+      }
     }
 
     return next(e)
