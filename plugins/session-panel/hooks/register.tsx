@@ -706,7 +706,9 @@ export const register: Register = on => {
     // writes are over. An addLog that began earlier, or that begins while the reset runs, leaves its count out (its
     // line may land in the log before the reset empties it, or after), and one that begins after the end counts as
     // usual. The finally lowers resetsRunning when a write throws too, as one does when the signal of the hook aborts:
-    // it would stay above 0 otherwise, and no call would count again for the rest of the module's life.
+    // it would stay above 0 otherwise, and no call would count again for the rest of the module's life. The count is
+    // emptied before the log, as addLog writes the line before the count, so that the count never stands above the
+    // lines: not between the two writes, and not when a write between them throws.
     if (e.reason === 'clear' || e.reason === 'resume') {
       lastUsd = null
       handbacks.clear()
@@ -716,8 +718,8 @@ export const register: Register = on => {
         await update($, turnAtom, () => turnAtom.initial)
         await update($, lastTurnAtom, () => lastTurnAtom.initial)
         await update($, agentsAtom, () => agentsAtom.initial)
-        await update($, logAtom, () => logAtom.initial)
         await update($, logCountAtom, () => logCountAtom.initial)
+        await update($, logAtom, () => logAtom.initial)
         await update($, usageAtom, held => ({ ...held, contextTokens: undefined, contextPct: undefined }))
       } finally {
         resetsRunning -= 1

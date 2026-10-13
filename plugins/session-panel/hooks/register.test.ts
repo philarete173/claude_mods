@@ -238,23 +238,30 @@ const CLOCK_SKEW: Plugin = {
 }
 // A plugin above the mod's that holds one write of the mod's values, as a host that is slow to answer may. `arm-hold`
 // takes the options in JSON (`keys`: the values to watch, the log and its count when left out; `ms`: how long, 100 when
-// left out; `mode`: `after`, the default, lets the write land and answers the writer `ms` later, `before` holds the
-// write itself, which lands after `ms`, and `refuse` fails it), and the first such write after that is the one it
-// holds. The hook of the mod that made the write waits meanwhile, which is the time between its writes, so a /clear
-// that comes then lands there. Like any plugin of a test it closes over nothing of this file.
+// left out; `skip`: how many such writes go through first, 0 when left out; `mode`: `after`, the default, lets the
+// write land and answers the writer `ms` later, `before` holds the write itself, which lands after `ms`, and `refuse`
+// fails it), and the first such write after that, the skipped ones apart, is the one it holds. The hook of the mod that
+// made the write waits meanwhile, which is the time between its writes, so a /clear that comes then lands there. Like
+// any plugin of a test it closes over nothing of this file.
 const WRITE_HOLDER: Plugin = {
   name: 'write-holder',
   tier: 'prepend',
   register(on) {
-    let armed: { keys: string[]; ms: number; mode: string } | null = null
+    let armed: { keys: string[]; ms: number; skip: number; mode: string } | null = null
     on('command.run', { command: 'arm-hold' }, async (_$, e) => {
-      armed = { keys: ['log', 'logCount'], ms: 100, mode: 'after', ...JSON.parse(e.args === '' ? '{}' : e.args) }
+      const given = JSON.parse(e.args === '' ? '{}' : e.args)
+      armed = { keys: ['log', 'logCount'], ms: 100, skip: 0, mode: 'after', ...given }
 
       return { text: 'armed' }
     })
     on('state.set', async ($, e, next) => {
       const hold = armed !== null && e.plugin === 'session-panel' && armed.keys.includes(e.key) ? armed : null
       if (hold === null) return next(e)
+      if (hold.skip > 0) {
+        hold.skip -= 1
+
+        return next(e)
+      }
       armed = null
       if (hold.mode === 'refuse') return { deny: 'refused' }
       if (hold.mode === 'before') await $.clock.sleep(hold.ms)
@@ -297,7 +304,7 @@ const mountPane = ($: Engine) => $.ui.mount({
 
 // Arms WRITE_HOLDER for the next write of one of `keys` (the log or its count when none are given): see the plugin.
 const armHold = (
-  $: Engine, options: { keys?: string[]; ms?: number; mode?: 'after' | 'before' | 'refuse' } = {},
+  $: Engine, options: { keys?: string[]; ms?: number; skip?: number; mode?: 'after' | 'before' | 'refuse' } = {},
 ) => $.command.run({ ...RUN, command: 'arm-hold', args: JSON.stringify(options) })
 
 // claude-code/testing has no toBeCloseTo, so a tolerance is checked by hand.
@@ -4589,4 +4596,59 @@ test('a reset that is cut short by a write that fails is over: the lines after i
     expect((cut.log ?? []).map(line => line.text)).toEqual(['zero']) // the reset did not get as far as the log
     const { log, logCount } = await readState($)
     expect([log.map(line => line.text), logCount]).toEqual([['one', 'zero'], 2])
+  })
+
+// The reset empties the count before the log, as addLog writes the line before the count: the count never stands above
+// the lines. The two writes are two steps, and the reset may be seen between them, or be cut short there by a write
+// that fails (the signal of the hook aborts, say). With the log emptied first, the old count would stand over an empty
+// log, and the next line would show `+N more` for the whole of the old conversation. The two tests go by order, the
+// first and the second of the two writes, so that they pin the rule and not the order of the lines in the code: after
+// the first of them the count is not above the lines held, whichever of the two it was.
+test('a reset seen between the first and the second of its two log writes has no count above the lines',
+  WITH_WRITE_HOLDER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.turn.start({ text: 'one', turnId: 't1' })
+    await $.turn.start({ text: 'two', turnId: 't2' }) // two lines on the log, and a count of 2
+
+    await armHold($) // the first of the two writes lands, and the reset waits after it
+    const reset = endSession($)
+    await clock.settle()
+    const between = await readState($)
+    const ui = await mountPane($)
+    const more = await ui.find({ type: 'Text', text: /^\+\d+ more$/ })
+    await ui.unmount()
+
+    await clock.advance(100) // the second write comes, and the reset ends
+    await reset
+    expect(Number(between.log.length === 0) + Number(between.logCount === 0)).toBe(1) // one of the two is emptied
+    expect(Math.max(between.logCount, between.log.length) - between.log.length).toBe(0) // none counted but the lines
+    expect(more).toBeUndefined()
+    const after = await readState($)
+    expect([after.log, after.logCount]).toEqual([[], 0])
+  })
+
+test('a reset whose second log write fails has no count above the lines, and nor has the next line',
+  WITH_WRITE_HOLDER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.turn.start({ text: 'one', turnId: 't1' })
+    await $.turn.start({ text: 'two', turnId: 't2' }) // two lines on the log, and a count of 2
+
+    await armHold($, { mode: 'refuse', skip: 1 }) // the first of the two writes goes through, the second fails
+    await endSession($) // the engine skips the hook that failed
+    const cut = await readState($)
+    expect(Number(cut.log.length === 0) + Number(cut.logCount === 0)).toBe(1) // one of the two is emptied
+    expect(Math.max(cut.logCount, cut.log.length) - cut.log.length).toBe(0) // none counted but the lines
+
+    await $.turn.start({ text: 'three', turnId: 't3' })
+    const { log, logCount } = await readState($)
+    expect(Math.max(logCount, log.length) - log.length).toBe(0)
+    const ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: /^\+\d+ more$/ })).toBeUndefined()
+    await ui.unmount()
   })
