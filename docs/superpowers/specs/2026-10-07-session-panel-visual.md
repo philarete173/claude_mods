@@ -817,14 +817,20 @@ drawn. On the desktop that is 3 cells = the 2-cell icon slot + the 1-cell gap. O
 ```tsx
 // The cells that the name of a chip takes, counted high, because the estimate of chipRows must err on the side of more
 // rows (the 0.4.0 spec, §3.2): `.length` counts a CJK character as one cell, and it is drawn two wide. Every code point
-// above U+007F counts as 2 cells (the wide ones, CJK and emoji, and some that are not, an accented letter), every other
-// as 1. It goes by code point, not by UTF-16 unit: an astral emoji is one code point and 2 cells, where its two units
-// would make 4.
+// above U+007F counts as 2 cells (the wide ones, CJK and emoji, and some that are not, an accented letter), a capital
+// ASCII letter (A to Z) as 1.5, every other as 1, and the total of a name is rounded up. A capital is more than a cell
+// because the desktop's font is proportional: the live check of 2026-10-13 (docs/live-check-2026-10-13-0.4.0.md)
+// measured capitals at about 9 to 11 px against the 8 px of a cell (CELL_PX), so two long names in capitals at the edge
+// of a line made the estimate a row short. It goes by code point, not by UTF-16 unit: an astral emoji is one code point
+// and 2 cells, where its two units would make 4.
 const nameCells = (name: string): number => {
   let cells = 0
-  for (const char of name) cells += (char.codePointAt(0) ?? 0) > 0x7f ? 2 : 1
+  for (const char of name) {
+    const code = char.codePointAt(0) ?? 0
+    cells += code > 0x7f ? 2 : char >= 'A' && char <= 'Z' ? 1.5 : 1
+  }
 
-  return cells
+  return Math.ceil(cells)
 }
 
 // How many lines the chips of the MCP section wrap into in a body of `columns` cells: the one place where the rows of a
@@ -1099,7 +1105,8 @@ at their natural height, in one Box, and then the `+N more` line.
     spec, §8.1). A folded section is its rule and header. A block that is left out is 0 rows.
   - The one estimate is the chips of MCP (`chipRows`, §6.8), because the layout engine wraps them: whole chips, greedy,
     over `bodyColumns − 2` (`CHIP_MARGIN_CELLS`), 2 cells apart (`CHIP_GAP_CELLS`). A chip is the dot's 2 cells and the
-    name's, counted by code point with every code point above U+007F as 2 cells (`nameCells`).
+    name's, counted by code point: every code point above U+007F as 2 cells, a capital ASCII letter as 1.5, any other as
+    1, and the name's total rounded up (`nameCells`).
 - **Errors go one way.**
   - A count that is too high leaves a spare row. It sits between the last Log line and `+N more`, since the tail's
     `flexGrow` takes the spare rows. When the Log has no tail or no `+N more` line, it is at the bottom of the pane.
@@ -1317,9 +1324,9 @@ Checks on the first live render, before the tests are frozen:
    shows within about a minute, with no new turn: the project is read on every second tick of the 30-second timer, while
    the pane is placed and shown. The Session pane alone is always shown (`isShown` names only the plugin pane in front,
    §4.1 of the main spec), so a session that is not in front reads too, unless the desktop unplaces its pane (check 13).
-   Opening the pane reads at once, and so does `/session-panel` on a pane that is not shown, which it asks to bring
-   forward instead of closing it. In a new session the changes row is absent until the first turn of the main agent:
-   before it only the folder and the branch show.
+   Opening the pane reads at once, and so does `/session-panel`, which never closes the pane: on an open pane it asks to
+   bring it forward. In a new session the changes row is absent until the first turn of the main agent: before it only
+   the folder and the branch show.
 
 Checks since Tasks 11 and 12, for the 0.3.0 release:
 

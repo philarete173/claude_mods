@@ -38,8 +38,9 @@ The marketplace is called `philarete-mods`, while the repository is `claude_mods
 In the desktop app, `/plugin` does not run in the Code tab. Add the marketplace with the commands above in a terminal,
 or through **+** > **Plugins** > **Add plugin**.
 
-On the desktop the pane opens by itself when a session starts. `/session-panel` opens or closes it; in a terminal it
-is the only way to open it. It works mid-turn too.
+On the desktop the pane opens by itself when a session starts. `/session-panel` opens it, or asks to bring it forward
+when it is open; in a terminal it is the only way to open it. It works mid-turn too. The command never closes the pane:
+its close mark does (ctrl+x x in a terminal).
 
 ## Update
 

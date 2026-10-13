@@ -29,22 +29,24 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   that ended after its call returned) show without a new turn. A pane counts as shown when it is in front of the
   session's other plugin panes, so the Session pane, when it is alone, always is: in the usual setup every session whose
   pane is open and placed keeps its minute read (bounded by the wait after a slow read and the 30 s budget below),
-  whichever tab or session the desktop has in front. Opening the pane reads at once, and `/session-panel` on a pane that
-  is open but not shown, or waits undrawn, asks to bring it forward and reads instead of closing it; the surface grants
-  that only while the prompt has the keys over an empty composer, and the pane then holds the keyboard until Esc. After
-  a slow read the next one waits four times as long as that read took, at most four minutes, and the changes of one read
-  have 30 s in all. A folder whose reads time out twice in a row (a `git status`, or a `git diff` against HEAD, that
-  times out or cannot start), such as a dotfiles repository in `$HOME`, is given up for changes while the mod lives,
-  whichever other folder is read; its branch still shows. Outside a repository only the folder shows; a clean tree has
-  no changes row.
+  whichever tab or session the desktop has in front. Opening the pane reads at once. `/session-panel` never closes the
+  pane, since it cannot tell a pane in front from one that a built-in tab such as Terminal covers: on a pane that is
+  open in any state it asks to bring it forward and reads. The surface grants that only while the prompt has the keys
+  over an empty composer, and the pane then holds the keyboard until Esc. The pane's close mark closes it (ctrl+x x in a
+  terminal). After a slow read the next one waits four times as long as that read took, at most four minutes, and the
+  changes of one read have 30 s in all. A folder whose reads time out twice in a row (a `git status`, or a `git diff`
+  against HEAD, that times out or cannot start), such as a dotfiles repository in `$HOME`, has its changes left unread
+  for 15 minutes, whichever other folder is read, and then one read tries again; meanwhile its branch still shows and
+  the changes row is left out. Outside a repository only the folder shows; a clean tree has no changes row.
 - **Usage**: the plan limits (5-hour, Weekly, Spend) as meters with a countdown to each reset. Hidden when the engine
   reports no plan limits, for example with an API key or a third-party provider.
 - **Turn stats**: the last finished turn of the main agent (a turn stopped before any response leaves the previous
   one shown): response and whole-turn speed (tok/s), elapsed, model and tool time, average time to first token,
   steps, tokens in (what the turn sent at full price or more: the input that was not cached and what was written to
   the cache; what it read from the cache is cheap and left out, and the cache hit rate still counts it) and out, cache
-  hit rate and cost. So `↑` follows the cost: a usual turn reads `3.1k ↑`, and a turn after the cache went cold
-  `92k ↑`.
+  hit rate and cost. So `↑` roughly follows the cost: a usual turn reads `3.1k ↑`, and a turn after the cache went cold
+  `92k ↑`. Only roughly, since a cache read still costs a tenth of the input price: a long turn over a large context can
+  spend most of its cost on the reads that `↑` leaves out.
 - **Subagents**: up to 8 rows, running ones first, in columns: a status mark, the description, `@type` and cost; the
   rest are counted as `+N more`. In a narrow pane `@type` gives way first. A subagent resumed with SendMessage shows
   as running again.
@@ -74,10 +76,10 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   (the bidi controls, zero-width spaces, the BOM and the rest) are taken out of the branch, the folder name, the
   Subagents rows, the MCP server names and every log text, since a U+202E would reorder what the pane shows. A ZWJ or
   ZWNJ stays only between two characters that are above U+007F and are no spaces, so emoji sequences joined by ZWJ stay
-  whole and Persian and Indic scripts keep their joiners. The flags of England, Scotland and Wales lose their tag
-  characters (tags can carry invisible ASCII) and show as a plain black flag. Beside an ASCII character, a space of any
-  kind or an end of the text a joiner would join nothing, and it could hide a character in a branch name or split a
-  secret so that its mask misses it, so it goes.
+  whole and Persian and Indic scripts keep their joiners. Tag characters go too, since they can carry invisible ASCII,
+  except in the flags of England, Scotland and Wales, which stay whole; any other run of tags after a black flag goes
+  and leaves the plain black flag. Beside an ASCII character, a space of any kind or an end of the text a joiner would
+  join nothing, and it could hide a character in a branch name or split a secret so that its mask misses it, so it goes.
   Common secret patterns (tokens, keys, passwords in URLs and flags) are masked.
 
 ## How costs are measured
@@ -106,18 +108,23 @@ Total = Session + Subagents.
   branch only (`git branch` runs no filters). A reload of the mod waits for the next turn again.
 - Untracked files are read with no `.gitattributes` filter: `GIT_ATTR_SOURCE` points at git's empty tree, so no
   attribute-selected filter (a clean or process filter, Git LFS) runs on one. A git that does not know the variable
-  ignores it. `.git/info/attributes` and your own attributes file (`core.attributesFile`) still apply: they are local
-  config that no clone brings.
+  ignores it. `.git/info/attributes` and the attributes file that `core.attributesFile` names (in your git config or in
+  the repository's own `.git/config`) still apply: no clone brings either.
 - Your `status.showUntrackedFiles` is followed: the first `git status` runs with no `-u` flag, so `no` (as in a dotfiles
   repository in `$HOME`) walks no untracked file, and only when that status lists an untracked folder does a second one,
   with `-uall`, count the files in it. A nested repository that is not ignored, such as a worktree inside the
   repository, is always listed as an untracked folder, so with one every read runs both statuses; the budget bounds
-  that. `GIT_CEILING_DIRECTORIES` is not set: the mod reads no env, so it cannot know `$HOME`, and a ceiling at the
-  session root would hide the repository of a session started in one of its folders. The status and the diff both
-  re-hash the files whose stat data changed, since the mod never refreshes the index; the budget and the gap between
-  reads bound that.
+  that. `GIT_CEILING_DIRECTORIES` is not set: the mod reads no environment variable, so it does not know `$HOME`. A
+  ceiling at `$HOME` would only keep a folder outside git below it from reading a repository in `$HOME` itself (git
+  never holds the folder it starts in against a ceiling), and a ceiling at the session root would hide the repository of
+  a session started in one of its folders. So a session in such a folder reads that repository, as `git status` there
+  does, within the budget. Each status and the diff re-hash the files whose stat data changed, since the mod never
+  refreshes the index, so a clean filter can run on a changed tracked file up to four times in one read when the second
+  status runs; the budget and the gap between reads bound that.
 - A read gives up early. The changes of one read have 30 s in all: each git call gets the time left, up to its own 10 s,
-  and when none is left the read ends as that call's failure would. The count of new files stops at its first failure,
-  and the changes of a folder are no longer read once two reads in a row had a `git status`, or a `git diff` against
-  HEAD, that timed out or failed to start. The count is kept for each folder, so reading another one does not reset it.
+  and when none is left the read ends as that call's failure would. The count of new files stops at its first failure.
+  Once two reads in a row had a `git status`, or a `git diff` against HEAD, that timed out or failed to start, the
+  changes of that folder are not read for 15 minutes; then one read tries again, another 15 minutes follow if it fails
+  too, and one that ends well reads as before. The count is kept for each folder, so reading another one does not reset
+  it.
 - The mod reads no file itself: git counts the lines.

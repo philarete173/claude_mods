@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.1 — 2026-10-13
+
+- `/session-panel` only opens the pane, or asks to bring it forward. It no longer closes it: a lone pane counts as
+  shown even behind a built-in tab such as Terminal, so the command closed a pane it should have raised. The pane's
+  close mark closes it (ctrl+x x in a terminal).
+- A folder whose changes were given up after two failed reads is read again after 15 minutes, instead of never while
+  the mod lives.
+- Only the first 4096 characters of a subagent's answer are processed for its `done` line, so a long answer no longer
+  takes seconds to process.
+- In the estimate of the MCP chips, a capital ASCII letter counts 1.5 cells, since the desktop draws capitals wider.
+- The flags of England, Scotland and Wales stay whole; other tag characters still go.
+- A `/clear` or a resume that lands while the Log writes a line no longer leaves a stray `+1 more`.
+
 ## 0.4.0 — 2026-10-13
 
 - The Log's header shows how many events it has seen. `/clear`, resume and restarting Claude Code start the count over.
@@ -16,6 +29,8 @@
 - The plugin's listing metadata is new: a homepage, the repository, the license, keywords and the author's URL.
 - The full reference moved to [the plugin's README](plugins/session-panel/README.md).
 - The code is unchanged.
+- The fold state starts over under the new name: the store file is the new plugin's, and the old one is not carried
+  over.
 
 ## 0.3.1 — 2026-10-09
 

@@ -2494,7 +2494,7 @@ test('the MCP servers wrap as whole chips: a green dot, the name in the plain co
 
 // A chip is its dot (the `●` and a no-break space: 2 cells) and its name, and the chips are 2 cells apart. A line holds
 // the body's columns less 2, so that an estimate that is wrong is wrong upwards: the Log draws a line fewer for a row
-// too many, and cuts its last line for a row too few. The names of these cases are ASCII, a cell a character.
+// too many, and cuts its last line for a row too few. The names of these cases are lowercase ASCII, a cell a character.
 test('chipRows counts the lines of chips: whole chips in order, as many on a line as the body less 2 holds', () => {
   const names = (...cells: number[]): string[] => cells.map(count => 'x'.repeat(count))
 
