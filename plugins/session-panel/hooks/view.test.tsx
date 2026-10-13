@@ -2532,9 +2532,10 @@ test('chipRows counts the lines of chips: whole chips in order, as many on a lin
 })
 
 // The name of a chip is counted high, for the same reason: a name measured short is a row too few. Every code point
-// above U+007F counts as 2 cells (CJK and emoji are drawn wide, and so are some that are not, an accented letter),
-// every other as 1; by code point, not by UTF-16 unit, which is what `.length` counts.
-test('chipRows counts a name high: a code point above U+007F is 2 cells, any other 1, by code point', () => {
+// above U+007F counts as 2 cells (CJK and emoji are drawn wide, and so are some that are not, an accented letter), the
+// ASCII ones as 1 but for the capitals (the tests below); by code point, not by UTF-16 unit, which is what `.length`
+// counts.
+test('chipRows counts a name high: a code point above U+007F is 2 cells, by code point', () => {
   // `データ` is 3 characters and 6 cells, so its chip is 8 cells. With `abcd` (a chip of 6) and the 2 between them that
   // is 16: a line of 16 holds them (18 columns) and one of 15 does not. By `.length` its chip would be 5 cells and the
   // two would be 13, and 17 columns would hold them: a row too few.
@@ -2553,6 +2554,54 @@ test('chipRows counts a name high: a code point above U+007F is 2 cells, any oth
   expect(chipRows(['abcd', '\u007f'], 13)).toBe(1)
   expect(chipRows(['abcd', '\u0080'], 13)).toBe(2)
   expect(chipRows(['abcd', '\u0080'], 14)).toBe(1)
+})
+
+// The font of the desktop is proportional and a capital is wider than a lowercase letter: the live check of 2026-10-13
+// measured capitals at about 9 to 11 px against the 8 px of a cell, so two long names in capitals at the edge of a line
+// made the estimate a row short. A capital ASCII letter (A to Z) counts 1.5 cells, and the total of a name is rounded
+// up. Each case puts a name beside `abcd` (a chip of 6 cells, with the 2 cells between the chips): the two are
+// 6 + 2 + the dot's 2 + the cells of the name, and a line holds the body's columns less 2.
+test('chipRows counts a capital wider: A to Z are 1.5 cells each, and the total of a name is rounded up', () => {
+  // `GITHUB` is 6 capitals, 9 cells: its chip is 11 and the two are 19, so 21 columns hold them and 20 do not. At a
+  // cell a letter it would be 6 cells and the two 16: 18 columns would hold them, and so would 20, a row too few.
+  expect(chipRows(['abcd', 'GITHUB'], 21)).toBe(1)
+  expect(chipRows(['abcd', 'GITHUB'], 20)).toBe(2)
+  // `Ab` is 1.5 + 1 = 2.5, which is 3 cells: its chip is 5 and the two are 13, so 15 columns hold them and 14 do not.
+  expect(chipRows(['abcd', 'Ab'], 15)).toBe(1)
+  expect(chipRows(['abcd', 'Ab'], 14)).toBe(2)
+  // The total of a name is rounded up before the chips of a line are added: three of `Ab` are chips of 5 cells, and
+  // with the gaps 19, so 21 columns hold them and 20 do not (kept at 2.5 cells they would be 17.5, and 20 columns would
+  // hold them).
+  expect(chipRows(['Ab', 'Ab', 'Ab'], 21)).toBe(1)
+  expect(chipRows(['Ab', 'Ab', 'Ab'], 20)).toBe(2)
+  // The capitals are A to Z and no more: `@` and `[` are the code points on either side of them, and count 1. `@AAZZ[`
+  // is 1 + 3 + 3 + 1 = 8 cells (a range that lost an end, or took one of these in, would make it 7 or 9): its chip is
+  // 10 and the two are 18, so 20 columns hold them and 19 do not.
+  expect(chipRows(['abcd', '@AAZZ['], 20)).toBe(1)
+  expect(chipRows(['abcd', '@AAZZ['], 19)).toBe(2)
+
+  // Two names in capitals at the edge of a line: `GITHUB` and `SLACK` are 9 and 8 cells, chips of 11 and 10, and with
+  // the gap 23. 25 columns hold them on a line, and in 24 they are two lines, where a cell a letter (6 and 5 cells,
+  // chips of 8 and 7, 17 with the gap) would have said one line down to 19 columns.
+  expect(chipRows(['GITHUB', 'SLACK'], 25)).toBe(1)
+  expect(chipRows(['GITHUB', 'SLACK'], 24)).toBe(2)
+})
+
+// What is not a capital keeps its count: an ASCII character that is no capital is 1 cell (the digits and the `_`, `-`
+// and `.` of a name too), a code point above U+007F is 2 cells whatever it is, a capital letter of it too (not 1.5),
+// and where a name has both, the two counts add up in one total.
+test('chipRows keeps the count of the rest: ASCII 1 cell, above U+007F 2 cells, a capital above it too', () => {
+  // `az09_-.` is 7 cells: its chip is 9 and the two are 17, so 19 columns hold them and 18 do not.
+  expect(chipRows(['abcd', 'az09_-.'], 19)).toBe(1)
+  expect(chipRows(['abcd', 'az09_-.'], 18)).toBe(2)
+  // `ÉÉ` (U+00C9 twice) is 2 + 2 = 4 cells, not 1.5 each: its chip is 6 and the two are 14, so 16 columns hold them and
+  // 15 do not.
+  expect(chipRows(['abcd', 'ÉÉ'], 16)).toBe(1)
+  expect(chipRows(['abcd', 'ÉÉ'], 15)).toBe(2)
+  // `A` and `é` (U+00E9) are 1.5 + 2 = 3.5, which is 4 cells: its chip is 6 and the two are 14, so 16 columns hold them
+  // and 15 do not.
+  expect(chipRows(['abcd', 'Aé'], 16)).toBe(1)
+  expect(chipRows(['abcd', 'Aé'], 15)).toBe(2)
 })
 
 test('the top block is the session and its total, the context and the cost split, with no project in it', () => {

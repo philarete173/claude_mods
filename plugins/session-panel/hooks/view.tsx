@@ -676,14 +676,20 @@ function agentsSection(d: Draw): Block {
 
 // The cells that the name of a chip takes, counted high, because the estimate of chipRows must err on the side of more
 // rows (the 0.4.0 spec, §3.2): `.length` counts a CJK character as one cell, and it is drawn two wide. Every code point
-// above U+007F counts as 2 cells (the wide ones, CJK and emoji, and some that are not, an accented letter), every other
-// as 1. It goes by code point, not by UTF-16 unit: an astral emoji is one code point and 2 cells, where its two units
-// would make 4.
+// above U+007F counts as 2 cells (the wide ones, CJK and emoji, and some that are not, an accented letter), a capital
+// ASCII letter (A to Z) as 1.5, every other as 1, and the total of a name is rounded up. A capital is more than a cell
+// because the desktop's font is proportional: the live check of 2026-10-13 (docs/live-check-2026-10-13-0.4.0.md)
+// measured capitals at about 9 to 11 px against the 8 px of a cell (CELL_PX), so two long names in capitals at the edge
+// of a line made the estimate a row short. It goes by code point, not by UTF-16 unit: an astral emoji is one code point
+// and 2 cells, where its two units would make 4.
 const nameCells = (name: string): number => {
   let cells = 0
-  for (const char of name) cells += (char.codePointAt(0) ?? 0) > 0x7f ? 2 : 1
+  for (const char of name) {
+    const code = char.codePointAt(0) ?? 0
+    cells += code > 0x7f ? 2 : char >= 'A' && char <= 'Z' ? 1.5 : 1
+  }
 
-  return cells
+  return Math.ceil(cells)
 }
 
 // How many lines the chips of the MCP section wrap into in a body of `columns` cells: the one place where the rows of a
