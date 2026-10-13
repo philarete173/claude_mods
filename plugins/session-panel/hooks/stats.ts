@@ -278,6 +278,21 @@ export function textHead(s: string, max: number): string {
   return last >= 0xd800 && last <= 0xdbff ? head.slice(0, -1) : head
 }
 
+// The head of a text (textHead) less the run of characters at its end that are no whitespace, for the texts that the
+// Log reads: a word cut in two can be a secret that the patterns of redact no longer match (a URL with a password that
+// loses its `@`), and the pane shows a few dozen characters of the text anyway. The whitespace is what `\s` says, as in
+// those patterns, so the no-break space counts. The run is found by a scan back from the end, one character at a time:
+// a pattern such as `\S+$` takes quadratic time on a long word that whitespace follows. A text of `max` units or fewer
+// comes back as it is, and a head with no whitespace at all becomes an empty string.
+export function wordHead(s: string, max: number): string {
+  if (s.length <= max) return s
+  const head = textHead(s, max)
+  let end = head.length
+  while (end > 0 && !/\s/.test(head.charAt(end - 1))) end -= 1
+
+  return head.slice(0, end)
+}
+
 const str = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback)
 const relativeTo = (path: string, root: string): string =>
   path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path

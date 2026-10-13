@@ -3541,6 +3541,55 @@ test('an answer of 224 KB is cut to its head: the line of a subagent comes at on
     expect(took).toBeLessThan(1000) // generous: the pair pattern took seconds on it
   })
 
+// The head is cut at whitespace: a cut through a secret would leave a half of it that no pattern of redact matches.
+// Here the 4096th unit is the last one before the `@` of a URL with a password, so a head cut there would hold the
+// whole password and no `@` for the pattern of the URL to end on.
+test('a secret that the cut of an answer would go through is dropped with its word, not shown unmasked', WITH_READER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await $.agent.spawn(SPAWN)
+
+    const url = 'https://deploy:Hunter2-Full-Secret@db.example.com/prod'
+    const answer = `${'\n'.repeat(4096 - url.indexOf('@'))}${url}`
+    await $.turn.complete({ answer, durationMs: 5, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer' })
+
+    const { log } = await readState($)
+    expect(JSON.stringify(log)).not.toContain('Hunter2')
+    expect(log[0]?.text).toBe('done')
+  })
+
+// `a.` repeated is a text that the URL pattern of redact reads in quadratic time: each `a` after a `.` starts what
+// could be a scheme, which runs to the end of the text and finds no `:` there, and 128 KB of it took 5.5 s in Node 22.
+// The command of a Bash call is the agent's own, and the hook of tool.call stands in the way of every tool call.
+test('a Bash command of 128 KB is cut to its head: the hook returns at once and the line is the head\'s own line',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    bottom(on, clock)
+    await $.session.start(START)
+
+    const started = performance.now()
+    await drive(clock, $.tool.call({ tool: 'Bash', command: 'a.'.repeat(65_536) })) // 131,072 units, 128 KB
+    const took = performance.now() - started
+
+    expect(took).toBeLessThan(1000) // generous: the URL pattern took seconds on it
+    // The head has no whitespace after `Bash `, so the word that the cut goes through is the whole command.
+    expect((await readState($)).log.map(entry => entry.text)).toEqual(['Bash'])
+  })
+
+test('a prompt of 128 KB is cut to its head: the hook returns at once', SLOW_READER, async ($, on) => {
+  bottom(on, mock.clock(on))
+  await $.session.start(START)
+
+  const started = performance.now()
+  await $.turn.start({ text: 'a.'.repeat(65_536), turnId: 't1' }) // 131,072 units, 128 KB
+  const took = performance.now() - started
+
+  expect(took).toBeLessThan(1000) // generous: the URL pattern took seconds on it
+  // The head has no whitespace, so none of it is a whole word: the line is empty.
+  expect((await readState($)).log.map(entry => [entry.who, entry.text])).toEqual([['you', '']])
+})
+
 test('the answer of a subagent loses its markdown marks, whether the engine gave it or the agent handed it back',
   SLOW_READER, async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })

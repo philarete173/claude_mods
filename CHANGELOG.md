@@ -7,8 +7,9 @@
   close mark closes it (ctrl+x x in a terminal).
 - A folder whose changes were given up after two failed reads is read again after 15 minutes, instead of never while
   the mod lives.
-- Only the first 4096 characters of a subagent's answer are processed for its `done` line, so a long answer no longer
-  takes seconds to process.
+- The Log reads only the first 4096 UTF-16 units (about 4 KB) of a prompt, a tool call, or a subagent's description
+  or answer, cut at a space: a long text built to be slow no longer stalls a hook, and the pane shows less than 80
+  characters of each anyway.
 - In the estimate of the MCP chips, a capital ASCII letter counts 1.5 cells, since the desktop draws capitals wider.
 - The flags of England, Scotland and Wales stay whole; other tag characters still go.
 - A `/clear` or a resume that lands while the Log writes a line no longer leaves a stray `+1 more`.

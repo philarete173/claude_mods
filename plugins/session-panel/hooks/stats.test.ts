@@ -26,6 +26,7 @@ import {
   sumUsage,
   textHead,
   toolLabel,
+  wordHead,
 } from './stats'
 import type { AgentRow, AgentStatus, Interval, LogEntry, StepTiming, TurnAcc, Usage } from './stats'
 
@@ -422,7 +423,7 @@ test('stripFormat reads long runs of tag characters once: 100,000 of them take m
   const partials = ['gbeng', 'gbsct', 'gbwls'].flatMap(word =>
     [1, 2, 3, 4, 5].map(letters => `${BLACK_FLAG}${tagged(word.slice(0, letters))}`))
   const shortFlags = partials.join('').repeat(2_000)
-  // The best of three rounds: a busy machine slows one round, not all of them, while a quadratic pattern takes seconds
+  // The best of three rounds: a burst of load slows one round, not all of them, while a quadratic pattern takes seconds
   // in each.
   let best = Infinity
   let results: string[] = []
@@ -563,6 +564,49 @@ test('textHead does not split a surrogate pair: the high surrogate that the cut 
   // A text of `max` units or fewer is not cut, whatever it ends in: here a high surrogate that nothing follows.
   const lone = ROCKET.slice(0, 1)
   expect(textHead(`a${lone}`, 2)).toBe(`a${lone}`)
+})
+
+test('wordHead is the head of a text less the word that the cut goes through; one of `max` units or fewer is not cut',
+  () => {
+    expect(wordHead('abc def', 7)).toBe('abc def')
+    expect(wordHead('abc def', 20)).toBe('abc def')
+    expect(wordHead('', 0)).toBe('')
+    // A cut inside a word drops the word, and keeps the whitespace before it.
+    expect(wordHead('abc def ghi', 6)).toBe('abc ')
+    expect(wordHead('abc def ghi', 10)).toBe('abc def ')
+    // A head that ends in a word drops it, even when the cut falls just at the end of the word.
+    expect(wordHead('abc def ghi', 7)).toBe('abc ')
+    // A cut right after whitespace keeps the head up to it, whatever the whitespace is.
+    expect(wordHead('abc def', 4)).toBe('abc ')
+    expect(wordHead('abc\ndef', 4)).toBe('abc\n')
+    expect(wordHead('abc\tdef', 4)).toBe('abc\t')
+    expect(wordHead('abc  \n def', 6)).toBe('abc  \n')
+    // A head with no whitespace at all holds no word whole.
+    expect(wordHead('abcdefgh', 4)).toBe('')
+  })
+
+test('wordHead takes whitespace as `\\s` does: a no-break space and a wide space end a word like a plain one', () => {
+  expect(wordHead(`ab${NBSP}cdef`, 5)).toBe(`ab${NBSP}`)
+  expect(wordHead(`ab${NBSP}cdef`, 3)).toBe(`ab${NBSP}`)
+  expect(wordHead(`ab${EM_SPACE}cdef`, 5)).toBe(`ab${EM_SPACE}`)
+  // A zero-width space is no whitespace to `\s`, so the word goes on through it.
+  expect(wordHead('ab\u200Bcdef', 5)).toBe('')
+})
+
+test('wordHead drops a word that the cut splits a surrogate pair of, and keeps a pair that stands whole', () => {
+  // The cut falls between the two units of the rocket: textHead drops the high unit, and the word goes with it.
+  expect(wordHead(`ab c${ROCKET}d`, 5)).toBe('ab ')
+  expect(wordHead(`ab c${ROCKET}d`, 6)).toBe('ab ') // a pair that is whole at the cut is part of the word too
+  expect(wordHead(`${ROCKET} ${ROCKET}`, 3)).toBe(`${ROCKET} `)
+  expect(wordHead(`${ROCKET}${ROCKET}`, 3)).toBe('')
+})
+
+// The head of the Log's texts is 4096 units, and a head with no whitespace is run through to its start.
+test('wordHead handles a head of 4096 units with no whitespace, and more after it, in a few milliseconds', () => {
+  const started = performance.now()
+  expect(wordHead(`${'x'.repeat(4096)} and more`, 4096)).toBe('')
+  expect(wordHead('x'.repeat(100_000), 4096)).toBe('')
+  expect(performance.now() - started).toBeLessThan(500)
 })
 
 test('redact', () => {

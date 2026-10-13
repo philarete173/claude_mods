@@ -11,7 +11,7 @@ import type {
 
 import {
   addAgentCost, attributeCost, computeTurnStats, fmtDuration, fmtTokens, fmtUsd, parseStatus, plainText, pushLog,
-  redact, shortType, shorten, stripFormat, sumNumstat, textHead, toolLabel,
+  redact, shortType, shorten, stripFormat, sumNumstat, toolLabel, wordHead,
 } from './stats'
 import type { AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, Usage } from './stats'
 import { renderPane } from './view'
@@ -82,9 +82,10 @@ const GIT_READ: string[] = [
 // The variables that such a call runs with, set over the process's own. git 2.44 and later, and some distributions'
 // 2.43 builds (a backport), honour GIT_NO_LAZY_FETCH; other git ignores it. GIT_CEILING_DIRECTORIES is not set: the mod
 // reads no env, so it does not know $HOME. A ceiling at $HOME would only keep a folder outside git below it from
-// reading a repository at $HOME itself (git never holds the folder it starts in against a ceiling), and a ceiling at
-// the session root would hide the repository of a session that starts in one of its folders. So a session in such a
-// folder reads that repository, as `git status` there would, within READ_BUDGET_MS.
+// reading a repository at $HOME itself (git never holds the folder it starts in against a ceiling), and a ceiling that
+// stops the walk at the session root (set on its parent) would hide the repository of a session that starts in one of
+// the repository's folders. So a session in such a folder reads that repository, as `git status` there would, within
+// READ_BUDGET_MS.
 const GIT_READ_ENV: Record<string, string> = { GIT_NO_LAZY_FETCH: '1' }
 
 // git's empty tree. As the source of attributes (GIT_ATTR_SOURCE) it leaves no .gitattributes in force, so no
@@ -217,10 +218,13 @@ const usageFields = (
   rateLimits: from.rateLimits.map(r => ({ kind: r.kind, percentUsed: r.percentUsed, resetsAt: toMs(r.resetsAt) })),
 })
 
-// How much of a subagent's answer its log line is made from, in UTF-16 units. The pane shows 80 characters of it, and
-// the pair pattern of plainText takes quadratic time on some long inputs (224 KB of ` **x**y` took 4.1 s in Node 22).
-// An answer is the subagent's, so a crafted one could stall the turn.complete hook: only the head of it is worked on.
-const ANSWER_HEAD_MAX = 4096
+// How much of a text the Log reads, in UTF-16 units: a prompt, the label of a tool call, and the description and the
+// answer of a subagent. The pane shows 80 characters of each at most, and two passes take quadratic time on some long
+// inputs: the pair pattern of plainText (224 KB of ` **x**y` took 4.1 s in Node 22) and the URL pattern of redact
+// (128 KB of `a.` took 5.5 s in Node 22). These texts come from the agents (a Bash command can be steered by a prompt
+// injection, and the hook of tool.call gates every tool call), so a crafted one could stall a hook: only the head of a
+// text is worked on, and it is cut at whitespace (wordHead), so that no secret is cut in two.
+const TEXT_HEAD_MAX = 4096
 
 // The log line of a subagent that has ended: its text, and its outcome, the time it took behind a mark (✓ for an
 // answer, ✗ for a failure; a stop is no fault, so it has no mark). One that still runs has no outcome, so its status
@@ -233,7 +237,7 @@ const agentOutcome = (
   if (status !== 'done') return { text: status, outcome: `✗ ${took}` }
   // The head is cut first, before any pass reads the answer. The answer is markdown, which the pane shows as it is: its
   // marks go next, but after its format characters, as one beside a mark (a BOM after `**`) hides it from plainText.
-  const said = shorten(redact(plainText(stripFormat(textHead(answer, ANSWER_HEAD_MAX)))), 80)
+  const said = shorten(redact(plainText(stripFormat(wordHead(answer, TEXT_HEAD_MAX)))), 80)
   const head = row.costUsd === null ? 'done' : `done · ${fmtUsd(row.costUsd)}`
 
   return { text: said === '' ? head : `${head} — ${said}`, outcome: `✓ ${took}` }
@@ -622,7 +626,7 @@ async function reviveAgent($: EngineInterface, agentId: string): Promise<void> {
   })
   if (revived !== null) {
     const line = `resumed · ${revived.type}: ${revived.description}`
-    await addLog($, await $.clock.now(), 'main', shorten(redact(line), 70), 'info')
+    await addLog($, await $.clock.now(), 'main', shorten(redact(wordHead(line, TEXT_HEAD_MAX)), 70), 'info')
   }
 }
 
@@ -738,12 +742,12 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // The command only opens. `UiPane.isShown` only ranks this plugin's panes, so a lone pane counts as shown even when a
+  // The command only opens. `UiPane.isShown` only ranks plugin panes, so a lone pane counts as shown even when a
   // built-in desktop tab such as Terminal covers it (the 0.4.0 live check): the command cannot tell a pane in front
   // from a hidden one, so it never closes, and the tab's own close mark closes the pane. The person asks for the pane,
   // so it is asked for: a pane that is not open is opened, and one that is open in any state (in front, a tab behind
-  // another plugin pane, or waiting undrawn) is asked for again with `focus`, which places a pane that waits and brings
-  // a tab forward (a request, which the surface may refuse).
+  // another plugin pane, or waiting undrawn) is opened again. The person's command places a pane that waits, and
+  // `focus` asks to bring a tab forward (a request, which the surface may refuse).
   on('command.run', { command: 'session-panel' }, async $ => {
     const pane = (await $.ui.panes()).find(listed => listed.id === PANE)
     const focus = pane === undefined ? {} : { focus: true as const }
@@ -785,7 +789,10 @@ export const register: Register = on => {
     // with no text (a continuation) is no line of the log.
     if (e.text.trim() !== '') {
       const tag = /^<([^\s>/]+)/.exec(e.text)?.[1]
-      await addLog($, now, tag === undefined ? 'you' : 'engine', shorten(tag ?? redact(e.text), 70), 'info')
+      await addLog(
+        $, now, tag === undefined ? 'you' : 'engine', shorten(tag ?? redact(wordHead(e.text, TEXT_HEAD_MAX)), 70),
+        'info',
+      )
     }
 
     return started
@@ -861,7 +868,7 @@ export const register: Register = on => {
       const took = fmtDuration(t1 - t0)
       const outcome = ran.deny !== undefined ? 'denied' : isAbandoned ? took : `${isFailed ? '✗' : '✓'} ${took}`
       const kind: LogKind = isAbandoned ? 'info' : isFailed ? 'error' : 'ok'
-      const label = shorten(redact(toolLabel(e.tool, e, await $.session.root())), 64)
+      const label = shorten(redact(wordHead(toolLabel(e.tool, e, await $.session.root()), TEXT_HEAD_MAX)), 64)
       await addLog($, t1, await whoIs($, e.agentId), label, kind, outcome)
     }
 
@@ -925,7 +932,9 @@ export const register: Register = on => {
         costUsd: null,
       }
       await update($, agentsAtom, rows => ({ ...rows, [agentId]: row }))
-      await addLog($, now, 'main', shorten(redact(`spawned · ${type}: ${description}`), 70), 'info')
+      await addLog(
+        $, now, 'main', shorten(redact(wordHead(`spawned · ${type}: ${description}`, TEXT_HEAD_MAX)), 70), 'info',
+      )
     }
 
     return spawned
