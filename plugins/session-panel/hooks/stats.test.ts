@@ -24,6 +24,7 @@ import {
   stripFormat,
   sumNumstat,
   sumUsage,
+  textHead,
   toolLabel,
 } from './stats'
 import type { AgentRow, AgentStatus, Interval, LogEntry, StepTiming, TurnAcc, Usage } from './stats'
@@ -361,6 +362,71 @@ test('stripFormat reads a long run of joiners once: 40,000 of them take a few mi
   expect(performance.now() - started).toBeLessThan(500) // a lookbehind and lookahead pair takes about two seconds
 })
 
+// The flags of England, Scotland and Wales are the black flag (U+1F3F4), the tag characters that spell `gbeng`, `gbsct`
+// or `gbwls` (U+E0000 and the code of each letter) and the cancel tag (U+E007F). Tag characters are Cf, yet these three
+// sequences stay whole. Spelled as escapes, so that this file shows what it says.
+const BLACK_FLAG = '\u{1F3F4}'
+const CANCEL_TAG = '\u{E007F}'
+const FLAGS: Array<[name: string, flag: string]> = [
+  ['England', '\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}'],
+  ['Scotland', '\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}'],
+  ['Wales', '\u{1F3F4}\u{E0067}\u{E0062}\u{E0077}\u{E006C}\u{E0073}\u{E007F}'],
+]
+// The tag characters that spell an ASCII word.
+const tagged = (word: string): string =>
+  [...word].map(letter => String.fromCodePoint(0xe0000 + letter.charCodeAt(0))).join('')
+
+test('stripFormat keeps the flags of England, Scotland and Wales whole, though their tag characters are Cf', () => {
+  for (const [name, flag] of FLAGS) {
+    expect(stripFormat(flag), name).toBe(flag)
+    expect(stripFormat(`${flag}${flag}`), name).toBe(`${flag}${flag}`)
+    // In a longer text the other format characters go, the bidi controls among them, and the flag stays.
+    for (const [charName, char] of FORMAT_CHARS) {
+      expect(stripFormat(`${char}the ${flag}${char} flag${char}`), `${name}, ${charName}`).toBe(`the ${flag} flag`)
+    }
+  }
+})
+
+test('stripFormat leaves the black flag alone when the tag characters after it spell no flag of the three', () => {
+  // The tag characters can carry invisible ASCII, a word or an instruction, so only the three flags keep theirs.
+  expect(stripFormat(`${BLACK_FLAG}${tagged('hello')}${CANCEL_TAG}`)).toBe(BLACK_FLAG)
+  const others: Array<[name: string, tags: string]> = [
+    ['the cancel tag alone', CANCEL_TAG],
+    ['gbeng with no cancel tag', tagged('gbeng')],
+    ['gbeng with one letter more', `${tagged('gbengx')}${CANCEL_TAG}`],
+    ['gbeng with one letter fewer', `${tagged('gben')}${CANCEL_TAG}`],
+    ['gbeng in capitals', `${tagged('GBENG')}${CANCEL_TAG}`],
+    ['gbeng twice, then one cancel tag', `${tagged('gbenggbeng')}${CANCEL_TAG}`],
+    ['a subdivision that is no flag of the three', `${tagged('usca')}${CANCEL_TAG}`],
+  ]
+  for (const [name, tags] of others) expect(stripFormat(`a${BLACK_FLAG}${tags}b`), name).toBe(`a${BLACK_FLAG}b`)
+  // After a whole flag, tag characters that are no flag go as well.
+  for (const [name, flag] of FLAGS) expect(stripFormat(`${flag}${tagged('hello')}${CANCEL_TAG}`), name).toBe(flag)
+})
+
+test('stripFormat takes out tag characters that stand in no flag', () => {
+  expect(stripFormat(`a${tagged('hello')}${CANCEL_TAG}b`)).toBe('ab')
+  // The tag characters of a flag with no black flag before them, and the language tag and the tag space.
+  for (const word of ['gbeng', 'gbsct', 'gbwls']) expect(stripFormat(`a${tagged(word)}${CANCEL_TAG}b`), word).toBe('ab')
+  expect(stripFormat('a\u{E0001}\u{E0020}b')).toBe('ab')
+  // Another flag that stands before them does not make a flag of them: the white flag is no part of one.
+  expect(stripFormat(`\u{1F3F3}${tagged('gbeng')}${CANCEL_TAG}`)).toBe('\u{1F3F3}')
+})
+
+// The tag characters are in the text of a subagent, so a run of them, or of black flags with tags that stop short,
+// must cost one pass: a pattern that looks behind each tag character for a black flag, or ahead from each black flag
+// to the end of a run, reads a run again from each of its characters.
+test('stripFormat reads long runs of tag characters once: 100,000 of them take milliseconds, not seconds', () => {
+  const run = `a${tagged('hello').repeat(20_000)}${CANCEL_TAG}b`
+  // Every proper start of each of the three flags, and `gbeng`, `gbsct` and `gbwls` with no cancel tag.
+  const partials = ['gbeng', 'gbsct', 'gbwls'].flatMap(word =>
+    [1, 2, 3, 4, 5].map(letters => `${BLACK_FLAG}${tagged(word.slice(0, letters))}`))
+  const started = performance.now()
+  expect(stripFormat(run)).toBe('ab')
+  expect(stripFormat(partials.join('').repeat(2_000))).toBe(BLACK_FLAG.repeat(partials.length * 2_000))
+  expect(performance.now() - started).toBeLessThan(500)
+})
+
 test('shorten and redact keep the joiners of an emoji sequence and of a Persian word, as stripFormat does', () => {
   for (const text of [FAMILY, PERSIAN]) {
     expect(shorten(text, 20), text).toBe(text)
@@ -468,6 +534,23 @@ test('plainText leaves `__`, a lone `**`, one beside a space or an ASCII word, a
   for (const text of kept) expect(plainText(text), JSON.stringify(text)).toBe(text)
   // In a mix, the pair goes and the rest stays.
   expect(plainText('**fixed `__init__.py`** and x ** 2')).toBe('fixed __init__.py and x ** 2')
+})
+
+test('textHead is the first `max` UTF-16 units of a text; one of `max` units or fewer comes back as it is', () => {
+  expect(textHead('abcdef', 4)).toBe('abcd')
+  expect(textHead('abcdef', 6)).toBe('abcdef')
+  expect(textHead('abc', 6)).toBe('abc')
+  expect(textHead('abcdef', 0)).toBe('')
+})
+
+test('textHead does not split a surrogate pair: the high surrogate that the cut leaves alone goes too', () => {
+  // A rocket is two UTF-16 units, a high surrogate and a low one.
+  expect(textHead(`ab${ROCKET}c`, 3)).toBe('ab') // the cut falls between the two units of the rocket
+  expect(textHead(`ab${ROCKET}c`, 4)).toBe(`ab${ROCKET}`) // here the pair is whole
+  expect(textHead(`${ROCKET}${ROCKET}`, 1)).toBe('')
+  // A text of `max` units or fewer is not cut, whatever it ends in: here a high surrogate that nothing follows.
+  const lone = ROCKET.slice(0, 1)
+  expect(textHead(`a${lone}`, 2)).toBe(`a${lone}`)
 })
 
 test('redact', () => {

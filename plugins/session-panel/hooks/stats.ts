@@ -203,6 +203,20 @@ const SECRETS: [RegExp, string][] = [
 const holdsJoiner = (char: string | undefined): boolean =>
   char !== undefined && char.charCodeAt(0) > 0x7f && !/\s/.test(char)
 
+// The tag characters (U+E0020 to U+E007F, category Cf) are ASCII made invisible: the tag character of a letter is
+// U+E0000 plus the code of the letter.
+const tagged = (word: string): string =>
+  [...word].map(letter => String.fromCodePoint(0xe0000 + letter.charCodeAt(0))).join('')
+
+// The flags that stay whole: England, Scotland and Wales, each the black flag (U+1F3F4), the tag characters that spell
+// `gbeng`, `gbsct` or `gbwls`, and the cancel tag (U+E007F). Only these three: the tag characters can carry ASCII that
+// nothing draws (a word, an instruction), and these are the only subdivision flags of the RGI emoji (Recommended for
+// General Interchange). Any other tag character goes, and the black flag before it stays alone.
+const KEPT_FLAGS = ['gbeng', 'gbsct', 'gbwls'].map(code => `\u{1F3F4}${tagged(code)}\u{E007F}`)
+
+// Either a whole flag of KEPT_FLAGS (group 1) or a format character that is neither joiner.
+const FORMAT_OR_FLAG = new RegExp(String.raw`(${KEPT_FLAGS.join('|')})|(?![\u200C\u200D])\p{Cf}`, 'gu')
+
 // Takes out the Unicode format characters (category Cf): the bidi controls (U+202A to U+202E, U+2066 to U+2069), the
 // zero-width space, the byte order mark and the rest. They draw nothing, so a U+202E in a branch or a file name would
 // reorder what the pane shows after it, and the name would read as another. Two stay, but only between two characters
@@ -213,9 +227,12 @@ const holdsJoiner = (char: string | undefined): boolean =>
 // matches it (a key and its value have `\s*` between them, and a joiner between two no-break spaces there would end the
 // value before it starts): it goes. Its neighbours are those that remain once the rest of Cf is gone (a zero-width
 // space beside it does not make it stay), and a run of joiners stays or goes as a whole. The run is matched once and
-// judged by what is round it: a lookbehind and lookahead pair would read the run again from each of its joiners.
+// judged by what is round it: a lookbehind and lookahead pair would read the run again from each of its joiners. The
+// three flags that stay (KEPT_FLAGS) are matched in the same pass, a whole sequence or one format character at a time,
+// so a long run of tag characters is read once as well.
 export function stripFormat(s: string): string {
-  const rest = s.replace(/(?![\u200C\u200D])\p{Cf}/gu, '')
+  // A flag is put back as it is (`$1`); the group of a character that goes did not match, and `$1` reads it as empty.
+  const rest = s.replace(FORMAT_OR_FLAG, '$1')
 
   return rest.replace(/[\u200C\u200D]+/g, (run, at: number) =>
     holdsJoiner(rest[at - 1]) && holdsJoiner(rest[at + run.length]) ? run : '')
@@ -247,6 +264,18 @@ export function plainText(s: string): string {
 export function shorten(s: string, max: number): string {
   const flat = stripFormat(s).replace(/\s+/g, ' ').trim()
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
+}
+
+// The first `max` UTF-16 units of a text, for the passes that read a text whole (the pair pattern of plainText takes
+// quadratic time on some long inputs) when the pane shows a few dozen characters of it. A cut between the two units of
+// a surrogate pair would leave the high one alone, and a lone surrogate is no character, so that unit goes too. A text
+// of `max` units or fewer comes back as it is.
+export function textHead(s: string, max: number): string {
+  if (s.length <= max) return s
+  const head = s.slice(0, max)
+  const last = head.charCodeAt(max - 1)
+
+  return last >= 0xd800 && last <= 0xdbff ? head.slice(0, -1) : head
 }
 
 const str = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback)

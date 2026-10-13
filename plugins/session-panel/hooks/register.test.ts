@@ -3518,6 +3518,29 @@ test('the answer in the line of a subagent is masked and cut to 80 characters', 
   expect(JSON.stringify(log)).not.toContain('hunter22secret')
 })
 
+// ` **x**y` repeated is a text that no pair of `**` closes: a word character follows each `**`, so every opening one
+// reads on to the end of the line, and the pair pattern of plainText takes seconds on 224 KB of it. Only the head of an
+// answer is worked on, and an answer is the subagent's.
+test('an answer of 224 KB is cut to its head: the line of a subagent comes at once and is the head\'s own line',
+  SLOW_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await $.agent.spawn(SPAWN)
+    await $.agent.spawn(SPAWN)
+    const end = (agentId: string, answer: string) =>
+      $.turn.complete({ answer, durationMs: 5, isAborted: false, turnId: 't1', agentId, reason: 'answer' })
+
+    const answer = ' **x**y'.repeat(32_768) // 229,376 units, 224 KB
+    const started = performance.now()
+    await end('a1', answer)
+    const took = performance.now() - started
+    await end('a2', answer.slice(0, 4096))
+
+    const line = `done — ${'**x**y '.repeat(11)}**…`
+    expect((await readState($)).log.slice(0, 2).map(entry => entry.text)).toEqual([line, line])
+    expect(took).toBeLessThan(1000) // generous: the pair pattern took seconds on it
+  })
+
 test('the answer of a subagent loses its markdown marks, whether the engine gave it or the agent handed it back',
   SLOW_READER, async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })

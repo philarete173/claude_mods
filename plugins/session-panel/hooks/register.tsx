@@ -11,7 +11,7 @@ import type {
 
 import {
   addAgentCost, attributeCost, computeTurnStats, fmtDuration, fmtTokens, fmtUsd, parseStatus, plainText, pushLog,
-  redact, shortType, shorten, stripFormat, sumNumstat, toolLabel,
+  redact, shortType, shorten, stripFormat, sumNumstat, textHead, toolLabel,
 } from './stats'
 import type { AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, Usage } from './stats'
 import { renderPane } from './view'
@@ -214,6 +214,11 @@ const usageFields = (
   rateLimits: from.rateLimits.map(r => ({ kind: r.kind, percentUsed: r.percentUsed, resetsAt: toMs(r.resetsAt) })),
 })
 
+// How much of a subagent's answer its log line is made from, in UTF-16 units. The pane shows 80 characters of it, and
+// the pair pattern of plainText takes quadratic time on some long inputs (224 KB of ` **x**y` took 4.1 s in Node 22).
+// An answer is the subagent's, so a crafted one could stall the turn.complete hook: only the head of it is worked on.
+const ANSWER_HEAD_MAX = 4096
+
 // The log line of a subagent that has ended: its text, and its outcome, the time it took behind a mark (✓ for an
 // answer, ✗ for a failure; a stop is no fault, so it has no mark). One that still runs has no outcome, so its status
 // is not a parameter.
@@ -223,9 +228,9 @@ const agentOutcome = (
   const took = fmtDuration(durationMs)
   if (status === 'stopped') return { text: status, outcome: took }
   if (status !== 'done') return { text: status, outcome: `✗ ${took}` }
-  // The answer is markdown, which the pane shows as it is: its marks go first, but after its format characters, as one
-  // beside a mark (a BOM after `**`) hides it from plainText.
-  const said = shorten(redact(plainText(stripFormat(answer))), 80)
+  // The head is cut first, before any pass reads the answer. The answer is markdown, which the pane shows as it is: its
+  // marks go next, but after its format characters, as one beside a mark (a BOM after `**`) hides it from plainText.
+  const said = shorten(redact(plainText(stripFormat(textHead(answer, ANSWER_HEAD_MAX)))), 80)
   const head = row.costUsd === null ? 'done' : `done · ${fmtUsd(row.costUsd)}`
 
   return { text: said === '' ? head : `${head} — ${said}`, outcome: `✓ ${took}` }
