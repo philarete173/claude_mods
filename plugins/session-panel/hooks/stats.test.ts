@@ -421,10 +421,18 @@ test('stripFormat reads long runs of tag characters once: 100,000 of them take m
   // Every proper start of each of the three flags, and `gbeng`, `gbsct` and `gbwls` with no cancel tag.
   const partials = ['gbeng', 'gbsct', 'gbwls'].flatMap(word =>
     [1, 2, 3, 4, 5].map(letters => `${BLACK_FLAG}${tagged(word.slice(0, letters))}`))
-  const started = performance.now()
-  expect(stripFormat(run)).toBe('ab')
-  expect(stripFormat(partials.join('').repeat(2_000))).toBe(BLACK_FLAG.repeat(partials.length * 2_000))
-  expect(performance.now() - started).toBeLessThan(500)
+  const shortFlags = partials.join('').repeat(2_000)
+  // The best of three rounds: a busy machine slows one round, not all of them, while a quadratic pattern takes seconds
+  // in each.
+  let best = Infinity
+  let results: string[] = []
+  for (let round = 0; round < 3; round += 1) {
+    const started = performance.now()
+    results = [stripFormat(run), stripFormat(shortFlags)]
+    best = Math.min(best, performance.now() - started)
+  }
+  expect(results).toEqual(['ab', BLACK_FLAG.repeat(partials.length * 2_000)])
+  expect(best).toBeLessThan(500)
 })
 
 test('shorten and redact keep the joiners of an emoji sequence and of a Persian word, as stripFormat does', () => {
@@ -548,6 +556,10 @@ test('textHead does not split a surrogate pair: the high surrogate that the cut 
   expect(textHead(`ab${ROCKET}c`, 3)).toBe('ab') // the cut falls between the two units of the rocket
   expect(textHead(`ab${ROCKET}c`, 4)).toBe(`ab${ROCKET}`) // here the pair is whole
   expect(textHead(`${ROCKET}${ROCKET}`, 1)).toBe('')
+  // The high surrogates are U+D800 to U+DBFF, both ends included; a low surrogate (U+DC00 on) at the cut stays.
+  expect(textHead('a\uD800b', 2)).toBe('a')
+  expect(textHead('a\uDBFFb', 2)).toBe('a')
+  expect(textHead('a\uDC00b', 2)).toBe('a\uDC00')
   // A text of `max` units or fewer is not cut, whatever it ends in: here a high surrogate that nothing follows.
   const lone = ROCKET.slice(0, 1)
   expect(textHead(`a${lone}`, 2)).toBe(`a${lone}`)
