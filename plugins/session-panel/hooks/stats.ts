@@ -239,7 +239,8 @@ export function stripFormat(s: string): string {
 }
 
 // The format characters go first, as shorten takes them out too: one inside a secret would keep a pattern from
-// matching, and the secret would show once shorten had closed the gap.
+// matching, and the secret would show once shorten had closed the gap. A caller cuts a text to its head first
+// (wordHead): the URL pattern takes quadratic time on a long crafted text such as `a.a.a…`.
 export function redact(s: string): string {
   return SECRETS.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), stripFormat(s))
 }
@@ -250,7 +251,8 @@ export function redact(s: string): string {
 // stands alone, has a space beside it or is glued to an ASCII word stays (`x ** 2`; the `**` of `2**10 and 3**4` are
 // exponents, no pair), and so does `__`: `__init__.py` is a file, not bold. Only ASCII keeps a pair, for exponents in
 // code are ASCII: in scripts written without spaces (Chinese, Japanese, Thai) and inside words of other scripts
-// (Cyrillic, Hindi) bold is glued to letters, and markdown reads it as bold, so its marks go.
+// (Cyrillic, Hindi) bold is glued to letters, and markdown reads it as bold, so its marks go. A caller cuts a text to
+// its head first (wordHead): the pair pattern takes quadratic time on some long texts.
 export function plainText(s: string): string {
   // The group inside the pair is lazy (`??`): a body of one character closes at its own `**`, not at the next pair's.
   // The lookbehind and the lookahead keep out a `**` that an ASCII word character (`\w`) touches on the outside of it.

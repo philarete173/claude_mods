@@ -979,10 +979,10 @@ test('the command opens a pane that is not open, with no focus, and says why whe
 })
 
 // A pane that is open, as the engine lists it in each of its states. The command closes none of them: `UiPane.isShown`
-// ranks this plugin's panes only, so a lone pane counts as shown even where a built-in desktop tab such as Terminal
-// covers it (the 0.4.0 live check), and the command cannot tell a pane in front from one that is hidden. The person
-// asks for the pane, so it is asked for again, with `focus`: that places a pane that waits and brings a tab forward (a
-// request, which the surface may refuse); as for any pane that opens, it asks for a read of the project. A pane that
+// only ranks plugin panes, so a lone pane counts as shown even where a built-in desktop tab such as Terminal covers it
+// (the 0.4.0 live check), and the command cannot tell a pane in front from one that is hidden. The person asks for the
+// pane, so it is opened again: the person's command places a pane that waits, and `focus` asks to bring a tab forward
+// (a request, which the surface may refuse); as for any pane that opens, it asks for a read of the project. A pane that
 // waits undrawn lists as not shown; one that listed as shown while it waited would be no different.
 const OPEN_PANES: Array<[what: string, panes: UiPane[]]> = [
   ['placed and shown', [PANE_UP]],
@@ -3572,7 +3572,7 @@ test('a Bash command of 128 KB is cut to its head: the hook returns at once and 
     await drive(clock, $.tool.call({ tool: 'Bash', command: 'a.'.repeat(65_536) })) // 131,072 units, 128 KB
     const took = performance.now() - started
 
-    expect(took).toBeLessThan(1000) // generous: the URL pattern took seconds on it
+    expect(took).toBeLessThan(300) // generous: the URL pattern took seconds on it
     // The head has no whitespace after `Bash `, so the word that the cut goes through is the whole command.
     expect((await readState($)).log.map(entry => entry.text)).toEqual(['Bash'])
   })
@@ -3585,9 +3585,23 @@ test('a prompt of 128 KB is cut to its head: the hook returns at once', SLOW_REA
   await $.turn.start({ text: 'a.'.repeat(65_536), turnId: 't1' }) // 131,072 units, 128 KB
   const took = performance.now() - started
 
-  expect(took).toBeLessThan(1000) // generous: the URL pattern took seconds on it
+  expect(took).toBeLessThan(300) // generous: the URL pattern took seconds on it
   // The head has no whitespace, so none of it is a whole word: the line is empty.
   expect((await readState($)).log.map(entry => [entry.who, entry.text])).toEqual([['you', '']])
+})
+
+test('a subagent description of 128 KB is cut to its head: the hook returns at once', SLOW_READER, async ($, on) => {
+  bottom(on, mock.clock(on))
+  await $.session.start(START)
+
+  const started = performance.now()
+  await $.agent.spawn({ ...SPAWN, description: 'a.'.repeat(65_536) }) // 131,072 units, 128 KB
+  const took = performance.now() - started
+
+  expect(took).toBeLessThan(300) // generous: the URL pattern took seconds on it
+  // The head has no whitespace after `spawned · engineer: `, so the word that the cut goes through is the whole
+  // description: the line is the spawn line with no description.
+  expect((await readState($)).log.map(entry => entry.text)).toEqual(['spawned · engineer:'])
 })
 
 test('the answer of a subagent loses its markdown marks, whether the engine gave it or the agent handed it back',

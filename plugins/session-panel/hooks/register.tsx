@@ -223,7 +223,7 @@ const usageFields = (
 // inputs: the pair pattern of plainText (224 KB of ` **x**y` took 4.1 s in Node 22) and the URL pattern of redact
 // (128 KB of `a.` took 5.5 s in Node 22). These texts come from the agents (a Bash command can be steered by a prompt
 // injection, and the hook of tool.call gates every tool call), so a crafted one could stall a hook: only the head of a
-// text is worked on, and it is cut at whitespace (wordHead), so that no secret is cut in two.
+// text is worked on, and it is cut at whitespace (wordHead), so that no secret without whitespace in it is cut in two.
 const TEXT_HEAD_MAX = 4096
 
 // The log line of a subagent that has ended: its text, and its outcome, the time it took behind a mark (✓ for an

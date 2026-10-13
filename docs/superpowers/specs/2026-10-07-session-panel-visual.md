@@ -1355,7 +1355,7 @@ Check since the review of Task 13, for the 0.3.1 release:
     (Diff, Terminal) in front? If it does, that session keeps its minute read, as in 0.3.0, and finding 2 of the 0.3.0
     live check (every live session reads the tree once a minute) is not fixed.
 
-Results of the live renders (2026-10-07, 2026-10-08, 2026-10-09 and 2026-10-12):
+Results of the live renders (2026-10-07, 2026-10-08, 2026-10-09, 2026-10-12 and 2026-10-13):
 
 1. Pass. At ~300 px the bar ends ~18 px left of the percent; `CELL_PX` 8 stays.
 2. Pass for the rule of two margins: 12–14 px between the ink and the rule on each side, ≈ 17 px box to box. That rule
@@ -1388,7 +1388,9 @@ Results of the live renders (2026-10-07, 2026-10-08, 2026-10-09 and 2026-10-12):
 11. Pending. The 0.3.0 live check does not mention the first frame.
 12. Seen in a narrow pane in the 0.3.0 live check: the lines read `you › …` and `engine › agent-message`. How much text
     follows `engine › ` at the edge of the layout was not recorded.
-13. Pending. The review before 0.3.1 read the engine's source (CLI 2.1.295); no desktop has been looked at.
+13. Answered in part by the 0.4.0 live check (2026-10-13): with the Terminal tab in front, a lone Session pane listed as
+    placed and shown (the 0.4.0 command closed it), so its minute read goes on, and the person chose to keep it as it
+    is. Two desktop sessions were not looked at.
 
 Not checked in the 0.3.0 live check, or pending a look:
 
