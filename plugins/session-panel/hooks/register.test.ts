@@ -219,6 +219,23 @@ const FRACTIONAL_CLOCK: Plugin = {
     })
   },
 }
+// A plugin above the mod's that sets the wall clock back, or forward, as a person or a time service may: `skew-clock`
+// takes the offset in ms (a negative one sets it back), and from then on `clock.now` reads that much off the mock
+// clock's time, while the timers of the mock clock go on by their own. The mock clock itself only moves forward. Like
+// any plugin of a test it closes over nothing of this file.
+const CLOCK_SKEW: Plugin = {
+  name: 'clock-skew',
+  tier: 'prepend',
+  register(on) {
+    let offset = 0
+    on('command.run', { command: 'skew-clock' }, async (_$, e) => {
+      offset = Number(e.args)
+
+      return { text: 'skewed' }
+    })
+    on('clock.now', async (_$, e, next) => ({ value: ((await next(e)) as { value: number }).value + offset }))
+  },
+}
 // A plugin above the mod's that holds one write of the log, or of its count, as a host that is slow to answer may:
 // after `arm-hold`, the first such write lands, and the writer is answered 100 ms later. The hook of the mod that made
 // the write waits meanwhile, which is the time between the two writes of a line, so a /clear that comes then lands
@@ -249,6 +266,7 @@ const WITH_INTERRUPTER = { plugins: [READER, INTERRUPTER], timeoutMs: 30_000 }
 const WITH_FRACTIONAL_CLOCK = { plugins: [READER, FRACTIONAL_CLOCK], timeoutMs: 30_000 }
 const WITH_STORE = { plugins: [READER, OTHER_SESSION], timeoutMs: 30_000 }
 const WITH_WRITE_HOLDER = { plugins: [READER, WRITE_HOLDER], timeoutMs: 30_000 }
+const WITH_CLOCK_SKEW = { plugins: [READER, CLOCK_SKEW], timeoutMs: 30_000 }
 const WITH_SUSPENDER = { plugins: [SUSPENDER] }
 const PANE_PROPS: RenderPropsOf['Pane'] = {
   title: 'Session', isFocused: false, bodyColumns: 40, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {},
@@ -1698,6 +1716,30 @@ test('the minute read of a shown pane tries a stopped root again after 15 minute
     expect(statusRuns(w)).toBeGreaterThan(2)
     expect((await readState($)).project.changes).toEqual(CHANGES_BACK)
   })
+
+// The wall clock may be set back after a wait began. A wait is READ_RETRY_MS long at most, so one that ends further
+// ahead of the clock than that was made under a clock that has since gone back: it counts as over, and the root is
+// read, instead of waiting until the clock catches up. A clock at the time the wait began is not set back, and the wait
+// is the usual one. Here the clock is set back by 45 minutes after the root was stopped, and the read is made at the
+// time that puts the clock at the start of the wait, a ms before it, or half an hour before it.
+const SET_BACK_CLOCKS: Array<[what: string, ahead: number, isRead: boolean]> = [
+  ['at the time the wait began', 0, false],
+  ['a ms before the wait began', -1, true],
+  ['half an hour before the wait began', -30 * 60_000, true],
+]
+for (const [what, ahead, isRead] of SET_BACK_CLOCKS) {
+  const result = isRead ? 'ends the wait of a stopped root: it is read' : 'leaves the wait as it is'
+  test(`a clock set back to ${what} ${result}`, WITH_CLOCK_SKEW, async ($, on) => {
+    const { clock, w, givenUpAt } = await givenUpWorld($, on)
+    const setBack = 45 * 60_000
+    await $.command.run({ ...RUN, command: 'skew-clock', args: String(-setBack) })
+
+    w.runs.length = 0
+    await askReadAt($, clock, givenUpAt + setBack + ahead) // the read starts when the clock reads givenUpAt + ahead
+    expect(w.runs).toEqual(isRead ? [BRANCH_RUN, STATUS_RUN, DIFF_RUN] : [BRANCH_RUN])
+    expect((await readState($)).project.changes).toEqual(isRead ? CHANGES_BACK : null)
+  })
+}
 
 test('a throw, a status that works and a throw again do not stop the reads: only a second throw in a row does',
   WITH_READER, async ($, on) => {
@@ -4344,11 +4386,41 @@ test('a /clear or a resume drops a message handed back and not read yet; any oth
     }
   })
 
-// A /clear or a resume that lands between the two writes of a log line, the line and its count. The total that the
-// header shows is `max(logCount, lines held)` and the pane says `+N more` for what the lines do not show, so the count
-// must not be left above the lines: the line written first and then the reset would leave the count of a line that the
-// reset emptied, and the next line would show `+1 more` for the rest of the conversation (the 0.4.0 live check). The
-// holder lets the first write of a line land and stops the hook there; the reset lands in that gap.
+// The two writes of a log line, the line and its count, are two steps, and the pane may be drawn between them. The line
+// goes first. The header's total is `max(logCount, lines held)` and the pane says `+N more` for what the lines do not
+// show, so a count written first would stand one above the lines for that moment: a `+1 more` that flashes on every
+// event of the first 60 of a conversation. The holder lets the first write of the second line land and stops the hook
+// there, and the pane is drawn in the gap.
+test('between the two writes of a log line the pane draws no +N more', WITH_WRITE_HOLDER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  await $.turn.start({ text: 'one', turnId: 't1' })
+  await $.command.run({ ...RUN, command: 'arm-hold' })
+
+  const second = $.turn.start({ text: 'two', turnId: 't2' })
+  await clock.settle() // one write of its line has landed, and the hook waits for the answer to it
+  // What is drawn in the gap is read before the hold ends, and checked after it, so that a check that fails leaves no
+  // hook waiting.
+  const between = await readState($)
+  const ui = await mountPane($)
+  const hidden = await ui.find({ type: 'Text', text: /^\+\d+ more$/ })
+  await ui.unmount()
+
+  await clock.advance(100) // the answer comes, and the hook writes the other
+  await second
+  expect(between.log.length + between.logCount).toBe(3) // the line and the count of 'one', and one write of 'two'
+  expect(hidden).toBeUndefined()
+  const after = await readState($)
+  expect([after.log.length, after.logCount]).toEqual([2, 2])
+})
+
+// A /clear or a resume that lands between the two writes of a log line. The reset empties the log and the count under
+// the call that is writing the line, so a count written after it would stand one above the lines for the rest of the
+// conversation, a stray `+1 more` on every line after (the 0.4.0 live check). The call knows the reset came after it
+// began, and leaves its count out. The holder lets the first write of the line land and stops the hook there; the reset
+// lands in that gap.
 for (const reason of ['clear', 'resume'] as const) {
   test(`a ${reason} that lands between the two writes of a log line leaves no stray +N more on the next line`,
     WITH_WRITE_HOLDER, async ($, on) => {
@@ -4361,16 +4433,18 @@ for (const reason of ['clear', 'resume'] as const) {
       const first = $.turn.start({ text: 'one', turnId: 't1' })
       await clock.settle() // one write of its line has landed, and the hook waits for the answer to it
       const between = await readState($)
-      expect((between.log ?? []).length + (between.logCount ?? 0)).toBe(1) // one of the two, the other not yet
-      await $.session.end({ reason, sessionId: 's1', resume: { id: 's1' } })
-      await clock.advance(100) // the answer comes, and the hook writes the other
+      await $.session.end({ reason, sessionId: 's1', resume: { id: 's1' } }) // the reset lands in the gap
+      await clock.advance(100) // the answer comes, and the hook goes on
       await first
-      await $.turn.start({ text: 'two', turnId: 't2' })
+      expect((between.log ?? []).length + (between.logCount ?? 0)).toBe(1) // one of the two had landed, not the other
+      // The reset has emptied what had landed, and the line leaves no count behind it.
+      const emptied = await readState($)
+      expect([emptied.log, emptied.logCount]).toEqual([[], 0])
 
+      await $.turn.start({ text: 'two', turnId: 't2' })
       // The count is not above the lines that the log holds, so the pane has no event to count that it does not show.
       const { log, logCount } = await readState($)
-      expect(log[0]?.text).toBe('two')
-      expect(Math.max(logCount, log.length) - log.length).toBe(0)
+      expect([log.map(line => line.text), logCount]).toEqual([['two'], 1])
       const ui = await mountPane($)
       expect(await ui.find({ type: 'Text', text: /^\+\d+ more$/ })).toBeUndefined()
       await ui.unmount()

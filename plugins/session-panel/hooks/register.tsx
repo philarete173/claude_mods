@@ -118,6 +118,12 @@ let lastUsd: number | null = null
 // hand-back so far, so a different shape only leaves the answer out. It is emptied with the ledger.
 const handbacks = new Map<string, string>()
 
+// How many times a /clear or a resume has emptied the log since this module loaded. The reset raises it before it
+// empties the atoms, and addLog takes it when it starts: a call that finds it changed when its count is due began
+// before a reset, which has emptied the log and the count under it, so the call leaves its count out. A reload of the
+// module starts it over; a call of the old module compares with the old module's own.
+let logEpoch = 0
+
 // The model's context window that the last session.measure brought. It is null until a measure sets it: the first one
 // after the module loads only stores it, since session.start has read the breakdown already.
 let lastModelWindow: number | null = null
@@ -169,7 +175,8 @@ const readThrows = new Map<string, number>()
 // the read whose throw brought it there, by the clock of `$.clock.now()`, so a computer that wakes from sleep past it
 // reads at its next read. A read that comes earlier reads nothing, and the changes are none for it, with no mark. At or
 // after that time one read runs: a throw in it sets the time anew and leaves the count at the max, and a read that ends
-// without one starts the count over and drops the time. A root that has no time is not waiting.
+// without one starts the count over and drops the time. A time more than READ_RETRY_MS ahead of the clock was set under
+// a clock that has since been put back, and counts as over. A root that has no time is not waiting.
 const readRetryAt = new Map<string, number>()
 
 // ISO 8601 to epoch ms, which is what the `usage` value keeps; undefined when there is none or it does not parse.
@@ -232,17 +239,20 @@ function inBackground($: EngineInterface, job: () => Promise<void>): void {
 
 // Puts a line on top of the log, and counts it: the log keeps the newest 60 lines, the count every line since the log
 // was last emptied. The outcome of an action, a mark and its time, is a field of its own; a line with none has no such
-// key. The count is written first. The header's total is max(logCount, lines held), and the pane says `+N more` for the
-// events that its lines do not show, so with the count first a /clear or a resume whose reset lands between the two
-// writes leaves the count behind the line, and no stray `+1 more`, whichever way it interleaves; with the line first
-// the reset would empty the log and the count would then rise above it for the rest of the conversation (the 0.4.0
-// live check, finding 7).
+// key. The line goes first. The header's total is max(logCount, lines held) and the pane says `+N more` for the events
+// that its lines do not show, so a count written first would stand one above the lines between the two writes, and a
+// redraw there would flash a `+1 more` on each of the first 60 events of a conversation. A /clear or a resume that
+// lands between the writes empties the log and the count under this call, and a count written after it would stand one
+// above the lines for the rest of the conversation (the 0.4.0 live check, finding 7). So the call takes logEpoch when
+// it starts, and leaves its count out when a reset has raised it since. A line of the old conversation may then land in
+// the new one, which the header's total takes in: it is max(logCount, lines held).
 async function addLog(
   $: EngineInterface, at: number, who: string, text: string, kind: LogKind, outcome?: string,
 ): Promise<void> {
   const entry: LogEntry = { at, who, text, kind, ...(outcome === undefined ? {} : { outcome }) }
-  await update($, logCountAtom, count => count + 1)
+  const epoch = logEpoch
   await update($, logAtom, list => pushLog(list, entry))
+  if (epoch === logEpoch) await update($, logCountAtom, count => count + 1)
 }
 
 // Whose line it is: `main`, or the type of the subagent that ran.
@@ -414,7 +424,10 @@ async function gitChanges($: EngineInterface, root: string): Promise<Changes> {
   const held = readThrows.get(root) ?? 0
   const now = await $.clock.now()
   const retryAt = readRetryAt.get(root)
-  if (retryAt !== undefined && now < retryAt) return null
+  // A wait ends READ_RETRY_MS ahead of the clock at most. One that ends further ahead was set under a clock that has
+  // since been put back (it is the wall clock, which a person or a time service may set), so it counts as over, and the
+  // root is read, instead of waiting until the clock catches up.
+  if (retryAt !== undefined && now < retryAt && retryAt - now <= READ_RETRY_MS) return null
   const read: ChangesRead = { endsAt: now + READ_BUDGET_MS, isSpent: false, hasThrown: false }
   const changes = await readChanges($, root, read)
   if (read.hasThrown) {
@@ -677,10 +690,13 @@ export const register: Register = on => {
     // A /clear or a resume starts the conversation over, and a resume puts another conversation in place of this one.
     // The module, its timers and the pane carry on; the ledger starts over and the hand-backs not read are dropped,
     // and the context reads empty until the next response (the window, the cost and the limits are the session's
-    // still).
+    // still). The log epoch goes up first, before any atom is emptied: an addLog that began earlier then leaves its
+    // count out (the log and the count it would add to are the old conversation's), and one that begins later takes the
+    // new epoch, so its line and its count are the new conversation's.
     if (e.reason === 'clear' || e.reason === 'resume') {
       lastUsd = null
       handbacks.clear()
+      logEpoch += 1
       await update($, turnAtom, () => turnAtom.initial)
       await update($, lastTurnAtom, () => lastTurnAtom.initial)
       await update($, agentsAtom, () => agentsAtom.initial)
