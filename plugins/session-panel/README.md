@@ -116,15 +116,15 @@ Total = Session + Subagents.
   repository, is always listed as an untracked folder, so with one every read runs both statuses; the budget bounds
   that. `GIT_CEILING_DIRECTORIES` is not set: the mod reads no environment variable, so it does not know `$HOME`. A
   ceiling at `$HOME` would only keep a folder outside git below it from reading a repository in `$HOME` itself (git
-  never holds the folder it starts in against a ceiling), and a ceiling at the session root would hide the repository of
-  a session started in one of its folders. So a session in such a folder reads that repository, as `git status` there
-  does, within the budget. Each status and the diff re-hash the files whose stat data changed, since the mod never
-  refreshes the index, so a clean filter can run on a changed tracked file up to four times in one read when the second
-  status runs; the budget and the gap between reads bound that.
+  never holds the folder it starts in against a ceiling), and a ceiling that stops the walk at the session root (set on
+  its parent) would hide the repository of a session started in one of the repository's folders. So a session in such a
+  folder reads that repository, as `git status` there does, within the budget. Each status and the diff re-hash the
+  files whose stat data changed, since the mod never refreshes the index, so a clean filter can run on a changed tracked
+  file up to four times in one read when the second status runs; the budget and the gap between reads bound that.
 - A read gives up early. The changes of one read have 30 s in all: each git call gets the time left, up to its own 10 s,
   and when none is left the read ends as that call's failure would. The count of new files stops at its first failure.
   Once two reads in a row had a `git status`, or a `git diff` against HEAD, that timed out or failed to start, the
-  changes of that folder are not read for 15 minutes; then one read tries again, another 15 minutes follow if it fails
-  too, and one that ends well reads as before. The count is kept for each folder, so reading another one does not reset
-  it.
+  changes of that folder are not read for 15 minutes; then one read tries again, another 15 minutes follow if it times
+  out or fails to start too, and one with no such failure reads as before. The count is kept for each folder, so reading
+  another one does not reset it.
 - The mod reads no file itself: git counts the lines.
