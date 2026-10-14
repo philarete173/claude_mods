@@ -3287,9 +3287,9 @@ test('a failed or denied tool call is logged as ✗ or denied, and a secret in t
   })
 
 // An agent that no agent.spawn announced has no row in the agents atom: the engine's own forks (a summary, a prompt
-// suggestion, a compaction, the memory) and a workflow's agents carry such ids, and core refuses every tool of a fork
-// (the 0.4.1 live check showed a red `agent  Bash echo ✗ 0.0s` that nobody had caused). The pane cannot tell a fork
-// from a workflow agent, so a failure of such an agent is a dim line, and its outcome is as for any failure.
+// suggestion, a compaction, the memory) and a workflow's agents carry such ids, and core refuses the tools of most
+// forks (the 0.4.1 live check showed a red `agent  Bash echo ✗ 0.0s` that nobody had caused). The pane cannot tell a
+// fork from a workflow agent, so a failure of such an agent is a dim line, and its outcome is as for any failure.
 test('a failed or denied call of an agent that no agent.spawn announced is a dim line, its outcome as before',
   WITH_READER, async ($, on) => {
     bottom(on, mock.clock(on))
@@ -3654,6 +3654,39 @@ test('a byte order mark inside a URL password does not end the word that the cut
     const { log } = await readState($)
     expect(JSON.stringify(log)).not.toContain('Hunt')
     expect(log.map(entry => entry.text)).toEqual([''])
+  })
+
+// The same text in the answer of a subagent. The words of the done line come in front of the answer after the cut, so
+// the cut falls on the answer alone, and the counts are those of the zero-width test: the 4096th unit is the `p`.
+test('zero-width spaces glued to a URL with a password in the answer of a subagent do not put the cut inside it',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await $.agent.spawn(SPAWN)
+
+    const url = 'https://deploy:Hunter2pass@db.example.com/prod'
+    const answer = `${' '.repeat(3813)}${ZWSP.repeat(260)}${url}`
+    await $.turn.complete({ answer, durationMs: 5, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer' })
+
+    const { log } = await readState($)
+    expect(JSON.stringify(log)).not.toContain('Hunter2')
+    expect(log[0]?.text).toBe('done — https://deploy:•••@db.example.com/prod')
+  })
+
+// The same text in a Bash command. The label has `Bash ` (5 units) in front of the command, and the cut falls on the
+// label, so the command has 5 spaces fewer than the prompt of the zero-width test: the 4096th unit is the `p` again.
+test('zero-width spaces glued to a URL with a password in a Bash command do not put the cut inside it',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    bottom(on, clock)
+    await $.session.start(START)
+
+    const url = 'https://deploy:Hunter2pass@db.example.com/prod'
+    await drive(clock, $.tool.call({ tool: 'Bash', command: `${' '.repeat(3808)}${ZWSP.repeat(260)}${url}` }))
+
+    const { log } = await readState($)
+    expect(JSON.stringify(log)).not.toContain('Hunter2')
+    expect(log.map(entry => entry.text)).toEqual(['Bash https://deploy:•••@db.example.com/prod'])
   })
 
 // `a.` repeated is a text that the URL pattern of redact reads in quadratic time: each `a` after a `.` starts what

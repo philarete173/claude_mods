@@ -222,10 +222,11 @@ const usageFields = (
 // answer of a subagent. The pane shows 80 characters of each at most, and two passes take quadratic time on some long
 // inputs: the pair pattern of plainText (224 KB of ` **x**y` took 4.1 s in Node 22) and the URL pattern of redact
 // (128 KB of `a.` took 5.5 s in Node 22). These texts come from the agents (a Bash command can be steered by a prompt
-// injection, and the hook of tool.call gates every tool call), so a crafted one could stall a hook: only the head of a
-// text is worked on: the format characters go first (logHead), and the head is cut at whitespace (wordHead), so that a
-// secret the cut goes through keeps its mask but in a crafted text. The word that the cut goes through is dropped only
-// when it has CUT_WORD_MAX units or fewer; a longer run is text, and the head is cut through it.
+// injection, and the hook of tool.call gates every tool call), so a crafted one could stall a hook: the passes that can
+// be slow read only the head of a text. The format characters go first, over the whole text (logHead, one linear pass),
+// and the head is cut at whitespace (wordHead), so that a secret the cut goes through keeps its mask, except in a
+// crafted text. The word that the cut goes through is dropped only when it has CUT_WORD_MAX units or fewer; a longer
+// run is text, and the head is cut through it.
 const TEXT_HEAD_MAX = 4096
 
 // The head of a text for the Log. The format characters go first, over the whole text (one linear pass), so that no
