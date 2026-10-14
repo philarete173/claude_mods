@@ -3,12 +3,12 @@
 ## 0.4.2 — 2026-10-14
 
 - A long word in a prompt, a tool call, or a subagent's description or answer shows its start again: the cut of a
-  text drops the word it splits only when that word has 256 UTF-16 units or fewer, and a text with no space in its
-  first 4 KB is cut through. 0.4.1 showed an empty line for it.
+  text drops the word it splits only when that word has 256 UTF-16 units or fewer, and a text with no whitespace in its
+  first 4096 characters is cut through. 0.4.1 showed an empty line for it.
 - The Log keeps the newest 200 lines instead of 60, so a tall pane has no blank rows above `+N more`.
-- A failed call of an agent that is not in Subagents (a workflow's agent, or one of the engine's own forks) is drawn
-  dim instead of red: the engine refuses every tool to its forks, and one that tried a tool showed a red line that
-  nobody caused.
+- A failed call of an agent that is not in Subagents (such as one of the engine's own forks) is drawn dim instead of
+  red: the engine refuses the tools of most of its forks, and one that tried a tool showed a red line that nobody
+  caused.
 - The docs give the clean filter up to five runs on a changed file in one read.
 
 ## 0.4.1 — 2026-10-13

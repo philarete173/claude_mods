@@ -65,7 +65,7 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   interrupted it, or a stop did) is not drawn as an error: it is not red, its `who` and outcome are dim as on every line
   that is no error, and its outcome is the time alone, with no ✗; this rests on the engine's `next.signal`, and was
   seen live for a subagent stopped with `TaskStop` and for Esc on the main agent, while a call that fails by itself
-  stays red. A call of an agent that is not in Subagents (a workflow's agent, or one of the engine's own forks, which
+  stays red. A call of an agent that is not in Subagents (such as one of the engine's own forks, most of which
   have every tool refused) is labeled `agent`, and its failure is drawn dim, not red: the pane cannot tell a fork's
   refused try from a real failure. A subagent's answer loses its markdown marks (a pair of `**`, unless an ASCII letter,
   digit or `_` touches it on the outside, so `2**10 and 3**4` stays, and a letter of another script does not stop it:

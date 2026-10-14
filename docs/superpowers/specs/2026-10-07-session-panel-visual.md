@@ -1061,7 +1061,8 @@ function logParts(d: Draw, above: number): RenderElement[] {
   is no error, its `who` and outcome are dim as on every such line, and its outcome is the time alone, with no ✗, as a
   stopped subagent's result does. This rests on the engine's `next.signal` (`ran.isError` and `next.signal.aborted`
   after `await next(e)`), and was seen live for a subagent stopped with `TaskStop` and for Esc on the main agent, while
-  a call that fails by itself stays red (§11, check 9).
+  a call that fails by itself stays red (§11, check 9). A failure of an agent with no row in Subagents (labeled `agent`)
+  is drawn dim too: design spec §4.7.
 
 ### 6.11 Empty and partial states
 
