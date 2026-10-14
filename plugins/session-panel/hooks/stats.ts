@@ -285,10 +285,11 @@ export function textHead(s: string, max: number): string {
 // The longest run of non-whitespace characters, in UTF-16 units, that wordHead takes off the end of a head. The run
 // goes so that a secret that the cut goes through loses no mask, and the secrets that the patterns of redact know are
 // far shorter than this; a pattern that keys on a name (`password=`, `Bearer`, `sk-`) masks a long value from its start
-// all the same. The URL pattern is the exception: it needs the `@` after the password, so a URL password longer than
-// CUT_WORD_MAX that the cut goes through loses its mask; that takes crafted whitespace before it, and is accepted. A
-// longer run is text (a long URL, base64, minified JSON, a CJK paragraph) whose start the pane should show, so it stays
-// and the head is cut through it.
+// all the same. The URL pattern is the exception: it needs the `@` after the password, so a URL password that the cut
+// goes through loses its mask when its run is longer than CUT_WORD_MAX (a long password, or one glued to other visible
+// characters); only a crafted text brings such a run into view, and that is accepted as best effort. A longer run is
+// text (a long URL, base64, minified JSON, a CJK paragraph) whose start the pane should show, so it stays and the head
+// is cut through it.
 export const CUT_WORD_MAX = 256
 
 // The head of a text (textHead) less the run of characters at its end that are no whitespace, for the texts that the

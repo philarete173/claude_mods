@@ -223,9 +223,15 @@ const usageFields = (
 // inputs: the pair pattern of plainText (224 KB of ` **x**y` took 4.1 s in Node 22) and the URL pattern of redact
 // (128 KB of `a.` took 5.5 s in Node 22). These texts come from the agents (a Bash command can be steered by a prompt
 // injection, and the hook of tool.call gates every tool call), so a crafted one could stall a hook: only the head of a
-// text is worked on. The word that the cut goes through is dropped (wordHead) when it has CUT_WORD_MAX units or fewer,
-// so that no secret is cut in two; a longer run is text, and the head is cut through it.
+// text is worked on: the format characters go first (logHead), and the head is cut at whitespace (wordHead), so that a
+// secret the cut goes through keeps its mask but in a crafted text. The word that the cut goes through is dropped only
+// when it has CUT_WORD_MAX units or fewer; a longer run is text, and the head is cut through it.
 const TEXT_HEAD_MAX = 4096
+
+// The head of a text for the Log. The format characters go first, over the whole text (one linear pass), so that no
+// invisible character pads a secret past the cut: one counts toward the run that wordHead measures, and a byte order
+// mark ends it, though redact and shorten take them out later. Then the head is cut (wordHead).
+const logHead = (text: string): string => wordHead(stripFormat(text), TEXT_HEAD_MAX)
 
 // The log line of a subagent that has ended: its text, and its outcome, the time it took behind a mark (✓ for an
 // answer, ✗ for a failure; a stop is no fault, so it has no mark). One that still runs has no outcome, so its status
@@ -236,9 +242,10 @@ const agentOutcome = (
   const took = fmtDuration(durationMs)
   if (status === 'stopped') return { text: status, outcome: took }
   if (status !== 'done') return { text: status, outcome: `✗ ${took}` }
-  // The head is cut first, before any pass reads the answer. The answer is markdown, which the pane shows as it is: its
-  // marks go next, but after its format characters, as one beside a mark (a BOM after `**`) hides it from plainText.
-  const said = shorten(redact(plainText(stripFormat(wordHead(answer, TEXT_HEAD_MAX)))), 80)
+  // The format characters go first and the head is cut (logHead), then the marks, then the secrets: no pass that takes
+  // quadratic time reads more than the head. The answer is markdown, which the pane shows as it is: its marks go after
+  // its format characters, as one beside a mark (a BOM after `**`) hides it from plainText.
+  const said = shorten(redact(plainText(logHead(answer))), 80)
   const head = row.costUsd === null ? 'done' : `done · ${fmtUsd(row.costUsd)}`
 
   return { text: said === '' ? head : `${head} — ${said}`, outcome: `✓ ${took}` }
@@ -628,7 +635,7 @@ async function reviveAgent($: EngineInterface, agentId: string): Promise<void> {
   })
   if (revived !== null) {
     const line = `resumed · ${revived.type}: ${revived.description}`
-    await addLog($, await $.clock.now(), 'main', shorten(redact(wordHead(line, TEXT_HEAD_MAX)), 70), 'info')
+    await addLog($, await $.clock.now(), 'main', shorten(redact(logHead(line)), 70), 'info')
   }
 }
 
@@ -792,7 +799,7 @@ export const register: Register = on => {
     if (e.text.trim() !== '') {
       const tag = /^<([^\s>/]+)/.exec(e.text)?.[1]
       await addLog(
-        $, now, tag === undefined ? 'you' : 'engine', shorten(tag ?? redact(wordHead(e.text, TEXT_HEAD_MAX)), 70),
+        $, now, tag === undefined ? 'you' : 'engine', shorten(tag ?? redact(logHead(e.text)), 70),
         'info',
       )
     }
@@ -869,10 +876,10 @@ export const register: Register = on => {
       // has the time alone, as a stopped subagent has, and is news, not a fault.
       const took = fmtDuration(t1 - t0)
       const outcome = ran.deny !== undefined ? 'denied' : isAbandoned ? took : `${isFailed ? '✗' : '✓'} ${took}`
-      const label = shorten(redact(wordHead(toolLabel(e.tool, e, await $.session.root()), TEXT_HEAD_MAX)), 64)
+      const label = shorten(redact(logHead(toolLabel(e.tool, e, await $.session.root()))), 64)
       const { who, isUnknown } = await whoIs($, e.agentId)
       // The engine's own forks and a workflow's agents carry ids that no agent.spawn announced, so the agents atom has
-      // no row for them. Core refuses every tool of a fork, so a fork that tries one would show a red failure that
+      // no row for them. Core refuses the tools of most forks, so a fork that tries one would show a red failure that
       // nobody caused (the 0.4.1 live check). The pane cannot tell a fork from a workflow's agent, whose failure is
       // real, so the failure of an agent with no row is drawn dim, and still shown.
       const kind: LogKind = isAbandoned || (isFailed && isUnknown) ? 'info' : isFailed ? 'error' : 'ok'
@@ -940,7 +947,7 @@ export const register: Register = on => {
       }
       await update($, agentsAtom, rows => ({ ...rows, [agentId]: row }))
       await addLog(
-        $, now, 'main', shorten(redact(wordHead(`spawned · ${type}: ${description}`, TEXT_HEAD_MAX)), 70), 'info',
+        $, now, 'main', shorten(redact(logHead(`spawned · ${type}: ${description}`)), 70), 'info',
       )
     }
 

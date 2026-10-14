@@ -3621,6 +3621,41 @@ test('a secret that the cut of an answer would go through is dropped with its wo
     expect(log[0]?.text).toBe('done')
   })
 
+// A zero-width space is a format character and no whitespace, so it counts toward the run that the cut goes through,
+// though redact takes it out later: 260 of them glued to a URL make a run over CUT_WORD_MAX, so the head stays whole
+// and ends inside the password (`Hunter2p`), and the URL pattern, which needs the `@`, does not match. The format
+// characters go before the cut (logHead): the text is then short enough to stay whole, and its password is masked.
+test('zero-width spaces glued to a URL with a password do not put the cut inside the password', WITH_READER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+
+    // The URL starts at the 4074th unit (3813 spaces and 260 zero-width spaces before it), so the 4096th is the `p`.
+    const url = 'https://deploy:Hunter2pass@db.example.com/prod'
+    await $.turn.start({ text: `${' '.repeat(3813)}${ZWSP.repeat(260)}${url}`, turnId: 't1' })
+
+    const { log } = await readState($)
+    expect(JSON.stringify(log)).not.toContain('Hunter2')
+    expect(log.map(entry => entry.text)).toEqual(['https://deploy:•••@db.example.com/prod'])
+  })
+
+// A byte order mark (U+FEFF) is whitespace to `\s` and a format character too. Inside a URL password it ends the word
+// that the cut goes through, and stripFormat takes it out later, so the line would show `https://deploy:Hunt`. The
+// byte order mark goes before the cut (logHead): the cut then falls inside the URL, which is dropped with its word.
+test('a byte order mark inside a URL password does not end the word that the cut goes through', WITH_READER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+
+    // 4072 spaces and 19 units of the URL put the mark at the 4092nd unit, and the 4096th is the `p` of `er2pass`.
+    const text = `${' '.repeat(4072)}https://deploy:Hunt\uFEFFer2pass@db.example.com/prod`
+    await $.turn.start({ text, turnId: 't1' })
+
+    const { log } = await readState($)
+    expect(JSON.stringify(log)).not.toContain('Hunt')
+    expect(log.map(entry => entry.text)).toEqual([''])
+  })
+
 // `a.` repeated is a text that the URL pattern of redact reads in quadratic time: each `a` after a `.` starts what
 // could be a scheme, which runs to the end of the text and finds no `:` there, and 128 KB of it took 5.5 s in Node 22.
 // The command of a Bash call is the agent's own, and the hook of tool.call stands in the way of every tool call.
