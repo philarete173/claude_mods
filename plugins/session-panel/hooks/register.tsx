@@ -280,12 +280,13 @@ async function addLog(
   await update($, logCountAtom, count => (!isResetting && epoch === logEpoch ? count + 1 : count))
 }
 
-// Whose line it is: `main`, or the type of the subagent that ran.
-async function whoIs($: EngineInterface, agentId: string | undefined): Promise<string> {
-  if (agentId === undefined) return 'main'
+// Whose line it is: `main`, or the type of the subagent that ran; and whether the agent is unknown: an id with no row
+// in the agents atom, whose line says `agent`. The row decides, not the label: a subagent's type may be named `agent`.
+async function whoIs($: EngineInterface, agentId: string | undefined): Promise<{ who: string; isUnknown: boolean }> {
+  if (agentId === undefined) return { who: 'main', isUnknown: false }
   const row = (await read($, agentsAtom))[agentId]
 
-  return row === undefined ? 'agent' : shortType(row.type)
+  return row === undefined ? { who: 'agent', isUnknown: true } : { who: shortType(row.type), isUnknown: false }
 }
 
 // Folds or unfolds a section of the pane, and keeps the map in the store, where the next session finds it. The press
@@ -355,12 +356,12 @@ type ChangesRead = { endsAt: number; isSpent: boolean; hasThrown: boolean }
 // counts over. A call that reads the tree (GIT_READ) passes `--no-optional-locks`: a plain one may refresh the index
 // and take index.lock, which makes the git commands of the person or the agent fail. So the index is never refreshed,
 // and each status (two when the first lists an untracked folder) and the diff hash again the files whose stat data
-// changed, on every read, so a clean filter may run on a changed tracked file up to four times in a read; the budget
-// and the gap rule (PROJECT_GAP_FACTOR) bound that. It passes `-c core.fsmonitor=false` too, or git may run the
-// fsmonitor hook that the person configured, or start its own daemon, and `-c diff.autoRefreshIndex=false`, or a diff
-// of the tree refreshes the index all the same, taking index.lock and rewriting .git/index. The `env` it is given,
-// GIT_READ_ENV or, for a `--no-index` call, NO_INDEX_ENV, keeps a partial clone from fetching the objects it lacks from
-// its remote, which is network.
+// changed, on every read, so a clean filter may run on a changed tracked file up to five times in a read (with git
+// 2.43, once in each status and two or three times in the diff); the budget and the gap rule (PROJECT_GAP_FACTOR) bound
+// that. It passes `-c core.fsmonitor=false` too, or git may run the fsmonitor hook that the person configured, or start
+// its own daemon, and `-c diff.autoRefreshIndex=false`, or a diff of the tree refreshes the index all the same, taking
+// index.lock and rewriting .git/index. The `env` it is given, GIT_READ_ENV or, for a `--no-index` call, NO_INDEX_ENV,
+// keeps a partial clone from fetching the objects it lacks from its remote, which is network.
 async function gitRun(
   $: EngineInterface, argv: string[], cwd: string, read: ChangesRead, env?: Record<string, string>,
 ): Promise<ProcessRunResult | null> {
@@ -868,9 +869,14 @@ export const register: Register = on => {
       // has the time alone, as a stopped subagent has, and is news, not a fault.
       const took = fmtDuration(t1 - t0)
       const outcome = ran.deny !== undefined ? 'denied' : isAbandoned ? took : `${isFailed ? '✗' : '✓'} ${took}`
-      const kind: LogKind = isAbandoned ? 'info' : isFailed ? 'error' : 'ok'
       const label = shorten(redact(wordHead(toolLabel(e.tool, e, await $.session.root()), TEXT_HEAD_MAX)), 64)
-      await addLog($, t1, await whoIs($, e.agentId), label, kind, outcome)
+      const { who, isUnknown } = await whoIs($, e.agentId)
+      // The engine's own forks and a workflow's agents carry ids that no agent.spawn announced, so the agents atom has
+      // no row for them. Core refuses every tool of a fork, so a fork that tries one would show a red failure that
+      // nobody caused (the 0.4.1 live check). The pane cannot tell a fork from a workflow's agent, whose failure is
+      // real, so the failure of an agent with no row is drawn dim, and still shown.
+      const kind: LogKind = isAbandoned || (isFailed && isUnknown) ? 'info' : isFailed ? 'error' : 'ok'
+      await addLog($, t1, who, label, kind, outcome)
     }
 
     return ran

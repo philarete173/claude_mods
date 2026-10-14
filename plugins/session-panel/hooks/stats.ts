@@ -285,8 +285,10 @@ export function textHead(s: string, max: number): string {
 // The longest run of non-whitespace characters, in UTF-16 units, that wordHead takes off the end of a head. The run
 // goes so that a secret that the cut goes through loses no mask, and the secrets that the patterns of redact know are
 // far shorter than this; a pattern that keys on a name (`password=`, `Bearer`, `sk-`) masks a long value from its start
-// all the same. A longer run is text (a long URL, base64, minified JSON, a CJK paragraph) whose start the pane should
-// show, so it stays and the head is cut through it.
+// all the same. The URL pattern is the exception: it needs the `@` after the password, so a URL password longer than
+// CUT_WORD_MAX that the cut goes through loses its mask; that takes crafted whitespace before it, and is accepted. A
+// longer run is text (a long URL, base64, minified JSON, a CJK paragraph) whose start the pane should show, so it stays
+// and the head is cut through it.
 export const CUT_WORD_MAX = 256
 
 // The head of a text (textHead) less the run of characters at its end that are no whitespace, for the texts that the
@@ -300,11 +302,12 @@ export const CUT_WORD_MAX = 256
 export function wordHead(s: string, max: number): string {
   if (s.length <= max) return s
   const head = textHead(s, max)
+  const floor = Math.max(0, head.length - CUT_WORD_MAX - 1)
   let end = head.length
-  while (end > 0 && head.length - end <= CUT_WORD_MAX && !/\s/.test(head.charAt(end - 1))) end -= 1
+  while (end > floor && !/\s/.test(head.charAt(end - 1))) end -= 1
 
-  // Whitespace ended a run of CUT_WORD_MAX units or fewer; the scan reached the start of the head, or passed the limit.
-  return end > 0 && head.length - end <= CUT_WORD_MAX ? head.slice(0, end) : head
+  // The run goes only if whitespace ended it within the limit; otherwise the head stays whole.
+  return end > floor ? head.slice(0, end) : head
 }
 
 const str = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback)

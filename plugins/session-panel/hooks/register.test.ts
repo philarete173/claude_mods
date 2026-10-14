@@ -3286,6 +3286,51 @@ test('a failed or denied tool call is logged as ✗ or denied, and a secret in t
     ])
   })
 
+// An agent that no agent.spawn announced has no row in the agents atom: the engine's own forks (a summary, a prompt
+// suggestion, a compaction, the memory) and a workflow's agents carry such ids, and core refuses every tool of a fork
+// (the 0.4.1 live check showed a red `agent  Bash echo ✗ 0.0s` that nobody had caused). The pane cannot tell a fork
+// from a workflow agent, so a failure of such an agent is a dim line, and its outcome is as for any failure.
+test('a failed or denied call of an agent that no agent.spawn announced is a dim line, its outcome as before',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+
+    await $.tool.call({ tool: 'Bash', command: 'fail it', agentId: 'a9' } as never)
+    await $.tool.call({ tool: 'Bash', command: 'deny it', agentId: 'a9' } as never)
+
+    expect((await readState($)).log.map(entry => [entry.who, entry.text, entry.kind, entry.outcome])).toEqual([
+      ['agent', 'Bash deny it', 'info', 'denied'],
+      ['agent', 'Bash fail it', 'info', '✗ 0.0s'],
+    ])
+  })
+
+// Only that failure is dim. The failures of the main agent and of a subagent that has a row stay errors; the row
+// decides, not the label, for the type of a subagent may be named `agent`, as the label of an unknown agent is. A call
+// of an unknown agent that went well is ok.
+test('the failures of the main agent and of a subagent with a row stay errors, an unknown agent\'s success is ok',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    bottom(on, clock)
+    await $.session.start(START)
+    await $.agent.spawn(SPAWN) // a1: an engineer
+    await $.agent.spawn({ ...SPAWN, subagentType: 'agent' }) // a2: its type is `agent`, the label of an unknown one
+
+    await $.tool.call({ tool: 'Bash', command: 'fail main' })
+    await $.tool.call({ tool: 'Bash', command: 'fail a1', agentId: 'a1' } as never)
+    await $.tool.call({ tool: 'Bash', command: 'deny a1', agentId: 'a1' } as never)
+    await $.tool.call({ tool: 'Bash', command: 'fail a2', agentId: 'a2' } as never)
+    await drive(clock, $.tool.call({ tool: 'Bash', command: 'echo a9', agentId: 'a9' } as never))
+
+    const { log } = await readState($)
+    expect(log.slice(0, 5).map(entry => [entry.who, entry.text, entry.kind, entry.outcome])).toEqual([
+      ['agent', 'Bash echo a9', 'ok', '✓ 0.3s'],
+      ['agent', 'Bash fail a2', 'error', '✗ 0.0s'],
+      ['engineer', 'Bash deny a1', 'error', 'denied'],
+      ['engineer', 'Bash fail a1', 'error', '✗ 0.0s'],
+      ['main', 'Bash fail main', 'error', '✗ 0.0s'],
+    ])
+  })
+
 test('a failed call carries the time it took, as a successful one does', SLOW_READER, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = bottom(on, clock)
@@ -3542,6 +3587,22 @@ test('an answer of 224 KB is cut to its head: the line of a subagent comes at on
     expect(took).toBeLessThan(1000) // generous: the pair pattern took seconds on it
   })
 
+// An answer longer than the head (4096) with no whitespace at all: the last run of its head is the whole head, far over
+// CUT_WORD_MAX, so it stays and the line shows the start of the answer. The head cut at the last whitespace (0.4.1)
+// would have left nothing, and the line would have been a bare `done`.
+test('an answer of 5000 characters with no whitespace shows its start in the line of a subagent', WITH_READER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await $.agent.spawn(SPAWN)
+
+    await $.turn.complete({
+      answer: 'x'.repeat(5000), durationMs: 5, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer',
+    })
+
+    expect((await readState($)).log[0]?.text).toBe(`done — ${'x'.repeat(79)}…`)
+  })
+
 // The word that the cut goes through is dropped when it has CUT_WORD_MAX units or fewer: a cut through a secret would
 // leave a half of it that no pattern of redact matches. Here the 4096th unit is the last one before the `@` of a URL
 // with a password, so a head cut there would hold the whole password and no `@` for the pattern of the URL to end on.
@@ -3593,8 +3654,9 @@ test('a prompt of 128 KB is cut to its head: the hook returns at once', SLOW_REA
 })
 
 // A text in a script with no spaces (here Japanese) can have one ASCII word near its start, and no whitespace after
-// that. The last run of its head is then the whole text, far over CUT_WORD_MAX, so it stays and the line shows it; the
-// head cut at the last whitespace (0.4.1) would have kept the word alone. The text is longer than the head (4096).
+// that. The last run of its head is then the whole text after the word, far over CUT_WORD_MAX, so it stays and the line
+// shows it; the head cut at the last whitespace (0.4.1) would have kept the word alone. The text is longer than the
+// head (4096).
 test('a prompt of one ASCII word and 5100 CJK characters with no whitespace shows the CJK text after the word',
   WITH_READER, async ($, on) => {
     bottom(on, mock.clock(on))
@@ -4386,7 +4448,7 @@ test('every path that puts a line on the log adds one to its count', SLOW_READER
   expect((await readState($)).log).toHaveLength(expected)
 })
 
-test('after 205 events the log holds 200 lines and the count says 205', SLOW_READER, async ($, on) => {
+test('past LOG_MAX events the log holds LOG_MAX lines and the count says every event', SLOW_READER, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   bottom(on, clock)
   await $.session.start(START)
