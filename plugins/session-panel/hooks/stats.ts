@@ -167,9 +167,11 @@ export function orderAgents(rows: AgentRow[]): AgentRow[] {
   return [...rows].sort((a, b) => rank(a) - rank(b) || b.startedAt - a.startedAt)
 }
 
-// Newest first, capped at 60 entries unless `max` says otherwise.
+export const LOG_MAX = 200 // the most lines the Log keeps: the newest ones
+
+// Newest first, capped at LOG_MAX entries unless `max` says otherwise.
 export function pushLog(log: LogEntry[], entry: LogEntry, max?: number): LogEntry[] {
-  return [entry, ...log].slice(0, max ?? 60)
+  return [entry, ...log].slice(0, max ?? LOG_MAX)
 }
 
 export const TYPE_MAX = 14 // the most an agent type takes: the log's `who`; the `@type` column adds the `@`
@@ -280,19 +282,29 @@ export function textHead(s: string, max: number): string {
   return last >= 0xd800 && last <= 0xdbff ? head.slice(0, -1) : head
 }
 
+// The longest run of non-whitespace characters, in UTF-16 units, that wordHead takes off the end of a head. The run
+// goes so that a secret that the cut goes through loses no mask, and the secrets that the patterns of redact know are
+// far shorter than this; a pattern that keys on a name (`password=`, `Bearer`, `sk-`) masks a long value from its start
+// all the same. A longer run is text (a long URL, base64, minified JSON, a CJK paragraph) whose start the pane should
+// show, so it stays and the head is cut through it.
+export const CUT_WORD_MAX = 256
+
 // The head of a text (textHead) less the run of characters at its end that are no whitespace, for the texts that the
 // Log reads: a word cut in two can be a secret that the patterns of redact no longer match (a URL with a password that
-// loses its `@`), and the pane shows a few dozen characters of the text anyway. The whitespace is what `\s` says, as in
-// those patterns, so the no-break space counts. The run is found by a scan back from the end, one character at a time:
-// a pattern such as `\S+$` takes quadratic time on a long word that whitespace follows. A text of `max` units or fewer
-// comes back as it is, and a head with no whitespace at all becomes an empty string.
+// loses its `@`), and the pane shows a few dozen characters of the text anyway. The run goes only when it has
+// CUT_WORD_MAX units or fewer: a longer one stays, and so does a head with no whitespace at all, which is the head as
+// textHead gives it. The whitespace is what `\s` says, as in those patterns, so the no-break space counts. The run is
+// found by a scan back from the end, one character at a time, which stops once it has passed CUT_WORD_MAX units: a
+// pattern such as `\S+$` takes quadratic time on a long word that whitespace follows. A text of `max` units or fewer
+// comes back as it is.
 export function wordHead(s: string, max: number): string {
   if (s.length <= max) return s
   const head = textHead(s, max)
   let end = head.length
-  while (end > 0 && !/\s/.test(head.charAt(end - 1))) end -= 1
+  while (end > 0 && head.length - end <= CUT_WORD_MAX && !/\s/.test(head.charAt(end - 1))) end -= 1
 
-  return head.slice(0, end)
+  // Whitespace ended a run of CUT_WORD_MAX units or fewer; the scan reached the start of the head, or passed the limit.
+  return end > 0 && head.length - end <= CUT_WORD_MAX ? head.slice(0, end) : head
 }
 
 const str = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback)

@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock, Plugin } from 'claude-code/testing'
 import type { On, PluginState, RenderPropsOf, RenderSurface, SessionMessage, UiPane } from 'claude-code'
 
+import { LOG_MAX } from './stats'
 import type { AgentRow, LogEntry, TurnAcc, TurnStats } from './stats'
 
 type State = PluginState['session-panel']
@@ -3541,9 +3542,9 @@ test('an answer of 224 KB is cut to its head: the line of a subagent comes at on
     expect(took).toBeLessThan(1000) // generous: the pair pattern took seconds on it
   })
 
-// The head is cut at whitespace: a cut through a secret would leave a half of it that no pattern of redact matches.
-// Here the 4096th unit is the last one before the `@` of a URL with a password, so a head cut there would hold the
-// whole password and no `@` for the pattern of the URL to end on.
+// The word that the cut goes through is dropped when it has CUT_WORD_MAX units or fewer: a cut through a secret would
+// leave a half of it that no pattern of redact matches. Here the 4096th unit is the last one before the `@` of a URL
+// with a password, so a head cut there would hold the whole password and no `@` for the pattern of the URL to end on.
 test('a secret that the cut of an answer would go through is dropped with its word, not shown unmasked', WITH_READER,
   async ($, on) => {
     bottom(on, mock.clock(on))
@@ -3573,8 +3574,9 @@ test('a Bash command of 128 KB is cut to its head: the hook returns at once and 
     const took = performance.now() - started
 
     expect(took).toBeLessThan(300) // generous: the URL pattern took seconds on it
-    // The head has no whitespace after `Bash `, so the word that the cut goes through is the whole command.
-    expect((await readState($)).log.map(entry => entry.text)).toEqual(['Bash'])
+    // The head has no whitespace after `Bash `, and the run after it is far over CUT_WORD_MAX, so the cut stays in the
+    // command: the line is its start, cut to 64 characters.
+    expect((await readState($)).log.map(entry => entry.text)).toEqual([`Bash ${'a.'.repeat(29)}…`])
   })
 
 test('a prompt of 128 KB is cut to its head: the hook returns at once', SLOW_READER, async ($, on) => {
@@ -3586,9 +3588,25 @@ test('a prompt of 128 KB is cut to its head: the hook returns at once', SLOW_REA
   const took = performance.now() - started
 
   expect(took).toBeLessThan(300) // generous: the URL pattern took seconds on it
-  // The head has no whitespace, so none of it is a whole word: the line is empty.
-  expect((await readState($)).log.map(entry => [entry.who, entry.text])).toEqual([['you', '']])
+  // The head has no whitespace, so the cut stays in it: the line is the start of the prompt, cut to 70 characters.
+  expect((await readState($)).log.map(entry => [entry.who, entry.text])).toEqual([['you', `${'a.'.repeat(34)}a…`]])
 })
+
+// A text in a script with no spaces (here Japanese) can have one ASCII word near its start, and no whitespace after
+// that. The last run of its head is then the whole text, far over CUT_WORD_MAX, so it stays and the line shows it; the
+// head cut at the last whitespace (0.4.1) would have kept the word alone. The text is longer than the head (4096).
+test('a prompt of one ASCII word and 5100 CJK characters with no whitespace shows the CJK text after the word',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+
+    const japanese = '日本語'.repeat(1700)
+    await $.turn.start({ text: `README ${japanese}`, turnId: 't1' })
+
+    expect((await readState($)).log.map(entry => [entry.who, entry.text])).toEqual([
+      ['you', `README ${japanese.slice(0, 62)}…`], // the word and its space (7), 62 of the text, the ellipsis
+    ])
+  })
 
 test('a subagent description of 128 KB is cut to its head: the hook returns at once', SLOW_READER, async ($, on) => {
   bottom(on, mock.clock(on))
@@ -3599,9 +3617,9 @@ test('a subagent description of 128 KB is cut to its head: the hook returns at o
   const took = performance.now() - started
 
   expect(took).toBeLessThan(300) // generous: the URL pattern took seconds on it
-  // The head has no whitespace after `spawned · engineer: `, so the word that the cut goes through is the whole
-  // description: the line is the spawn line with no description.
-  expect((await readState($)).log.map(entry => entry.text)).toEqual(['spawned · engineer:'])
+  // The head has no whitespace after `spawned · engineer: `, and the run after it is far over CUT_WORD_MAX, so the cut
+  // stays in the description: the line is the spawn line and the start of the description, cut to 70 characters.
+  expect((await readState($)).log.map(entry => entry.text)).toEqual([`spawned · engineer: ${'a.'.repeat(24)}a…`])
 })
 
 test('the answer of a subagent loses its markdown marks, whether the engine gave it or the agent handed it back',
@@ -4343,7 +4361,7 @@ test('a compaction is logged and refreshes usage; a skipped one and a subagent\'
     expect((await readState($)).log).toHaveLength(1)
   })
 
-// The count of every line put on the log, which the log's 60 lines do not hold once there are more.
+// The count of every line put on the log, which the log's 200 lines do not hold once there are more.
 test('every path that puts a line on the log adds one to its count', SLOW_READER, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   bottom(on, clock)
@@ -4368,17 +4386,17 @@ test('every path that puts a line on the log adds one to its count', SLOW_READER
   expect((await readState($)).log).toHaveLength(expected)
 })
 
-test('after 65 events the log holds 60 lines and the count says 65', SLOW_READER, async ($, on) => {
+test('after 205 events the log holds 200 lines and the count says 205', SLOW_READER, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   bottom(on, clock)
   await $.session.start(START)
   await clock.advance(1)
 
-  for (let i = 1; i <= 65; i += 1) await $.turn.start({ text: `prompt ${i}`, turnId: `t${i}` })
+  for (let i = 1; i <= LOG_MAX + 5; i += 1) await $.turn.start({ text: `prompt ${i}`, turnId: `t${i}` })
 
   const state = await readState($)
-  expect(state.log).toHaveLength(60)
-  expect(state.logCount).toBe(65)
+  expect(state.log).toHaveLength(LOG_MAX)
+  expect(state.logCount).toBe(LOG_MAX + 5)
 })
 
 // A hot reload raises session.start again, for the mod alone, and the values of `$.state` stay: the count goes on.
@@ -4491,7 +4509,7 @@ test('a /clear or a resume drops a message handed back and not read yet; any oth
 // The two writes of a log line, the line and its count, are two steps, and the pane may be drawn between them. The line
 // goes first. The header's total is `max(logCount, lines held)` and the pane says `+N more` for what the lines do not
 // show, so a count written first would stand one above the lines for that moment: a `+1 more` that flashes on every
-// event of the first 60 of a conversation. The holder lets the first write of the second line land and stops the hook
+// event of the first 200 of a conversation. The holder lets the first write of the second line land and stops the hook
 // there, and the pane is drawn in the gap.
 test('between the two writes of a log line the pane draws no +N more', WITH_WRITE_HOLDER, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })

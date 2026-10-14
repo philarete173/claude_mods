@@ -768,7 +768,7 @@ function sourcesSection(d: Draw): Block {
 // the rows that the blocks above it leave: the body's, less theirs (`above`, which the builders count from the rows
 // they draw) and less its own rule and header. If all its `total` events fit in them, that many; if not, one row goes
 // to the `+N more` line and the Log has the rest, never fewer than MIN_LOG_ROWS lines: below that the pane scrolls. The
-// log holds the newest 60 events at most (pushLog), so the lines drawn are these or all it holds, whichever are fewer.
+// log holds the newest 200 events at most (pushLog), so the lines drawn are these or all it holds, whichever are fewer.
 // Where the body's height is not known the Log has MAX_LOG_ROWS.
 //
 // The count of the rows above is exact but for the chips of MCP (chipRows), which wrap, and that is made to err on the

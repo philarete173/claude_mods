@@ -4,6 +4,7 @@ import {
   attributeCost,
   cacheHitPct,
   computeTurnStats,
+  CUT_WORD_MAX,
   fmtClock,
   fmtCountdown,
   fmtDuration,
@@ -12,6 +13,7 @@ import {
   fmtTokens,
   fmtTtft,
   fmtUsd,
+  LOG_MAX,
   mergedLength,
   orderAgents,
   parseStatus,
@@ -210,15 +212,16 @@ test('orderAgents', () => {
 })
 
 test('pushLog', () => {
+  expect(LOG_MAX).toBe(200) // the Log keeps 200 lines
   const entry = (at: number): LogEntry => ({ at, who: 'main', text: `e${at}`, kind: 'info' })
-  const log = Array.from({ length: 60 }, (_, i) => entry(60 - i)) // newest first: 60 ... 1
-  const next = pushLog(log, entry(61))
-  expect(next).toHaveLength(60)
-  expect(next[0]?.at).toBe(61)
-  expect(next[1]?.at).toBe(60)
-  expect(next[59]?.at).toBe(2) // the oldest one fell out
-  expect(log).toHaveLength(60) // the source is not mutated
-  expect(pushLog(log, entry(61), 3).map(e => e.at)).toEqual([61, 60, 59])
+  const log = Array.from({ length: LOG_MAX }, (_, i) => entry(LOG_MAX - i)) // newest first: LOG_MAX ... 1
+  const next = pushLog(log, entry(LOG_MAX + 1))
+  expect(next).toHaveLength(LOG_MAX)
+  expect(next[0]?.at).toBe(LOG_MAX + 1)
+  expect(next[1]?.at).toBe(LOG_MAX)
+  expect(next[LOG_MAX - 1]?.at).toBe(2) // the oldest one fell out
+  expect(log).toHaveLength(LOG_MAX) // the source is not mutated
+  expect(pushLog(log, entry(LOG_MAX + 1), 3).map(e => e.at)).toEqual([LOG_MAX + 1, LOG_MAX, LOG_MAX - 1])
 })
 
 test('shortType', () => {
@@ -566,7 +569,7 @@ test('textHead does not split a surrogate pair: the high surrogate that the cut 
   expect(textHead(`a${lone}`, 2)).toBe(`a${lone}`)
 })
 
-test('wordHead is the head of a text less the word that the cut goes through; one of `max` units or fewer is not cut',
+test('wordHead is the head of a text less a short word the cut goes through; one of `max` units or fewer is not cut',
   () => {
     expect(wordHead('abc def', 7)).toBe('abc def')
     expect(wordHead('abc def', 20)).toBe('abc def')
@@ -581,16 +584,29 @@ test('wordHead is the head of a text less the word that the cut goes through; on
     expect(wordHead('abc\ndef', 4)).toBe('abc\n')
     expect(wordHead('abc\tdef', 4)).toBe('abc\t')
     expect(wordHead('abc  \n def', 6)).toBe('abc  \n')
-    // A head with no whitespace at all holds no word whole.
-    expect(wordHead('abcdefgh', 4)).toBe('')
+    // A head with no whitespace at all is the head as textHead gives it: nothing in it is a word that ended.
+    expect(wordHead('abcdefgh', 4)).toBe('abcd')
   })
+
+test('wordHead drops the last word of the head when it has CUT_WORD_MAX units or fewer, and keeps a longer one', () => {
+  expect(CUT_WORD_MAX).toBe(256)
+  // A last run of 256 units goes, with the whitespace before it kept.
+  expect(wordHead(`ab ${'x'.repeat(256)}y`, 3 + 256)).toBe('ab ')
+  // One of 257 units stays: the head is cut through it.
+  expect(wordHead(`ab ${'x'.repeat(257)}y`, 3 + 257)).toBe(`ab ${'x'.repeat(257)}`)
+  // Whitespace and then a run of 4000 units, a paragraph of a script that has no spaces: the run stays, cut through.
+  expect(wordHead(`ab ${'あ'.repeat(4000)}`, 1000)).toBe(`ab ${'あ'.repeat(997)}`)
+  // A head with no whitespace is the head as textHead gives it, whether its run has 256 units or 257.
+  expect(wordHead('x'.repeat(300), 256)).toBe('x'.repeat(256))
+  expect(wordHead('x'.repeat(300), 257)).toBe('x'.repeat(257))
+})
 
 test('wordHead takes whitespace as `\\s` does: a no-break space and a wide space end a word like a plain one', () => {
   expect(wordHead(`ab${NBSP}cdef`, 5)).toBe(`ab${NBSP}`)
   expect(wordHead(`ab${NBSP}cdef`, 3)).toBe(`ab${NBSP}`)
   expect(wordHead(`ab${EM_SPACE}cdef`, 5)).toBe(`ab${EM_SPACE}`)
   // A zero-width space is no whitespace to `\s`, so the word goes on through it.
-  expect(wordHead('ab\u200Bcdef', 5)).toBe('')
+  expect(wordHead('x ab\u200Bcdef', 6)).toBe('x ')
 })
 
 test('wordHead drops a word that the cut splits a surrogate pair of, and keeps a pair that stands whole', () => {
@@ -598,14 +614,15 @@ test('wordHead drops a word that the cut splits a surrogate pair of, and keeps a
   expect(wordHead(`ab c${ROCKET}d`, 5)).toBe('ab ')
   expect(wordHead(`ab c${ROCKET}d`, 6)).toBe('ab ') // a pair that is whole at the cut is part of the word too
   expect(wordHead(`${ROCKET} ${ROCKET}`, 3)).toBe(`${ROCKET} `)
-  expect(wordHead(`${ROCKET}${ROCKET}`, 3)).toBe('')
+  // A head with no whitespace is textHead's: the high surrogate at the cut goes, the pair before it stays.
+  expect(wordHead(`${ROCKET}${ROCKET}`, 3)).toBe(ROCKET)
 })
 
-// The head of the Log's texts is 4096 units, and a head with no whitespace is run through to its start.
+// The head of the Log's texts is 4096 units, and the scan back from its end stops after CUT_WORD_MAX units of a run.
 test('wordHead handles a head of 4096 units with no whitespace, and more after it, in a few milliseconds', () => {
   const started = performance.now()
-  expect(wordHead(`${'x'.repeat(4096)} and more`, 4096)).toBe('')
-  expect(wordHead('x'.repeat(100_000), 4096)).toBe('')
+  expect(wordHead(`${'x'.repeat(4096)} and more`, 4096)).toBe('x'.repeat(4096))
+  expect(wordHead('x'.repeat(100_000), 4096)).toBe('x'.repeat(4096))
   expect(performance.now() - started).toBeLessThan(500)
 })
 

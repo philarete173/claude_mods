@@ -223,7 +223,8 @@ const usageFields = (
 // inputs: the pair pattern of plainText (224 KB of ` **x**y` took 4.1 s in Node 22) and the URL pattern of redact
 // (128 KB of `a.` took 5.5 s in Node 22). These texts come from the agents (a Bash command can be steered by a prompt
 // injection, and the hook of tool.call gates every tool call), so a crafted one could stall a hook: only the head of a
-// text is worked on, and it is cut at whitespace (wordHead), so that no secret without whitespace in it is cut in two.
+// text is worked on. The word that the cut goes through is dropped (wordHead) when it has CUT_WORD_MAX units or fewer,
+// so that no secret is cut in two; a longer run is text, and the head is cut through it.
 const TEXT_HEAD_MAX = 4096
 
 // The log line of a subagent that has ended: its text, and its outcome, the time it took behind a mark (✓ for an
@@ -256,11 +257,11 @@ function inBackground($: EngineInterface, job: () => Promise<void>): void {
   })
 }
 
-// Puts a line on top of the log, and counts it: the log keeps the newest 60 lines, the count every line since the log
+// Puts a line on top of the log, and counts it: the log keeps the newest 200 lines, the count every line since the log
 // was last emptied. The outcome of an action, a mark and its time, is a field of its own; a line with none has no such
 // key. The line goes first. The header's total is max(logCount, lines held) and the pane says `+N more` for the events
 // that its lines do not show, so a count written first would stand one above the lines between the two writes, and a
-// redraw there would flash a `+1 more` on each of the first 60 events of a conversation. A /clear or a resume empties
+// redraw there would flash a `+1 more` on each of the first 200 events of a conversation. A /clear or a resume empties
 // the log and the count, and a count that lands after the reset's own write to it would stand one above the lines for
 // the rest of the conversation (the 0.4.0 live check, finding 7). So a call counts only when no reset was running when
 // it started and none has started since (resetsRunning, logEpoch). A reset that runs at the start matters because its
