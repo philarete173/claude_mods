@@ -53,21 +53,23 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
 - **MCP**: the servers that have tools in the context, by name, with their count. The desktop app's own servers
   (`ccd_*`, `Claude_Browser`, `scheduled-tasks`, `terminal`) are hidden and not counted.
 - **Context sources**: how many skills and MCP servers feed the context.
-- **Log**: the last 60 events, newest first, as many lines as fit under the other blocks and at least 8. A dim `+N more`
-  line at the bottom counts the events that are not drawn, and the header counts every event it has seen (`/clear`,
-  resume and restarting Claude Code start it over). Folding another section gives the Log its room; when not even 8
-  lines fit, the pane scrolls; where the body's height is not known, it draws 15 lines. The panel counts the rows of the
-  blocks above the Log itself; only the wrap of the MCP chips is an estimate, made on the high side, so a wrong guess
-  leaves a blank row rather than cutting the last line. The events are prompts, tool calls, subagent spawns, resumes
-  and results (a successful Agent call, a SendMessage to a known subagent or a subagent's `SubagentHandback` is not
-  logged: their lines say it), compactions. Tool calls and subagent results both carry their outcome (✓/✗ and the
+- **Log**: the last 200 events, newest first, as many lines as fit under the other blocks and at least 8. A dim
+  `+N more` line at the bottom counts the events that are not drawn, and the header counts every event it has seen
+  (`/clear`, resume and restarting Claude Code start it over). Folding another section gives the Log its room; when not
+  even 8 lines fit, the pane scrolls; where the body's height is not known, it draws 15 lines. The panel counts the rows
+  of the blocks above the Log itself; only the wrap of the MCP chips is an estimate, made on the high side, so a wrong
+  guess leaves a blank row rather than cutting the last line. The events are prompts, tool calls, subagent spawns,
+  resumes and results (a successful Agent call, a SendMessage to a known subagent or a subagent's `SubagentHandback` is
+  not logged: their lines say it), compactions. Tool calls and subagent results both carry their outcome (✓/✗ and the
   time, or denied) in a right-aligned column. A call that comes back as an error because it was abandoned (you
   interrupted it, or a stop did) is not drawn as an error: it is not red, its `who` and outcome are dim as on every line
   that is no error, and its outcome is the time alone, with no ✗; this rests on the engine's `next.signal`, and was
   seen live for a subagent stopped with `TaskStop` and for Esc on the main agent, while a call that fails by itself
-  stays red. A subagent's answer loses its markdown marks (a pair of `**`, unless an ASCII letter, digit or `_` touches
-  it on the outside, so `2**10 and 3**4` stays, and a letter of another script does not stop it: `这是**重要**的` gives
-  `这是重要的`; backticks; a heading's `#`).
+  stays red. A call of an agent that is not in Subagents (a workflow's agent, or one of the engine's own forks, which
+  have every tool refused) is labeled `agent`, and its failure is drawn dim, not red: the pane cannot tell a fork's
+  refused try from a real failure. A subagent's answer loses its markdown marks (a pair of `**`, unless an ASCII letter,
+  digit or `_` touches it on the outside, so `2**10 and 3**4` stays, and a letter of another script does not stop it:
+  `这是**重要**的` gives `这是重要的`; backticks; a heading's `#`).
   In auto mode a subagent's `done` line shows the report it handed back, even when auto mode withheld or flagged it;
   the text is masked as any other, and the main agent did not get it, a known limitation. In a narrow pane the `who`
   column gives way first, and then the outcome moves in front of the text; where there is no `who`, a prompt reads
@@ -120,7 +122,8 @@ Total = Session + Subagents.
   its parent) would hide the repository of a session started in one of the repository's folders. So a session in such a
   folder reads that repository, as `git status` there does, within the budget. Each status and the diff re-hash the
   files whose stat data changed, since the mod never refreshes the index, so a clean filter can run on a changed tracked
-  file up to four times in one read when the second status runs; the budget and the gap between reads bound that.
+  file up to five times in one read (with git 2.43, once in each status and two or three times in the diff); the budget
+  and the gap between reads bound that.
 - A read gives up early. The changes of one read have 30 s in all: each git call gets the time left, up to its own 10 s,
   and when none is left the read ends as that call's failure would. The count of new files stops at its first failure.
   Once two reads in a row had a `git status`, or a `git diff` against HEAD, that timed out or failed to start, the

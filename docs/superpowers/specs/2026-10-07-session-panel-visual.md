@@ -902,7 +902,7 @@ function mcpSection(d: Draw): Block {
 // the rows that the blocks above it leave: the body's, less theirs (`above`, which the builders count from the rows
 // they draw) and less its own rule and header. If all its `total` events fit in them, that many; if not, one row goes
 // to the `+N more` line and the Log has the rest, never fewer than MIN_LOG_ROWS lines: below that the pane scrolls. The
-// log holds the newest 60 events at most (pushLog), so the lines drawn are these or all it holds, whichever are fewer.
+// log holds the newest 200 events at most (pushLog), so the lines drawn are these or all it holds, whichever are fewer.
 // Where the body's height is not known the Log has MAX_LOG_ROWS.
 //
 // The count of the rows above is exact but for the chips of MCP (chipRows), which wrap, and that is made to err on the
@@ -1084,17 +1084,17 @@ function logParts(d: Draw, above: number): RenderElement[] {
 
 ### 6.12 Log height
 
-The Log draws as many lines as fit under the blocks above it, at least 8 (`MIN_LOG_ROWS`), of the last 60 events, newest
-first. A dim `+N more` line at its bottom counts the events it does not draw. The header's summary is the count of every
-event, `max(logCount, lines held)`: a session that began on an earlier build has lines that its count never saw. The
-first 8 lines always show. Folding another section gives the Log its room. When not even 8 lines fit, the pane scrolls,
-and the engine does that. Where the body's height is not known (`bodyRows` 0), the Log draws 15 lines (`MAX_LOG_ROWS`)
-at their natural height, in one Box, and then the `+N more` line.
+The Log draws as many lines as fit under the blocks above it, at least 8 (`MIN_LOG_ROWS`), of the last 200 events,
+newest first. A dim `+N more` line at its bottom counts the events it does not draw. The header's summary is the count
+of every event, `max(logCount, lines held)`: a session that began on an earlier build has lines that its count never
+saw. The first 8 lines always show. Folding another section gives the Log its room. When not even 8 lines fit, the pane
+scrolls, and the engine does that. Where the body's height is not known (`bodyRows` 0), the Log draws 15 lines
+(`MAX_LOG_ROWS`) at their natural height, in one Box, and then the `+N more` line.
 
 - **How many lines fit** (`logLinesFit` in §6.10; the 0.4.0 spec, `2026-10-12-session-panel-v2-design.md`, §3.2):
   - `room = bodyRows − rows above − 2`, where the 2 are the Log's own rule and header;
-  - if every event fits in `room`, the Log draws all of them, though never more than the 60 it holds;
-  - otherwise it draws `max(8, room − 1)` lines, never more than the 60 it holds, and one row goes to the
+  - if every event fits in `room`, the Log draws all of them, though never more than the 200 it holds;
+  - otherwise it draws `max(8, room − 1)` lines, never more than the 200 it holds, and one row goes to the
     `+N more` line;
   - N is the total less the lines drawn. The line shows exactly when N is above 0, and never for a folded Log, which
     keeps its count in the header.

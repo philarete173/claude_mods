@@ -1938,7 +1938,7 @@ test('a folded Log is its rule and its header, and a Log with no lines is nothin
 })
 
 test('the Log header shows the count of all the events, not the lines the log holds, folded or not', () => {
-  // The log holds the newest 60 lines: of 65 events, the 5 oldest have left it, and the count still has them.
+  // The log holds fewer lines than its count: 60 lines of 65 events, and the header still counts all 65.
   const data = { ...FULL, log: logLines(60), logCount: 65 }
   for (const surface of SURFACES) {
     for (const collapsed of [{}, { log: true }] as Array<Record<string, boolean>>) {
@@ -2161,10 +2161,11 @@ test('the line that counts the rest is a dim Text, indented as the Subagents\', 
   }
 })
 
-test('a count past the 60 lines of the buffer keeps its `+N more`: 60 lines, and the rest counted, any body', () => {
+test('a count past the lines the log holds keeps its `+N more`: 60 lines held, and the rest counted, any body', () => {
   for (const surface of SURFACES) {
-    // 100 events, the newest 60 of them in the log. The Log has the body's rows less 7: with 107 it has room for all
-    // 100 events and with 90 for 83, and with no height known 15 are drawn. Only 60 lines exist, whatever the room.
+    // 100 events, the newest 60 of them held by the log. The Log has the body's rows less 7: with 107 it has room for
+    // all 100 events and with 90 for 83, and with no height known 15 are drawn. Only 60 lines are held, whatever the
+    // room.
     for (const [bodyRows, drawn] of [[90, 60], [106, 60], [107, 60], [200, 60], [0, 15]] as const) {
       const where = `${surface} ${bodyRows} rows`
       const tree = draw(onSurface(withLog(logLines(60), 100), surface), 45, bodyRows)
