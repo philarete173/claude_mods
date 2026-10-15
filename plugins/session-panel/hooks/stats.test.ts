@@ -5,6 +5,7 @@ import {
   cacheHitPct,
   computeTurnStats,
   CUT_WORD_MAX,
+  finishTask,
   fmtClock,
   fmtCountdown,
   fmtDuration,
@@ -14,9 +15,12 @@ import {
   fmtTtft,
   fmtUsd,
   LOG_MAX,
+  LOG_TEXT_MAX,
   mergedLength,
   orderAgents,
+  orderTasks,
   parseStatus,
+  parseTaskNotification,
   plainText,
   pushLog,
   redact,
@@ -26,11 +30,14 @@ import {
   stripFormat,
   sumNumstat,
   sumUsage,
+  taskFromCall,
   textHead,
   toolLabel,
   wordHead,
 } from './stats'
-import type { AgentRow, AgentStatus, Interval, LogEntry, StepTiming, TurnAcc, Usage } from './stats'
+import type {
+  AgentRow, AgentStatus, Interval, LogEntry, StepTiming, TaskEnd, TaskRow, TaskStatus, TurnAcc, Usage,
+} from './stats'
 
 // claude-code/testing has no toBeCloseTo, so a tolerance is checked by hand.
 function expectNear(actual: number | null, expected: number, eps = 1e-9): void {
@@ -54,6 +61,10 @@ const A: TurnAcc = {
 const agent = (status: AgentStatus, startedAt: number): AgentRow => ({
   id: `${status}@${startedAt}`, description: 'd', type: 't', model: null, status, startedAt,
   endedAt: null, costUsd: null,
+})
+
+const task = (status: TaskStatus, startedAt: number | null, id = `${status}@${startedAt}`): TaskRow => ({
+  id, kind: 'shell', description: 'd', status, startedAt, endedAt: null, durationMs: null,
 })
 
 test('mergedLength', () => {
@@ -553,6 +564,16 @@ test('shorten takes the format characters out before it cuts', () => {
   expect(shorten('\u202E\u200B', 5)).toBe('')
 })
 
+test('shorten does not cut a surrogate pair in two: the ellipsis follows a whole emoji, never a lone surrogate', () => {
+  const rockets = ROCKET.repeat(10) // 20 UTF-16 units
+  // The cut of max 6 is 5 units: two rockets and the first unit of a third, which goes too.
+  expect(shorten(rockets, 6)).toBe(`${ROCKET}${ROCKET}…`)
+  expect(shorten(rockets, 5)).toBe(`${ROCKET}${ROCKET}…`) // 4 units: the pair stands whole
+  // A lone surrogate is what `\p{Cs}` matches with the `u` flag: none at any cut.
+  for (let max = 2; max < 20; max += 1) expect(/\p{Cs}/u.test(shorten(rockets, max)), `max ${max}`).toBe(false)
+  expect(shorten(ROCKET.repeat(3), 6)).toBe(ROCKET.repeat(3)) // a text that fits is not cut
+})
+
 test('redact takes the format characters out first: one inside a secret does not keep it from being masked', () => {
   const split = `ghp_abc\u200Bdefgh12345678`
   expect(redact(split)).toBe('•••')
@@ -748,6 +769,264 @@ test('toolLabel', () => {
     ['TodoWrite', { todos: [] }, 'TodoWrite'],
   ]
   for (const [tool, input, want] of cases) expect(toolLabel(tool, input, '/r'), `toolLabel(${tool})`).toBe(want)
+})
+
+// The arguments are what the tool.call hook has once next(e) is back: the input of the call, and its result.
+test('taskFromCall: a Bash command that went to the background is a running shell task, whoever sent it there', () => {
+  const input = { command: 'sleep 120', description: 'Wait for two minutes', run_in_background: true }
+  expect(taskFromCall('Bash', input, { stdout: '', stderr: '', backgroundTaskId: 'bzzvhtd8a' }, 1000)).toEqual({
+    id: 'bzzvhtd8a', kind: 'shell', description: 'Wait for two minutes', status: 'running', startedAt: 1000,
+    endedAt: null, durationMs: null,
+  })
+  // Ctrl+B and a timeout send a command that runs to the background: its result has the same id, beside a flag.
+  for (const flag of [{ backgroundedByUser: true }, { timedOutAfterMs: 120_000 }]) {
+    const row = taskFromCall('Bash', { command: 'sleep 120' }, { backgroundTaskId: 'b2', ...flag }, 5)
+    expect(row, JSON.stringify(flag)).toEqual({
+      id: 'b2', kind: 'shell', description: 'sleep 120', status: 'running', startedAt: 5, endedAt: null,
+      durationMs: null,
+    })
+  }
+})
+
+test('taskFromCall: the description of a shell task is the one the model gave, else the command, else `shell`', () => {
+  const descriptionOf = (input: object): string | undefined =>
+    taskFromCall('Bash', input, { backgroundTaskId: 'b1' }, 0)?.description
+  expect(descriptionOf({ command: 'npm test', description: 'Run the tests' })).toBe('Run the tests')
+  expect(descriptionOf({ command: 'npm test' })).toBe('npm test')
+  expect(descriptionOf({ command: 'npm test', description: '' })).toBe('npm test')
+  // A text that nothing is left of once it is cleaned (spaces, a zero-width space, a line break) is no description.
+  expect(descriptionOf({ command: 'npm test', description: ' \u200B\n ' })).toBe('npm test')
+  expect(descriptionOf({ command: ' \u202E ', description: '\u200B' })).toBe('shell')
+})
+
+test('taskFromCall: a Monitor with a taskId is a monitor task, described by its description, else `monitor`', () => {
+  const input = { description: 'Errors in the build log', command: 'tail -f build.log', timeout_ms: 300_000 }
+  expect(taskFromCall('Monitor', input, { taskId: 'mq8x1', timeoutMs: 300_000 }, 7)).toEqual({
+    id: 'mq8x1', kind: 'monitor', description: 'Errors in the build log', status: 'running', startedAt: 7,
+    endedAt: null, durationMs: null,
+  })
+  // A description that nothing is left of once it is cleaned is none: the name of the kind stands in, not the command.
+  const blank = { ...input, description: ' \u200B ' }
+  expect(taskFromCall('Monitor', blank, { taskId: 'mq8x1' }, 7)?.description).toBe('monitor')
+})
+
+test('taskFromCall: a Workflow with a taskId is a workflow task, named by its result, then its input, then `workflow`',
+  () => {
+    const launched = { status: 'async_launched', taskType: 'local_workflow', taskId: 'wcq0w65wv' }
+    const row = (input: object, result: object): TaskRow | null =>
+      taskFromCall('Workflow', input, { ...launched, ...result }, 9)
+    expect(row({ name: 'review' }, { workflowName: 'Deep review' })).toEqual({
+      id: 'wcq0w65wv', kind: 'workflow', description: 'Deep review', status: 'running', startedAt: 9, endedAt: null,
+      durationMs: null,
+    })
+    expect(row({ name: 'review' }, {})?.description).toBe('review')
+    expect(row({ script: 'export const meta = {}' }, {})?.description).toBe('workflow')
+    expect(row({ name: '' }, { workflowName: '' })?.description).toBe('workflow')
+    // A name that nothing is left of once it is cleaned is none, and the next one stands in.
+    expect(row({ name: 'review' }, { workflowName: '\u200B' })?.description).toBe('review')
+    expect(row({ name: ' ' }, { workflowName: ' ' })?.description).toBe('workflow')
+  })
+
+test('taskFromCall: a call that started no background task, or none the pane tracks, is null', () => {
+  const cases: Array<[tool: string, input: unknown, result: unknown]> = [
+    ['Bash', { command: 'ls' }, { stdout: 'a', stderr: '', interrupted: false }], // it ran to its end
+    ['Bash', { command: 'ls' }, { backgroundTaskId: '' }],
+    ['Bash', { command: 'ls' }, { backgroundTaskId: 7 }],
+    ['Monitor', { description: 'd' }, { timeoutMs: 1000 }],
+    ['Workflow', { name: 'w' }, { status: 'async_launched', error: 'a syntax error' }],
+    // A workflow sent to the cloud is a remote agent, which the pane leaves out: either word of its result says so.
+    ['Workflow', { name: 'w' }, { status: 'remote_launched', taskId: 'r1' }],
+    ['Workflow', { name: 'w' }, { status: 'async_launched', taskId: 'r1', taskType: 'remote_agent' }],
+    // Another tool is none of these, whatever its result holds: a subagent has its own section.
+    ['Agent', { description: 'd' }, { status: 'async_launched', agentId: 'a1', taskId: 't1' }],
+    ['TaskStop', { task_id: 'b1' }, { task_id: 'b1', backgroundTaskId: 'b1' }],
+    ['Read', { file_path: '/r/a.ts' }, { taskId: 'x' }],
+    // No result (the call was denied), or one that is no record.
+    ['Bash', { command: 'ls' }, undefined],
+    ['Bash', { command: 'ls' }, null],
+    ['Bash', { command: 'ls' }, 'text'],
+  ]
+  for (const [tool, input, result] of cases) {
+    expect(taskFromCall(tool, input, result, 0), `${tool} ${JSON.stringify(result)}`).toBe(null)
+  }
+})
+
+// Every source of a description, each given the text: the description and the command of a Bash call, the description
+// of a Monitor, and the name of a Workflow, from its result and from its input.
+const described = (text: string): string[] =>
+  [
+    taskFromCall('Bash', { command: 'x', description: text }, { backgroundTaskId: 'b1' }, 0),
+    taskFromCall('Bash', { command: text }, { backgroundTaskId: 'b1' }, 0),
+    taskFromCall('Monitor', { description: text }, { taskId: 'm1' }, 0),
+    taskFromCall('Workflow', { name: 'x' }, { taskId: 'w1', workflowName: text }, 0),
+    taskFromCall('Workflow', { name: text }, { taskId: 'w1' }, 0),
+  ].map(row => row?.description ?? 'no row')
+
+// The description is the model's own text, as a Log line is: a command can hold a secret, and the pane draws it.
+test('taskFromCall masks a secret in a description, whichever source it comes from', () => {
+  for (const description of described('export API_KEY=xyz123 && sleep 120')) {
+    expect(description).toBe('export API_KEY=••• && sleep 120')
+  }
+  for (const description of described('psql postgres://user:hunter2@db:5432/x -f dump.sql')) {
+    expect(description).toBe('psql postgres://user:•••@db:5432/x -f dump.sql')
+  }
+  for (const description of described('curl -H "Authorization: Bearer abcdefgh12345" https://x.io')) {
+    expect(description).not.toContain('abcdefgh12345')
+  }
+})
+
+// The engine refuses a text child that holds a control character, and draws its own pane in place of the mod's.
+test('taskFromCall takes an ANSI escape sequence and the control and format characters out of a description', () => {
+  const dirty = '\u001b[31mnpm\u001b[0m run\u0000 build\u0007 \u202E--watch\n  now\tdone'
+  for (const description of described(dirty)) expect(description).toBe('npm run build --watch now done')
+})
+
+test('taskFromCall keeps LOG_TEXT_MAX characters of a description, the last one an ellipsis', () => {
+  expect(LOG_TEXT_MAX).toBe(512)
+  for (const description of described('x'.repeat(600))) expect(description).toBe(`${'x'.repeat(511)}…`)
+  for (const description of described('x'.repeat(512))) expect(description).toBe('x'.repeat(512))
+})
+
+// The command of a Bash call can be steered by a prompt injection, and the hook of tool.call runs for every call: the
+// URL pattern of redact takes quadratic time on a text such as `a.a.a.…` (128 KB of it took 5.5 s in Node 22), so only
+// the head of the text is read by it.
+test('taskFromCall reads the head of a 128 KB description: milliseconds, not seconds', () => {
+  const started = performance.now()
+  const row = taskFromCall('Bash', { command: 'a.'.repeat(65_536) }, { backgroundTaskId: 'b1' }, 0)
+  expect(row?.description).toBe(`${'a.'.repeat(255)}a…`)
+  expect(performance.now() - started).toBeLessThan(300)
+})
+
+// A notification as the engine sends it (the v2 spec, §8.5): the header, the summary, and what follows. A shell command
+// has nothing after the summary; a subagent and a workflow add their result and a usage block with the time they ran.
+const notification = (id: string, status: string, summary: string, tail = ''): string =>
+  `<task-notification>\n<task-id>${id}</task-id>\n<tool-use-id>toolu_01TkA4cq2o2Hn55hdQA4jJWG</tool-use-id>\n` +
+  `<output-file>/tmp/claude-1000/p/tasks/${id}.output</output-file>\n<status>${status}</status>\n` +
+  `<summary>${summary}</summary>\n${tail}</task-notification>`
+const usageBlock = (ms: number): string =>
+  `<usage><subagent_tokens>19770</subagent_tokens><tool_uses>3</tool_uses><duration_ms>${ms}</duration_ms></usage>\n`
+
+test('parseTaskNotification reads the id and the outcome: completed, failed, killed and stopped', () => {
+  const cases: Array<[text: string, want: TaskEnd]> = [
+    [
+      notification('bzzvhtd8a', 'completed', 'Background command "sleep 60" completed (exit code 0)'),
+      { id: 'bzzvhtd8a', status: 'completed', durationMs: null },
+    ],
+    [
+      notification('bqjf7o4gg', 'failed', 'Background command "make" failed with exit code 2'),
+      { id: 'bqjf7o4gg', status: 'failed', durationMs: null },
+    ],
+    [
+      notification('a85029748ff1ea697', 'killed', 'Agent "Long sleep" was stopped by Claude'),
+      { id: 'a85029748ff1ea697', status: 'killed', durationMs: null },
+    ],
+    [
+      notification('bc3d9f2kx', 'stopped', "Background shell command didn't finish before the previous session ended"),
+      { id: 'bc3d9f2kx', status: 'stopped', durationMs: null },
+    ],
+  ]
+  for (const [text, want] of cases) expect(parseTaskNotification(text), want.status).toEqual(want)
+})
+
+test('parseTaskNotification takes the duration from <duration_ms> when the notification has one', () => {
+  const result = '<result>{"answer":"OK"}</result>\n<diagnostics>Per-agent results: journal.jsonl</diagnostics>\n'
+  const workflow = notification('wcq0w65wv', 'completed', 'Dynamic workflow "w" completed', result + usageBlock(7897))
+  expect(parseTaskNotification(workflow)).toEqual({ id: 'wcq0w65wv', status: 'completed', durationMs: 7897 })
+  const agent = notification('a1', 'killed', 'Agent "x" was stopped by the user', usageBlock(0))
+  expect(parseTaskNotification(agent)).toEqual({ id: 'a1', status: 'killed', durationMs: 0 })
+  // A duration that is no whole number, or lies past the safe integers (400 digits are Infinity), is none.
+  for (const ms of ['', 'soon', '12 s', '9'.repeat(400), '9007199254740992']) {
+    const tail = `<usage><duration_ms>${ms}</duration_ms></usage>\n`
+    const text = notification('a1', 'completed', 'Agent "x" finished', tail)
+    expect(parseTaskNotification(text), JSON.stringify(ms)).toEqual({ id: 'a1', status: 'completed', durationMs: null })
+  }
+})
+
+// A result is free text, and it can quote a notification. The header comes first and the usage block last, so the
+// first id and status and the last duration are the engine's own.
+test('parseTaskNotification: a result that quotes the tags does not change the id, the status or the duration', () => {
+  const quoted = '<result>It said <task-id>other</task-id>, <status>failed</status>, <duration_ms>5</duration_ms>.' +
+    '</result>\n'
+  const text = notification('a1', 'completed', 'Agent "x" finished', quoted + usageBlock(900))
+  expect(parseTaskNotification(text)).toEqual({ id: 'a1', status: 'completed', durationMs: 900 })
+})
+
+test('parseTaskNotification: a text with no <task-id> is no notification, nor is one whose status is no end', () => {
+  const header = (id: string, status: string): string =>
+    `<task-notification>\n${id}${status}<summary>s</summary>\n</task-notification>`
+  const texts = [
+    '', 'hello', '{"task-id":"a1","status":"completed"}', '<system-reminder>Run the tests.</system-reminder>',
+    '<command-name>/compact</command-name>',
+    // A notification with no id, an empty one and one that never closes.
+    header('', '<status>completed</status>\n'),
+    header('<task-id></task-id>\n', '<status>completed</status>\n'),
+    header('<task-id>a1\n', '<status>completed</status>\n'),
+    // A status that is no end of a task: an unknown one, a real one in the wrong case, none, and one that never closes.
+    notification('a1', 'paused', 's'),
+    notification('a1', 'running', 's'),
+    notification('a1', 'Completed', 's'),
+    notification('a1', '', 's'),
+    header('<task-id>a1</task-id>\n', ''),
+    header('<task-id>a1</task-id>\n', '<status>completed\n'),
+  ]
+  for (const text of texts) expect(parseTaskNotification(text), JSON.stringify(text)).toBe(null)
+})
+
+// A notification carries the result of a subagent or a workflow, which can be long, so the tags are found with indexOf:
+// a lazy pattern over the whole text (`<task-id>[\s\S]*?</task-id>`) reads the rest of it from each opening tag again.
+test('parseTaskNotification reads 128 KB once: a long result, and tags that open and never close', () => {
+  const want: TaskEnd = { id: 'wcq0w65wv', status: 'completed', durationMs: 7897 }
+  const opens = (tag: string): string => `<${tag}>`.repeat(Math.ceil(131_072 / (tag.length + 2)))
+  const withResult = (result: string): string => notification(
+    'wcq0w65wv', 'completed', 'Dynamic workflow "w" completed', `<result>${result}</result>\n${usageBlock(7897)}`,
+  )
+  const started = performance.now()
+  expect(parseTaskNotification(withResult('x'.repeat(131_072)))).toEqual(want)
+  for (const tag of ['task-id', 'status', 'duration_ms']) {
+    expect(parseTaskNotification(withResult(opens(tag))), tag).toEqual(want) // a result of 128 KB of opening tags
+    expect(parseTaskNotification(opens(tag)), tag).toBe(null) // and a text of nothing else
+  }
+  expect(performance.now() - started).toBeLessThan(300)
+})
+
+test('finishTask ends the row: the status, the end time, and a duration from the notification or the clock', () => {
+  const running = task('running', 1000)
+  expect(finishTask(running, 'done', 4500, 3000)).toEqual({
+    ...running, status: 'done', endedAt: 4500, durationMs: 3000,
+  })
+  expect(finishTask(running, 'failed', 4500, null)).toEqual({
+    ...running, status: 'failed', endedAt: 4500, durationMs: 3500,
+  })
+  expect(finishTask(running, 'stopped', 4500, null).durationMs).toBe(3500)
+  expect(finishTask(running, 'done', 400, null).durationMs).toBe(0) // the clock was put back: no negative time
+  expect(running).toEqual(task('running', 1000)) // the row is not changed
+  // A duration of 0 is a duration, not a missing one.
+  expect(finishTask(running, 'done', 4500, 0).durationMs).toBe(0)
+})
+
+test('finishTask: a task whose start is not known has no duration of its own, only the notification\'s', () => {
+  const unknown = task('running', null)
+  expect(finishTask(unknown, 'ended', 4500, null)).toEqual({
+    ...unknown, status: 'ended', endedAt: 4500, durationMs: null,
+  })
+  expect(finishTask(unknown, 'done', 4500, 2000).durationMs).toBe(2000)
+})
+
+test('orderTasks puts the running tasks first, then the newest start first, and a start not known last', () => {
+  const rows = [
+    task('done', 100), task('running', 50), task('done', 300), task('running', null), task('failed', null),
+    task('running', 70), task('stopped', 200), task('done', null),
+  ]
+  expect(orderTasks(rows).map(r => r.id)).toEqual([
+    'running@70', 'running@50', 'running@null', 'done@300', 'stopped@200', 'done@100', 'failed@null', 'done@null',
+  ])
+  expect(rows.map(r => r.id)).toEqual([
+    'done@100', 'running@50', 'done@300', 'running@null', 'failed@null', 'running@70', 'stopped@200', 'done@null',
+  ]) // the source is not reordered
+  // Tasks that started at the same time keep their order.
+  expect(orderTasks([task('running', 10, 'a'), task('running', 10, 'b'), task('running', 10, 'c')]).map(r => r.id))
+    .toEqual(['a', 'b', 'c'])
+  expect(orderTasks([])).toEqual([])
 })
 
 test('parseStatus counts the entries and lists the new files', () => {

@@ -1,6 +1,6 @@
-// Pure helpers of the session-panel mod: turn stats, interval merging, cost attribution, the log ring,
-// redaction and display formats. It imports nothing from the engine and never takes `$`, so every
-// function can be tested on its own.
+// Pure helpers of the session-panel mod: turn stats, interval merging, cost attribution, the log ring, background
+// tasks, redaction and display formats. It imports nothing from the engine and never takes `$`, so every function can
+// be tested on its own.
 
 export type Usage = {
   input_tokens?: number
@@ -52,6 +52,21 @@ export type AgentRow = {
   endedAt: number | null
   costUsd: number | null
 }
+export type TaskKind = 'shell' | 'monitor' | 'workflow'
+// `ended`: the task is over, and how it ended is not known.
+export type TaskStatus = 'running' | 'done' | 'failed' | 'stopped' | 'ended'
+export type TaskRow = {
+  id: string
+  kind: TaskKind
+  description: string
+  status: TaskStatus
+  // Null for a task that began before the mod saw it: its start, and so its time, is not known.
+  startedAt: number | null
+  endedAt: number | null
+  durationMs: number | null
+}
+// What the notification of a task says: its id, how it ended in the engine's words, and how long it ran, if it says.
+export type TaskEnd = { id: string; status: 'completed' | 'failed' | 'killed' | 'stopped'; durationMs: number | null }
 export type LogKind = 'info' | 'ok' | 'error'
 export type LogEntry = { at: number; who: string; text: string; kind: LogKind; outcome?: string }
 export type CostSplit = { total: number | null; session: number | null; subagents: number }
@@ -291,16 +306,17 @@ export function plainText(s: string): string {
 }
 
 // Takes out the format and control characters (stripFormat), collapses whitespace runs and cuts to `max` characters,
-// the last one being an ellipsis.
+// the last one being an ellipsis. A cut that would leave one unit of a surrogate pair alone drops that unit too
+// (textHead), so the text may come out one unit under `max`.
 export function shorten(s: string, max: number): string {
   const flat = stripFormat(s).replace(/\s+/g, ' ').trim()
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
+  return flat.length > max ? `${textHead(flat, max - 1)}…` : flat
 }
 
 // The first `max` UTF-16 units of a text, for the passes that read a text whole (the pair pattern of plainText takes
-// quadratic time on some long inputs) when a Log line keeps LOG_TEXT_MAX characters of it at most (register.tsx). A cut
-// between the two units of a surrogate pair would leave the high one alone, and a lone surrogate is no character, so
-// that unit goes too. A text of `max` units or fewer comes back as it is.
+// quadratic time on some long inputs) when a Log line keeps LOG_TEXT_MAX characters of it at most. A cut between the
+// two units of a surrogate pair would leave the high one alone, and a lone surrogate is no character, so that unit goes
+// too. A text of `max` units or fewer comes back as it is.
 export function textHead(s: string, max: number): string {
   if (s.length <= max) return s
   const head = s.slice(0, max)
@@ -321,12 +337,12 @@ export const CUT_WORD_MAX = 256
 
 // The head of a text (textHead) less the run of characters at its end that are no whitespace, for the texts that the
 // Log reads: a word cut in two can be a secret that the patterns of redact no longer match (a URL with a password that
-// loses its `@`), and a Log line keeps LOG_TEXT_MAX characters of the text at most anyway (register.tsx). The run goes
-// only when it has CUT_WORD_MAX units or fewer: a longer one stays, and so does a head with no whitespace at all, which
-// is the head as textHead gives it. The whitespace is what `\s` says, as in those patterns, so the no-break space
-// counts. The run is found by a scan back from the end, one character at a time, which stops once it has passed
-// CUT_WORD_MAX units: a pattern such as `\S+$` takes quadratic time on a long word that whitespace follows. A text of
-// `max` units or fewer comes back as it is.
+// loses its `@`), and a Log line keeps LOG_TEXT_MAX characters of the text at most anyway. The run goes only when it
+// has CUT_WORD_MAX units or fewer: a longer one stays, and so does a head with no whitespace at all, which is the head
+// as textHead gives it. The whitespace is what `\s` says, as in those patterns, so the no-break space counts. The run
+// is found by a scan back from the end, one character at a time, which stops once it has passed CUT_WORD_MAX units: a
+// pattern such as `\S+$` takes quadratic time on a long word that whitespace follows. A text of `max` units or fewer
+// comes back as it is.
 export function wordHead(s: string, max: number): string {
   if (s.length <= max) return s
   const head = textHead(s, max)
@@ -337,6 +353,28 @@ export function wordHead(s: string, max: number): string {
   // The run goes only if whitespace ended it within the limit; otherwise the head stays whole.
   return end > floor ? head.slice(0, end) : head
 }
+
+// How much of a text the Log reads, in UTF-16 units: a prompt, the label of a tool call, and the description and the
+// answer of a subagent. A Log line keeps LOG_TEXT_MAX of each at most, and two passes take quadratic time on some long
+// inputs: the pair pattern of plainText (224 KB of ` **x**y` took 4.1 s in Node 22) and the URL pattern of redact
+// (128 KB of `a.` took 5.5 s in Node 22). These texts come from the agents (a Bash command can be steered by a prompt
+// injection, and the hook of tool.call gates every tool call), so a crafted one could stall a hook: the passes that can
+// be slow read only the head of a text. The format and control characters go first, over the whole text (logHead, one
+// linear pass), and the head is cut at whitespace (wordHead), so that a secret the cut goes through keeps its mask,
+// except in a crafted text. The word that the cut goes through is dropped only when it has CUT_WORD_MAX units or fewer;
+// a longer run is text, and the head is cut through it.
+export const TEXT_HEAD_MAX = 4096
+
+// The most of a text that a Log line keeps, in UTF-16 units: more than a line of a pane maximized on a 21:9 monitor
+// shows (about 400 characters). The pane cuts each line to its room, with an ellipsis of its own (`wrap="truncate"`),
+// so a narrow pane shows what it showed before.
+export const LOG_TEXT_MAX = 512
+
+// The head of a text for the Log. The format and control characters go first, over the whole text (stripFormat, one
+// linear pass), so that no invisible character pads a secret past the cut: one counts toward the run that wordHead
+// measures, and a byte order mark ends it, though redact and shorten take them out later. Then the head is cut
+// (wordHead).
+export const logHead = (text: string): string => wordHead(stripFormat(text), TEXT_HEAD_MAX)
 
 const str = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback)
 const relativeTo = (path: string, root: string): string =>
@@ -377,6 +415,95 @@ export function toolLabel(tool: string, input: Record<string, unknown>, root: st
     default:
       return tool
   }
+}
+
+// A value that can be anything, read as a record of fields: the input and the result of a call come as `unknown`.
+const asRecord = (v: unknown): Record<string, unknown> =>
+  typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : {}
+
+// A running task of the given kind, or null when the call gave no id. A description is the model's own text, as a Log
+// line is, and the pane draws it: a command can hold a secret, and a control character in it would make the engine
+// refuse the pane. So each of the texts goes through the pipeline of the Log's lines, and the first that has anything
+// left is the description (one of spaces and format characters is none); the name of the kind is the last resort.
+function runningTask(kind: TaskKind, id: string, texts: string[], now: number): TaskRow | null {
+  if (id === '') return null
+  const cleaned = texts.map(text => shorten(redact(logHead(text)), LOG_TEXT_MAX))
+
+  return {
+    id, kind, description: cleaned.find(text => text !== '') ?? kind, status: 'running', startedAt: now,
+    endedAt: null, durationMs: null,
+  }
+}
+
+// The task that a tool call has started in the background, or null when it started none. A Bash command that runs in
+// the background has a `backgroundTaskId` in its result, whoever sent it there: its own input, Ctrl+B or its timeout. A
+// Monitor and a Workflow have a `taskId`. Each is the id that the notification of the task names (`<task-id>`). Another
+// tool starts none that the pane tracks: a subagent has its row in Subagents.
+export function taskFromCall(tool: string, input: unknown, result: unknown, now: number): TaskRow | null {
+  const given = asRecord(input)
+  const got = asRecord(result)
+  switch (tool) {
+    case 'Bash':
+      return runningTask('shell', str(got.backgroundTaskId), [str(given.description), str(given.command)], now)
+    case 'Monitor':
+      return runningTask('monitor', str(got.taskId), [str(given.description)], now)
+    case 'Workflow':
+      // A workflow sent to the cloud is a remote agent: the v2 spec (§4.4) leaves it out, and its end would not reach
+      // this session.
+      if (got.status === 'remote_launched' || got.taskType === 'remote_agent') return null
+
+      return runningTask('workflow', str(got.taskId), [str(got.workflowName), str(given.name)], now)
+    default:
+      return null
+  }
+}
+
+// The text between the first `<tag>` and the `</tag>` after it, or between the last `<tag>` and its `</tag>` when
+// `fromEnd` is set; undefined when there is no such pair. A notification has its header first, the free text of a
+// result in the middle and its usage block last, so a result that quotes a tag changes neither the id and the status
+// (the first ones) nor the duration (the last one). The tags are found with indexOf, not with a pattern that
+// backtracks: a notification carries the result of a subagent or a workflow, which can be long, and a lazy pattern over
+// the whole text takes quadratic time on a crafted one.
+function tagText(text: string, tag: string, fromEnd = false): string | undefined {
+  const open = `<${tag}>`
+  const start = fromEnd ? text.lastIndexOf(open) : text.indexOf(open)
+  const end = start < 0 ? -1 : text.indexOf(`</${tag}>`, start)
+
+  return end < 0 ? undefined : text.slice(start + open.length, end)
+}
+
+// How a task ended, from its notification: the text of a `prompt.submit` whose origin is `task-notification` (the v2
+// spec, §8.5). The `<task-id>`, the `<status>` and the `<duration_ms>` of the usage block, which a shell command has
+// none of; a duration that is no safe integer is none either. Null for a text with no id, and for a status that is no
+// end of a task: `completed`, `failed`, `killed` and `stopped` are the four that end one. The notice of a task that an
+// earlier session left running has a `<note>` and says `failed` or `stopped`: it parses, and names an id that this
+// session has no row for.
+export function parseTaskNotification(text: string): TaskEnd | null {
+  const id = tagText(text, 'task-id')
+  const status = tagText(text, 'status')
+  const duration = tagText(text, 'duration_ms', true)
+  if (id === undefined || id === '') return null
+  if (status !== 'completed' && status !== 'failed' && status !== 'killed' && status !== 'stopped') return null
+
+  const ms = duration !== undefined && /^\d+$/.test(duration) ? Number(duration) : null
+
+  return { id, status, durationMs: Number.isSafeInteger(ms) ? ms : null }
+}
+
+// The row of a task that has ended: its status, the end time and the time it ran. The notification's duration stands
+// when it gives one; otherwise it is the time from the start to `at`, never under 0 (the wall clock can be put back),
+// and a task whose start is not known has none.
+export function finishTask(row: TaskRow, status: TaskStatus, at: number, durationMs: number | null): TaskRow {
+  const ran = row.startedAt === null ? null : Math.max(0, at - row.startedAt)
+
+  return { ...row, status, endedAt: at, durationMs: durationMs ?? ran }
+}
+
+// Running tasks first, then the newest start first; a task of no known start goes last of its group. The input is left
+// as it was.
+export function orderTasks(rows: TaskRow[]): TaskRow[] {
+  const rank = (r: TaskRow): number => (r.status === 'running' ? 0 : 2) + (r.startedAt === null ? 1 : 0)
+  return [...rows].sort((a, b) => rank(a) - rank(b) || (b.startedAt ?? 0) - (a.startedAt ?? 0))
 }
 
 // The entries of `git status --porcelain -z`: `XY path`, the two status letters, a space and the path, each ended by a

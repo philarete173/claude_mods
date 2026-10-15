@@ -10,8 +10,8 @@ import type {
 } from 'claude-code'
 
 import {
-  addAgentCost, attributeCost, computeTurnStats, fmtDuration, fmtTokens, fmtUsd, parseStatus, plainText, pushLog,
-  redact, shortType, shorten, stripFormat, sumNumstat, toolLabel, wordHead,
+  addAgentCost, attributeCost, computeTurnStats, fmtDuration, fmtTokens, fmtUsd, LOG_TEXT_MAX, logHead, parseStatus,
+  plainText, pushLog, redact, shortType, shorten, stripFormat, sumNumstat, toolLabel,
 } from './stats'
 import type { AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, Usage } from './stats'
 import { renderPane } from './view'
@@ -217,28 +217,6 @@ const usageFields = (
   costUsd: from.cost?.usd,
   rateLimits: from.rateLimits.map(r => ({ kind: r.kind, percentUsed: r.percentUsed, resetsAt: toMs(r.resetsAt) })),
 })
-
-// How much of a text the Log reads, in UTF-16 units: a prompt, the label of a tool call, and the description and the
-// answer of a subagent. A Log line keeps LOG_TEXT_MAX of each at most, and two passes take quadratic time on some long
-// inputs: the pair pattern of plainText (224 KB of ` **x**y` took 4.1 s in Node 22) and the URL pattern of redact
-// (128 KB of `a.` took 5.5 s in Node 22). These texts come from the agents (a Bash command can be steered by a prompt
-// injection, and the hook of tool.call gates every tool call), so a crafted one could stall a hook: the passes that can
-// be slow read only the head of a text. The format and control characters go first, over the whole text (logHead, one
-// linear pass), and the head is cut at whitespace (wordHead), so that a secret the cut goes through keeps its mask,
-// except in a crafted text. The word that the cut goes through is dropped only when it has CUT_WORD_MAX units or fewer;
-// a longer run is text, and the head is cut through it.
-const TEXT_HEAD_MAX = 4096
-
-// The most of a text that a Log line keeps, in UTF-16 units: more than a line of a pane maximized on a 21:9 monitor
-// shows (about 400 characters). The pane cuts each line to its room, with an ellipsis of its own (`wrap="truncate"`),
-// so a narrow pane shows what it showed before.
-const LOG_TEXT_MAX = 512
-
-// The head of a text for the Log. The format and control characters go first, over the whole text (stripFormat, one
-// linear pass), so that no invisible character pads a secret past the cut: one counts toward the run that wordHead
-// measures, and a byte order mark ends it, though redact and shorten take them out later. Then the head is cut
-// (wordHead).
-const logHead = (text: string): string => wordHead(stripFormat(text), TEXT_HEAD_MAX)
 
 // The log line of a subagent that has ended: its text, and its outcome, the time it took behind a mark (✓ for an
 // answer, ✗ for a failure; a stop is no fault, so it has no mark). One that still runs has no outcome, so its status
