@@ -289,6 +289,46 @@ test('stripFormat takes out the characters of category Cf, and leaves everything
   expect(stripFormat('')).toBe('')
 })
 
+// The engine refuses a text child that holds a control character (C0 but tab, line feed and carriage return, DEL and
+// C1; an escape sequence has one) and draws its own pane in place of the mod's, so they are taken out with the format
+// characters, and not turned into spaces: a secret that one splits stays whole for redact. The vertical tab and the
+// form feed are the exception: they are whitespace, and shorten made them spaces before, so each becomes a space.
+test('stripFormat takes out the control characters, and keeps the tab, the line feed and the carriage return', () => {
+  const text = 'a\u001b[31mb\u0000c\u0007d\u000be\u000cf\u007fg\u0085h\u009bi\tj\nk\rl'
+  expect(stripFormat(text)).toBe('a[31mbcd e fghi\tj\nk\rl')
+  // The class is the engine's: U+0000 to U+0008, U+000B, U+000C, U+000E to U+001F, and U+007F to U+009F. Every code
+  // point up to U+00A0, the no-break space, is tried between two letters.
+  const isControl = (code: number): boolean =>
+    code <= 0x08 || code === 0x0b || code === 0x0c || (code >= 0x0e && code <= 0x1f) || (code >= 0x7f && code <= 0x9f)
+  for (let code = 0; code <= 0xa0; code += 1) {
+    const char = String.fromCharCode(code)
+    const name = `U+${code.toString(16).padStart(4, '0')}`
+    const gone = code === 0x0b || code === 0x0c ? 'a b' : 'ab' // the vertical tab and the form feed become a space
+    expect(stripFormat(`a${char}b`), name).toBe(isControl(code) ? gone : `a${char}b`)
+  }
+  // A secret that one of them splits is whole once it is gone, and redact masks it.
+  expect(redact('echo ghp_abc\u001bdefgh12345678')).toBe('echo •••')
+  // A vertical tab between a word and a secret is the space that it was for shorten: the secret keeps its mask.
+  expect(redact(stripFormat('Bearer\u000babcdefghijklmnop'))).not.toContain('abcdefghijklmnop')
+})
+
+// U+10EEEE, a private-use code point, is the placeholder that the engine keeps for itself. It refuses a text child that
+// holds it, as it refuses one that holds a control character, so it goes too: the code points beside it do not.
+test('stripFormat takes out U+10EEEE, the placeholder of the engine, and no other private-use code point', () => {
+  expect(stripFormat('a\u{10EEEE}b')).toBe('ab')
+  expect(stripFormat('\u{10EEEE}\u{10EEEE}')).toBe('')
+  const kept = '\u{10EEED}\u{10EEEF}\uE000'
+  expect(stripFormat(kept)).toBe(kept)
+})
+
+// A removal between the two halves of U+10EEEE (U+DBFB and U+DEEE) would join them into the placeholder that the engine
+// refuses, so a lone surrogate goes too. A surrogate pair is one code point, and it stays.
+test('stripFormat leaves no U+10EEEE behind: a lone surrogate goes, so no removal can join two', () => {
+  expect(stripFormat('a\uDBFB\u001b\uDEEEb')).toBe('ab')
+  expect(stripFormat(`${'\uDBFB'.repeat(4)}${'\uDEEE'.repeat(4)}`)).toBe('')
+  expect(stripFormat('a🚀b')).toBe('a\u{1F680}b')
+})
+
 test('stripFormat keeps a joiner between two non-ASCII characters: an emoji sequence, a Persian word', () => {
   expect(stripFormat(FAMILY)).toBe(FAMILY)
   expect(stripFormat(`${FAMILY} sleep 30`)).toBe(`${FAMILY} sleep 30`)
@@ -296,8 +336,8 @@ test('stripFormat keeps a joiner between two non-ASCII characters: an emoji sequ
   expect(stripFormat(RAINBOW_FLAG)).toBe(RAINBOW_FLAG) // the variation selector before the joiner is no ASCII character
   expect(stripFormat(PERSIAN)).toBe(PERSIAN)
   // Either joiner stays between two characters of any kind above U+007F: accents, letters, Indic letters, emoji, and
-  // U+0080, the first code point above it.
-  const pairs = [['é', 'é'], ['ж', 'я'], ['\u0915', '\u0937'], [ROCKET, ROCKET], ['\u0080', '\u0080']] as const
+  // U+00A1, the first one that is neither a control character (U+0080 to U+009F go) nor a space (U+00A0).
+  const pairs = [['é', 'é'], ['ж', 'я'], ['\u0915', '\u0937'], [ROCKET, ROCKET], ['\u00A1', '\u00A1']] as const
   for (const [name, joiner] of JOINERS) {
     for (const [left, right] of pairs) {
       expect(stripFormat(`${left}${joiner}${right}`), name).toBe(`${left}${joiner}${right}`)
@@ -321,8 +361,8 @@ test('stripFormat takes a joiner out when an ASCII character, or an end of the t
     // An ASCII character on one side is enough, whichever side it is.
     expect(stripFormat(`é${joiner}a`), name).toBe('éa')
     expect(stripFormat(`a${joiner}é`), name).toBe('aé')
-    // A space, a tab and a line break are ASCII too, and so is U+007F, the last code point of ASCII.
-    expect(stripFormat(`é${joiner}\u007F`), name).toBe('é\u007F')
+    // A space, a tab and a line break are ASCII too, and so is `~`, the last printable ASCII character.
+    expect(stripFormat(`é${joiner}~`), name).toBe('é~')
     expect(stripFormat(`é${joiner} é`), name).toBe('é é')
     expect(stripFormat(`é ${joiner}é`), name).toBe('é é')
     expect(stripFormat(`é\t${joiner}é`), name).toBe('é\té')
@@ -355,6 +395,16 @@ test('stripFormat judges a joiner by the neighbours that remain, and a run of jo
   expect(stripFormat(`é${ZWJ}${ZWNJ}é`)).toBe(`é${ZWJ}${ZWNJ}é`)
   expect(stripFormat(`é${ZWJ.repeat(3)}é`)).toBe(`é${ZWJ.repeat(3)}é`)
   expect(stripFormat(`a${ZWJ.repeat(3)}b é${ZWNJ.repeat(2)}é a${ZWNJ.repeat(2)}é`)).toBe(`ab é${ZWNJ.repeat(2)}é aé`)
+})
+
+test('stripFormat judges a joiner by what remains once the control characters are gone', () => {
+  for (const [name, joiner] of JOINERS) {
+    expect(stripFormat(`é${joiner}\u001bé`), name).toBe(`é${joiner}é`)
+    expect(stripFormat(`é${joiner}\u0085é`), name).toBe(`é${joiner}é`)
+    expect(stripFormat(`é${joiner}\u0085a`), name).toBe('éa')
+    expect(stripFormat(`a\u009b${joiner}é`), name).toBe('aé')
+    expect(stripFormat(`é${joiner}\u{10EEEE}a`), name).toBe('éa')
+  }
 })
 
 // redact and shorten run over whole prompts: a run of joiners must cost one pass, not one pass from each joiner.

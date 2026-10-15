@@ -216,32 +216,49 @@ const tagged = (word: string): string =>
 // General Interchange). Any other tag character goes, and the black flag before it stays alone.
 const KEPT_FLAGS = ['gbeng', 'gbsct', 'gbwls'].map(code => `\u{1F3F4}${tagged(code)}\u{E007F}`)
 
-// Either a whole flag of KEPT_FLAGS (group 1) or a format character that is neither joiner.
-const FORMAT_OR_FLAG = new RegExp(String.raw`(${KEPT_FLAGS.join('|')})|(?![\u200C\u200D])\p{Cf}`, 'gu')
+// Either a whole flag of KEPT_FLAGS (group 1), or a format character that is neither joiner, or a control character (C0
+// but tab, line feed and carriage return, DEL and C1), or U+10EEEE, the placeholder that the engine keeps for itself,
+// or a lone surrogate: the engine refuses a text child that holds a control character or the placeholder, and a removal
+// between the two halves of U+10EEEE would join them into it.
+const FORMAT_OR_FLAG = new RegExp(
+  String.raw`(${KEPT_FLAGS.join('|')})|(?![\u200C\u200D])\p{Cf}|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\u{10EEEE}` +
+    String.raw`|\p{Cs}`,
+  'gu',
+)
 
-// Takes out the Unicode format characters (category Cf): the bidi controls (U+202A to U+202E, U+2066 to U+2069), the
-// zero-width space, the byte order mark and the rest. They draw nothing, so a U+202E in a branch or a file name would
-// reorder what the pane shows after it, and the name would read as another. Two stay, but only between two characters
-// that are neither ASCII nor spaces: the zero-width joiner (U+200D) holds an emoji sequence together (a family is three
-// emoji with a joiner between each two), and the non-joiner (U+200C) sits inside Persian words; both shape letters of
-// Indic scripts. Beside an ASCII character, a space of any kind or an end of the text, a joiner joins nothing and draws
-// nothing, and it would hide a character of a branch or a folder name, or split a secret so that no pattern of redact
-// matches it (a key and its value have `\s*` between them, and a joiner between two no-break spaces there would end the
-// value before it starts): it goes. Its neighbours are those that remain once the rest of Cf is gone (a zero-width
-// space beside it does not make it stay), and a run of joiners stays or goes as a whole. The run is matched once and
-// judged by what is round it: a lookbehind and lookahead pair would read the run again from each of its joiners. The
-// three flags that stay (KEPT_FLAGS) are matched in the same pass, a whole sequence or one format character at a time,
-// so a long run of tag characters is read once as well.
+// Takes out the control characters and the Unicode format characters (category Cf): the bidi controls (U+202A to
+// U+202E, U+2066 to U+2069), the zero-width space, the byte order mark and the rest. They draw nothing, so a U+202E in
+// a branch or a file name would reorder what the pane shows after it, and the name would read as another. Two stay, but
+// only between two characters that are neither ASCII nor spaces: the zero-width joiner (U+200D) holds an emoji sequence
+// together (a family is three emoji with a joiner between each two), and the non-joiner (U+200C) sits inside Persian
+// words; both shape letters of Indic scripts. Beside an ASCII character, a space of any kind or an end of the text, a
+// joiner joins nothing and draws nothing, and it would hide a character of a branch or a folder name, or split a secret
+// so that no pattern of redact matches it (a key and its value have `\s*` between them, and a joiner between two
+// no-break spaces there would end the value before it starts): it goes. Its neighbours are those that remain once the
+// rest of Cf is gone (a zero-width space beside it does not make it stay), and a run of joiners stays or goes as a
+// whole. The run is matched once and judged by what is round it: a lookbehind and lookahead pair would read the run
+// again from each of its joiners. The three flags that stay (KEPT_FLAGS) are matched in the same pass, a whole sequence
+// or one format character at a time, so a long run of tag characters is read once as well. The control characters go in
+// the same pass (C0 but tab, line feed and carriage return, DEL and C1), and a joiner's neighbours are those that
+// remain without them too: the engine refuses a text child that holds one (an escape sequence pasted from a terminal
+// has them) and draws its own pane in place of the mod's. They are taken out, not turned into spaces, as a format
+// character is, so that a secret that one splits (a URL password, a `password=` value, an `sk-` key) stays whole for
+// redact; the vertical tab and the form feed alone are whitespace, and become a space, as shorten made them before, so
+// that the words on either side stay apart. U+10EEEE goes too, in the same pass: it is the placeholder that the engine
+// keeps for itself, and the engine refuses a text child that holds it, as it refuses one that holds a control
+// character. A lone surrogate goes too (a pair is one code point, and stays): a removal between the two halves of
+// U+10EEEE would join them into that placeholder.
 export function stripFormat(s: string): string {
-  // A flag is put back as it is (`$1`); the group of a character that goes did not match, and `$1` reads it as empty.
-  const rest = s.replace(FORMAT_OR_FLAG, '$1')
+  // A flag (group 1) is put back as it is; a vertical tab and a form feed become a space, any other match goes.
+  const rest = s.replace(FORMAT_OR_FLAG, (found, flag: string | undefined) =>
+    flag ?? (found === '\x0b' || found === '\x0c' ? ' ' : ''))
 
   return rest.replace(/[\u200C\u200D]+/g, (run, at: number) =>
     holdsJoiner(rest[at - 1]) && holdsJoiner(rest[at + run.length]) ? run : '')
 }
 
-// The format characters go first, as shorten takes them out too: one inside a secret would keep a pattern from
-// matching, and the secret would show once shorten had closed the gap. A caller cuts a text to its head first
+// The format and control characters go first, as shorten takes them out too: one inside a secret would keep a pattern
+// from matching, and the secret would show once shorten had closed the gap. A caller cuts a text to its head first
 // (wordHead): the URL pattern takes quadratic time on a long crafted text such as `a.a.a…`.
 export function redact(s: string): string {
   return SECRETS.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), stripFormat(s))
@@ -263,17 +280,17 @@ export function plainText(s: string): string {
   return s.replace(pair, '$1').replace(/`/g, '').replace(/^#+ /gm, '')
 }
 
-// Takes out the format characters (stripFormat), collapses whitespace runs and cuts to `max` characters, the last one
-// being an ellipsis.
+// Takes out the format and control characters (stripFormat), collapses whitespace runs and cuts to `max` characters,
+// the last one being an ellipsis.
 export function shorten(s: string, max: number): string {
   const flat = stripFormat(s).replace(/\s+/g, ' ').trim()
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
 }
 
 // The first `max` UTF-16 units of a text, for the passes that read a text whole (the pair pattern of plainText takes
-// quadratic time on some long inputs) when the pane shows a few dozen characters of it. A cut between the two units of
-// a surrogate pair would leave the high one alone, and a lone surrogate is no character, so that unit goes too. A text
-// of `max` units or fewer comes back as it is.
+// quadratic time on some long inputs) when a Log line keeps LOG_TEXT_MAX characters of it at most (register.tsx). A cut
+// between the two units of a surrogate pair would leave the high one alone, and a lone surrogate is no character, so
+// that unit goes too. A text of `max` units or fewer comes back as it is.
 export function textHead(s: string, max: number): string {
   if (s.length <= max) return s
   const head = s.slice(0, max)
@@ -294,12 +311,12 @@ export const CUT_WORD_MAX = 256
 
 // The head of a text (textHead) less the run of characters at its end that are no whitespace, for the texts that the
 // Log reads: a word cut in two can be a secret that the patterns of redact no longer match (a URL with a password that
-// loses its `@`), and the pane shows a few dozen characters of the text anyway. The run goes only when it has
-// CUT_WORD_MAX units or fewer: a longer one stays, and so does a head with no whitespace at all, which is the head as
-// textHead gives it. The whitespace is what `\s` says, as in those patterns, so the no-break space counts. The run is
-// found by a scan back from the end, one character at a time, which stops once it has passed CUT_WORD_MAX units: a
-// pattern such as `\S+$` takes quadratic time on a long word that whitespace follows. A text of `max` units or fewer
-// comes back as it is.
+// loses its `@`), and a Log line keeps LOG_TEXT_MAX characters of the text at most anyway (register.tsx). The run goes
+// only when it has CUT_WORD_MAX units or fewer: a longer one stays, and so does a head with no whitespace at all, which
+// is the head as textHead gives it. The whitespace is what `\s` says, as in those patterns, so the no-break space
+// counts. The run is found by a scan back from the end, one character at a time, which stops once it has passed
+// CUT_WORD_MAX units: a pattern such as `\S+$` takes quadratic time on a long word that whitespace follows. A text of
+// `max` units or fewer comes back as it is.
 export function wordHead(s: string, max: number): string {
   if (s.length <= max) return s
   const head = textHead(s, max)

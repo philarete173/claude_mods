@@ -294,13 +294,13 @@ const agentsVersion = async ($: Engine): Promise<number> =>
   Number((await $.command.run({ ...RUN, command: 'read-agents-version' })).text)
 
 // The map of folds in the store as the second plugin reads it back, a write of it as another session would make it, and
-// the pane mounted on the desktop, where a press of a header can be made.
+// the pane mounted on the desktop, where a press of a header can be made (a surface can be given).
 const readStore = async ($: Engine): Promise<unknown> =>
   JSON.parse((await $.command.run({ ...RUN, command: 'read-store' })).text ?? 'null')
 const writeStore = ($: Engine, value: unknown) =>
   $.command.run({ ...RUN, command: 'write-store', args: JSON.stringify(value) })
-const mountPane = ($: Engine) => $.ui.mount({
-  plugin: 'session-panel', surface: 'desktop', component: 'Pane', requestId: 'session-panel', props: PANE_PROPS,
+const mountPane = ($: Engine, surface: RenderSurface = 'desktop') => $.ui.mount({
+  plugin: 'session-panel', surface, component: 'Pane', requestId: 'session-panel', props: PANE_PROPS,
 })
 
 // Arms WRITE_HOLDER for the next write of one of `keys` (the log or its count when none are given): see the plugin.
@@ -3072,21 +3072,21 @@ test('a step cut off mid-stream leaves the turn as it was and has passed on what
     expect((await readState($)).lastTurn).toMatchObject({ steps: 1, modelMs: 700, ttftMs: 200, costUsd: 0.25 })
   })
 
-test('turn.start logs a prompt as you, redacted and cut to 70, and an engine turn by its tag', WITH_READER,
+test('turn.start logs a prompt as you, redacted and cut to 512, and an engine turn by its tag', WITH_READER,
   async ($, on) => {
     bottom(on, mock.clock(on))
     await $.session.start(START)
 
     await $.turn.start({ text: '<task-notification>done</task-notification>', turnId: 't1' })
     await $.turn.start({ text: 'use token=hunter22secret', turnId: 't2' })
-    await $.turn.start({ text: 'x'.repeat(80), turnId: 't3' })
+    await $.turn.start({ text: 'x'.repeat(600), turnId: 't3' })
     // A turn without a typed prompt (a continuation) is no line of the log, but it is a turn.
     await $.turn.start({ text: '', turnId: 't4' })
     await $.turn.start({ text: ' \n ', turnId: 't5' })
 
     const state = await readState($)
     expect(state.log.map(entry => [entry.who, entry.text, entry.kind])).toEqual([
-      ['you', `${'x'.repeat(69)}…`, 'info'],
+      ['you', `${'x'.repeat(511)}…`, 'info'],
       ['you', 'use token=•••', 'info'],
       ['engine', 'task-notification', 'info'],
     ])
@@ -3401,22 +3401,22 @@ test('a call whose signal aborts while the tool runs, and that comes back as an 
     expect(await lines()).toEqual([['Bash fail interrupt it', 'info', '0.3s']])
   })
 
-test('a long command is cut to 64 characters, and its outcome stays whole', SLOW_READER, async ($, on) => {
+test('a long command is cut to 512 characters, and its outcome stays whole', SLOW_READER, async ($, on) => {
   const clock = mock.clock(on)
   bottom(on, clock)
   await $.session.start(START)
 
-  await drive(clock, $.tool.call({ tool: 'Bash', command: 'x'.repeat(100) }))
-  await $.tool.call({ tool: 'Bash', command: `deny ${'y'.repeat(100)}` })
-  await $.tool.call({ tool: 'Bash', command: `fail ${'z'.repeat(100)}` })
+  await drive(clock, $.tool.call({ tool: 'Bash', command: 'x'.repeat(600) }))
+  await $.tool.call({ tool: 'Bash', command: `deny ${'y'.repeat(600)}` })
+  await $.tool.call({ tool: 'Bash', command: `fail ${'z'.repeat(600)}` })
 
   const lines = (await readState($)).log.map(entry => [entry.text, entry.outcome] as const)
   expect(lines).toEqual([
-    [`${`Bash fail ${'z'.repeat(100)}`.slice(0, 63)}…`, '✗ 0.0s'],
-    [`${`Bash deny ${'y'.repeat(100)}`.slice(0, 63)}…`, 'denied'],
-    [`${`Bash ${'x'.repeat(100)}`.slice(0, 63)}…`, '✓ 0.3s'],
+    [`${`Bash fail ${'z'.repeat(600)}`.slice(0, 511)}…`, '✗ 0.0s'],
+    [`${`Bash deny ${'y'.repeat(600)}`.slice(0, 511)}…`, 'denied'],
+    [`${`Bash ${'x'.repeat(600)}`.slice(0, 511)}…`, '✓ 0.3s'],
   ])
-  expect(lines.map(([text]) => text.length)).toEqual([64, 64, 64])
+  expect(lines.map(([text]) => text.length)).toEqual([512, 512, 512])
 })
 
 test('a turn the mod did not see start leaves lastTurn alone; the project is read again when a turn ends, the branch '
@@ -3548,19 +3548,19 @@ test('a stopped subagent is a note in the log, a failed one is an error', WITH_R
   ])
 })
 
-test('the answer in the line of a subagent is masked and cut to 80 characters', WITH_READER, async ($, on) => {
+test('the answer in the line of a subagent is masked and cut to 512 characters', WITH_READER, async ($, on) => {
   bottom(on, mock.clock(on))
   await $.session.start(START)
   await $.agent.spawn(SPAWN)
   await $.agent.spawn(SPAWN)
 
-  const answers: [string, string][] = [['a1', 'use token=hunter22secret'], ['a2', 'x'.repeat(200)]]
+  const answers: [string, string][] = [['a1', 'use token=hunter22secret'], ['a2', 'x'.repeat(600)]]
   for (const [agentId, answer] of answers) {
     await $.turn.complete({ answer, durationMs: 5, isAborted: false, turnId: 't1', agentId, reason: 'answer' })
   }
 
   const { log } = await readState($)
-  expect(log.slice(0, 2).map(entry => entry.text)).toEqual([`done — ${'x'.repeat(79)}…`, 'done — use token=•••'])
+  expect(log.slice(0, 2).map(entry => entry.text)).toEqual([`done — ${'x'.repeat(511)}…`, 'done — use token=•••'])
   expect(JSON.stringify(log)).not.toContain('hunter22secret')
 })
 
@@ -3582,7 +3582,7 @@ test('an answer of 224 KB is cut to its head: the line of a subagent comes at on
     const took = performance.now() - started
     await end('a2', answer.slice(0, 4096))
 
-    const line = `done — ${'**x**y '.repeat(11)}**…`
+    const line = `done — ${'**x**y '.repeat(73)}…`
     expect((await readState($)).log.slice(0, 2).map(entry => entry.text)).toEqual([line, line])
     expect(took).toBeLessThan(1000) // generous: the pair pattern took seconds on it
   })
@@ -3600,7 +3600,7 @@ test('an answer of 5000 characters with no whitespace shows its start in the lin
       answer: 'x'.repeat(5000), durationMs: 5, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer',
     })
 
-    expect((await readState($)).log[0]?.text).toBe(`done — ${'x'.repeat(79)}…`)
+    expect((await readState($)).log[0]?.text).toBe(`done — ${'x'.repeat(511)}…`)
   })
 
 // The word that the cut goes through is dropped when it has CUT_WORD_MAX units or fewer: a cut through a secret would
@@ -3704,8 +3704,8 @@ test('a Bash command of 128 KB is cut to its head: the hook returns at once and 
 
     expect(took).toBeLessThan(300) // generous: the URL pattern took seconds on it
     // The head has no whitespace after `Bash `, and the run after it is far over CUT_WORD_MAX, so the cut stays in the
-    // command: the line is its start, cut to 64 characters.
-    expect((await readState($)).log.map(entry => entry.text)).toEqual([`Bash ${'a.'.repeat(29)}…`])
+    // command: the line is its start, cut to 512 characters.
+    expect((await readState($)).log.map(entry => entry.text)).toEqual([`Bash ${'a.'.repeat(253)}…`])
   })
 
 test('a prompt of 128 KB is cut to its head: the hook returns at once', SLOW_READER, async ($, on) => {
@@ -3717,8 +3717,8 @@ test('a prompt of 128 KB is cut to its head: the hook returns at once', SLOW_REA
   const took = performance.now() - started
 
   expect(took).toBeLessThan(300) // generous: the URL pattern took seconds on it
-  // The head has no whitespace, so the cut stays in it: the line is the start of the prompt, cut to 70 characters.
-  expect((await readState($)).log.map(entry => [entry.who, entry.text])).toEqual([['you', `${'a.'.repeat(34)}a…`]])
+  // The head has no whitespace, so the cut stays in it: the line is the start of the prompt, cut to 512 characters.
+  expect((await readState($)).log.map(entry => [entry.who, entry.text])).toEqual([['you', `${'a.'.repeat(255)}a…`]])
 })
 
 // A text in a script with no spaces (here Japanese) can have one ASCII word near its start, and no whitespace after
@@ -3734,7 +3734,7 @@ test('a prompt of one ASCII word and 5100 CJK characters with no whitespace show
     await $.turn.start({ text: `README ${japanese}`, turnId: 't1' })
 
     expect((await readState($)).log.map(entry => [entry.who, entry.text])).toEqual([
-      ['you', `README ${japanese.slice(0, 62)}…`], // the word and its space (7), 62 of the text, the ellipsis
+      ['you', `README ${japanese.slice(0, 504)}…`], // the word and its space (7), 504 of the text, the ellipsis
     ])
   })
 
@@ -3748,8 +3748,8 @@ test('a subagent description of 128 KB is cut to its head: the hook returns at o
 
   expect(took).toBeLessThan(300) // generous: the URL pattern took seconds on it
   // The head has no whitespace after `spawned · engineer: `, and the run after it is far over CUT_WORD_MAX, so the cut
-  // stays in the description: the line is the spawn line and the start of the description, cut to 70 characters.
-  expect((await readState($)).log.map(entry => entry.text)).toEqual([`spawned · engineer: ${'a.'.repeat(24)}a…`])
+  // stays in the description: the line is the spawn line and the start of the description, cut to 512 characters.
+  expect((await readState($)).log.map(entry => entry.text)).toEqual([`spawned · engineer: ${'a.'.repeat(245)}a…`])
 })
 
 test('the answer of a subagent loses its markdown marks, whether the engine gave it or the agent handed it back',
@@ -3766,13 +3766,13 @@ test('the answer of a subagent loses its markdown marks, whether the engine gave
 
     await finish($, 'a1', '**Verdict:** ok')
     await finish($, 'a2')
-    await finish($, 'a3', `**token=hunter22secret** ${'x'.repeat(200)}`)
+    await finish($, 'a3', `**token=hunter22secret** ${'x'.repeat(600)}`)
     await finish($, 'a4', 'fixed `__init__.py`, x ** 2 and 2**10')
 
     expect(await doneLines($)).toEqual([
       'done · $0.500 — Verdict: ok',
       'done · $0.500 — Report Verdict: ok',
-      `done · $0.500 — token=••• ${'x'.repeat(69)}…`,
+      `done · $0.500 — token=••• ${'x'.repeat(501)}…`,
       'done · $0.500 — fixed __init__.py, x ** 2 and 2**10',
     ])
     expect(JSON.stringify((await readState($)).log)).not.toContain('hunter22secret')
@@ -3790,6 +3790,87 @@ test('a format character beside a markdown mark in the answer of a subagent does
     await $.turn.complete({ answer, durationMs: 5, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer' })
 
     expect((await readState($)).log[0]?.text).toBe('done — Verdict: ok')
+  })
+
+// The engine refuses a text child that holds a control character (C0 but tab, line feed and carriage return, DEL and
+// C1; an escape sequence has them), or U+10EEEE, its own placeholder, and draws its own pane in place of the mod's:
+// `$.ui.mount` throws then. The escape sits at the 201st character of a text: past the cut that the Log used to make
+// (64 to 80 characters), inside the one it makes now (512).
+const CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u{10EEEE}]/u
+const ESCAPED = `${'x'.repeat(200)}\u001b[31mred\u001b[0m`
+// The pane mounts on the desktop and on the terminal, and no text in it holds a character of CONTROL.
+const expectPaneWithoutControl = async ($: Engine): Promise<void> => {
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ text: CONTROL }), surface).toBeUndefined()
+    await ui.unmount()
+  }
+}
+
+test('a prompt with an escape sequence in it leaves the pane drawn, on the desktop and on the terminal',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+
+    await $.turn.start({ text: ESCAPED, turnId: 't1' })
+
+    await expectPaneWithoutControl($)
+  })
+
+test('a Bash command with an escape sequence in it leaves the pane drawn, on the desktop and on the terminal',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    bottom(on, clock)
+    await $.session.start(START)
+
+    await drive(clock, $.tool.call({ tool: 'Bash', command: ESCAPED }))
+
+    await expectPaneWithoutControl($)
+  })
+
+test('the answer of a subagent with an escape sequence in it leaves the pane drawn, on the desktop and on the terminal',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await $.agent.spawn(SPAWN)
+
+    await $.turn.complete({
+      answer: ESCAPED, durationMs: 5, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer',
+    })
+
+    await expectPaneWithoutControl($)
+  })
+
+test('a subagent description with an escape sequence in it leaves the pane drawn, on the desktop and on the terminal',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+
+    await $.agent.spawn({ ...SPAWN, description: 'Fix \u001b[1mcart\u001b[0m total qty' })
+
+    await expectPaneWithoutControl($)
+  })
+
+test('a prompt with U+10EEEE in it leaves the pane drawn, on the desktop and on the terminal', WITH_READER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+
+    await $.turn.start({ text: `${'x'.repeat(200)}\u{10EEEE}tail`, turnId: 't1' })
+
+    await expectPaneWithoutControl($)
+  })
+
+// The halves of U+10EEEE (U+DBFB and U+DEEE) with a control character between them: once it is taken out they would
+// join into the placeholder, so the lone surrogates go with it.
+test('a subagent description that a removal would turn into U+10EEEE leaves the pane drawn, on both surfaces',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+
+    await $.agent.spawn({ ...SPAWN, description: 'fix \uDBFB\u001b\uDEEE it' })
+
+    await expectPaneWithoutControl($)
   })
 
 test('the end of a subagent has its outcome in a field of its own: a mark and the time, a stop with no mark',
@@ -3875,10 +3956,10 @@ test('the message a subagent handed back is the answer of its done line when the
       [{}, '', 'done · $0.500'],
       [{ message: null }, '', 'done · $0.500'],
       [{ message: { text: 'first finding' } }, '', 'done · $0.500'],
-      // Masked and cut as any answer is: a secret, the line breaks of a report, and 200 characters.
+      // Masked and cut as any answer is: a secret, the line breaks of a report, and 600 characters.
       [{ message: `use ${secret}` }, '', 'done · $0.500 — use •••'],
       [{ message: 'first line\n\nsecond line' }, '', 'done · $0.500 — first line second line'],
-      [{ message: 'x'.repeat(200) }, '', `done · $0.500 — ${'x'.repeat(79)}…`],
+      [{ message: 'x'.repeat(600) }, '', `done · $0.500 — ${'x'.repeat(511)}…`],
     ]
     await spawnCharged($, clock, w, cases.length)
     for (const [i, [handed]] of cases.entries()) {
@@ -4143,14 +4224,14 @@ test('a step of a running agent, or of an unknown one, writes nothing to the age
     expect(await agentsVersion($)).toBe(closed + 1)
   })
 
-test('the spawn and resume lines are masked and cut to 70, as a prompt is', SLOW_READER, async ($, on) => {
+test('the spawn and resume lines are masked and cut to 512, as a prompt is', SLOW_READER, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   bottom(on, clock)
   await $.session.start(START)
   await clock.advance(1)
   await $.turn.start({ text: 'go', turnId: 't1' })
   const secret = `ghp_${'a'.repeat(36)}`
-  const long = 'x'.repeat(200)
+  const long = 'x'.repeat(600)
   await $.agent.spawn({ ...SPAWN, description: `use ${secret}` })
   await $.agent.spawn({ ...SPAWN, description: long })
   for (const agentId of ['a1', 'a2']) {
@@ -4164,10 +4245,10 @@ test('the spawn and resume lines are masked and cut to 70, as a prompt is', SLOW
 
   const { log } = await readState($)
   const lines = log.map(entry => entry.text).filter(text => /^(spawned|resumed) /.test(text))
-  const cut = (verb: string): string => `${`${verb} · engineer: ${long}`.slice(0, 69)}…`
-  // Newest first: the two resumes, then the two spawns. The secret is masked in both, the long text is cut to 70.
+  const cut = (verb: string): string => `${`${verb} · engineer: ${long}`.slice(0, 511)}…`
+  // Newest first: the two resumes, then the two spawns. The secret is masked in both, the long text is cut to 512.
   expect(lines).toEqual([cut('resumed'), 'resumed · engineer: use •••', cut('spawned'), 'spawned · engineer: use •••'])
-  expect([lines[0]?.length, lines[2]?.length]).toEqual([70, 70])
+  expect([lines[0]?.length, lines[2]?.length]).toEqual([512, 512])
   expect(JSON.stringify(log)).not.toContain(secret)
 })
 

@@ -219,19 +219,25 @@ const usageFields = (
 })
 
 // How much of a text the Log reads, in UTF-16 units: a prompt, the label of a tool call, and the description and the
-// answer of a subagent. The pane shows 80 characters of each at most, and two passes take quadratic time on some long
+// answer of a subagent. A Log line keeps LOG_TEXT_MAX of each at most, and two passes take quadratic time on some long
 // inputs: the pair pattern of plainText (224 KB of ` **x**y` took 4.1 s in Node 22) and the URL pattern of redact
 // (128 KB of `a.` took 5.5 s in Node 22). These texts come from the agents (a Bash command can be steered by a prompt
 // injection, and the hook of tool.call gates every tool call), so a crafted one could stall a hook: the passes that can
-// be slow read only the head of a text. The format characters go first, over the whole text (logHead, one linear pass),
-// and the head is cut at whitespace (wordHead), so that a secret the cut goes through keeps its mask, except in a
-// crafted text. The word that the cut goes through is dropped only when it has CUT_WORD_MAX units or fewer; a longer
-// run is text, and the head is cut through it.
+// be slow read only the head of a text. The format and control characters go first, over the whole text (logHead, one
+// linear pass), and the head is cut at whitespace (wordHead), so that a secret the cut goes through keeps its mask,
+// except in a crafted text. The word that the cut goes through is dropped only when it has CUT_WORD_MAX units or fewer;
+// a longer run is text, and the head is cut through it.
 const TEXT_HEAD_MAX = 4096
 
-// The head of a text for the Log. The format characters go first, over the whole text (one linear pass), so that no
-// invisible character pads a secret past the cut: one counts toward the run that wordHead measures, and a byte order
-// mark ends it, though redact and shorten take them out later. Then the head is cut (wordHead).
+// The most of a text that a Log line keeps, in UTF-16 units: more than a line of a pane maximized on a 21:9 monitor
+// shows (about 400 characters). The pane cuts each line to its room, with an ellipsis of its own (`wrap="truncate"`),
+// so a narrow pane shows what it showed before.
+const LOG_TEXT_MAX = 512
+
+// The head of a text for the Log. The format and control characters go first, over the whole text (stripFormat, one
+// linear pass), so that no invisible character pads a secret past the cut: one counts toward the run that wordHead
+// measures, and a byte order mark ends it, though redact and shorten take them out later. Then the head is cut
+// (wordHead).
 const logHead = (text: string): string => wordHead(stripFormat(text), TEXT_HEAD_MAX)
 
 // The log line of a subagent that has ended: its text, and its outcome, the time it took behind a mark (✓ for an
@@ -243,10 +249,10 @@ const agentOutcome = (
   const took = fmtDuration(durationMs)
   if (status === 'stopped') return { text: status, outcome: took }
   if (status !== 'done') return { text: status, outcome: `✗ ${took}` }
-  // The format characters go first and the head is cut (logHead), then the marks, then the secrets: no pass that takes
-  // quadratic time reads more than the head. The answer is markdown, which the pane shows as it is: its marks go after
-  // its format characters, as one beside a mark (a BOM after `**`) hides it from plainText.
-  const said = shorten(redact(plainText(logHead(answer))), 80)
+  // The format and control characters go first and the head is cut (logHead), then the marks, then the secrets: no pass
+  // that takes quadratic time reads more than the head. The answer is markdown, which the pane shows as it is: its
+  // marks go after its format and control characters, as one beside a mark (a BOM after `**`) hides it from plainText.
+  const said = shorten(redact(plainText(logHead(answer))), LOG_TEXT_MAX)
   const head = row.costUsd === null ? 'done' : `done · ${fmtUsd(row.costUsd)}`
 
   return { text: said === '' ? head : `${head} — ${said}`, outcome: `✓ ${took}` }
@@ -320,7 +326,8 @@ async function refreshUsage($: EngineInterface): Promise<void> {
   const { breakdown } = now.context
   // WaitForMcpServers is not there for a module: every server that has tools in the context is listed, whatever its
   // state. The desktop app's own servers (`ccd_…` and DESKTOP_SERVERS) are neither listed nor counted. A name is the
-  // key as a configuration authored it, so its format characters go (stripFormat): a U+202E would reorder the list.
+  // key as a configuration authored it, so its format and control characters go (stripFormat): a U+202E would reorder
+  // the list.
   const names = [...new Set(breakdown?.mcpTools.map(tool => stripFormat(tool.serverName)))].filter(
     name => !name.startsWith('ccd_') && !DESKTOP_SERVERS.includes(name),
   )
@@ -335,8 +342,8 @@ async function refreshUsage($: EngineInterface): Promise<void> {
   await update($, mcpAtom, () => ({ servers }))
 }
 
-// The branch; the short commit on a detached HEAD; null outside a git repository or when git fails. The format
-// characters of the name are taken out (stripFormat): a U+202E in it would reorder what the pane shows.
+// The branch; the short commit on a detached HEAD; null outside a git repository or when git fails. The format and
+// control characters of the name are taken out (stripFormat): a U+202E in it would reorder what the pane shows.
 async function gitBranch($: EngineInterface, root: string): Promise<string | null> {
   const init = { cwd: root, timeoutMs: 5000 }
   try {
@@ -542,11 +549,11 @@ async function readChanges($: EngineInterface, root: string, read: ChangesRead):
   return { files, lines: { added, removed, ...(hasMoreAdded ? { hasMoreAdded: true } : {}) } }
 }
 
-// Reads the project: the name (the folder of the session root, without its format characters: a U+202E would reorder
-// what the pane shows), its branch, then the changes of its working tree. The changes can take long to read, so it
-// writes twice: the name and the branch as soon as git has said it, with the changes held, or none when the name
-// changed (a count of another folder is never shown under the new name), and then the changes. Before the first turn of
-// the main agent (hasMainTurn) there is no second step: the tree is not read, and the changes are none.
+// Reads the project: the name (the folder of the session root, without its format and control characters: a U+202E
+// would reorder what the pane shows), its branch, then the changes of its working tree. The changes can take long to
+// read, so it writes twice: the name and the branch as soon as git has said it, with the changes held, or none when the
+// name changed (a count of another folder is never shown under the new name), and then the changes. Before the first
+// turn of the main agent (hasMainTurn) there is no second step: the tree is not read, and the changes are none.
 async function refreshProject($: EngineInterface): Promise<void> {
   const root = await $.session.root()
   const name = stripFormat(root.replace(/^.*[\\/]/, ''))
@@ -636,7 +643,7 @@ async function reviveAgent($: EngineInterface, agentId: string): Promise<void> {
   })
   if (revived !== null) {
     const line = `resumed · ${revived.type}: ${revived.description}`
-    await addLog($, await $.clock.now(), 'main', shorten(redact(logHead(line)), 70), 'info')
+    await addLog($, await $.clock.now(), 'main', shorten(redact(logHead(line)), LOG_TEXT_MAX), 'info')
   }
 }
 
@@ -800,7 +807,7 @@ export const register: Register = on => {
     if (e.text.trim() !== '') {
       const tag = /^<([^\s>/]+)/.exec(e.text)?.[1]
       await addLog(
-        $, now, tag === undefined ? 'you' : 'engine', shorten(tag ?? redact(logHead(e.text)), 70),
+        $, now, tag === undefined ? 'you' : 'engine', shorten(tag ?? redact(logHead(e.text)), LOG_TEXT_MAX),
         'info',
       )
     }
@@ -877,7 +884,7 @@ export const register: Register = on => {
       // has the time alone, as a stopped subagent has, and is news, not a fault.
       const took = fmtDuration(t1 - t0)
       const outcome = ran.deny !== undefined ? 'denied' : isAbandoned ? took : `${isFailed ? '✗' : '✓'} ${took}`
-      const label = shorten(redact(logHead(toolLabel(e.tool, e, await $.session.root()))), 64)
+      const label = shorten(redact(logHead(toolLabel(e.tool, e, await $.session.root()))), LOG_TEXT_MAX)
       const { who, isUnknown } = await whoIs($, e.agentId)
       // The engine's own forks and a workflow's agents carry ids that no agent.spawn announced, so the agents atom has
       // no row for them. Core refuses the tools of most forks, so a fork that tries one would show a red failure that
@@ -937,9 +944,10 @@ export const register: Register = on => {
     if (spawned.agentId !== undefined) {
       const { agentId } = spawned
       const now = await $.clock.now()
-      // The Subagents list draws the description and the type as the row keeps them, so their format characters go
-      // here (a U+202E would reorder what the list shows). No other step writes a row from what the engine gave: a
-      // sync, a resume and the end of a run only change a row that is there.
+      // The Subagents list draws the description and the type as the row keeps them, so their format and control
+      // characters go here (a U+202E would reorder what the list shows, and the engine refuses a text that holds a
+      // control character and draws its own pane in place of the mod's). No other step writes a row from what the
+      // engine gave: a sync, a resume and the end of a run only change a row that is there.
       const type = stripFormat(e.subagentType ?? e.name ?? 'agent')
       const description = stripFormat(e.description)
       const row: AgentRow = {
@@ -948,7 +956,7 @@ export const register: Register = on => {
       }
       await update($, agentsAtom, rows => ({ ...rows, [agentId]: row }))
       await addLog(
-        $, now, 'main', shorten(redact(logHead(`spawned · ${type}: ${description}`)), 70), 'info',
+        $, now, 'main', shorten(redact(logHead(`spawned · ${type}: ${description}`)), LOG_TEXT_MAX), 'info',
       )
     }
 
