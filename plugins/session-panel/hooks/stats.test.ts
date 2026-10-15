@@ -295,7 +295,7 @@ test('stripFormat takes out the characters of category Cf, and leaves everything
 // form feed are the exception: they are whitespace, and shorten made them spaces before, so each becomes a space.
 test('stripFormat takes out the control characters, and keeps the tab, the line feed and the carriage return', () => {
   const text = 'a\u001b[31mb\u0000c\u0007d\u000be\u000cf\u007fg\u0085h\u009bi\tj\nk\rl'
-  expect(stripFormat(text)).toBe('a[31mbcd e fghi\tj\nk\rl')
+  expect(stripFormat(text)).toBe('abcd e fghi\tj\nk\rl')
   // The class is the engine's: U+0000 to U+0008, U+000B, U+000C, U+000E to U+001F, and U+007F to U+009F. Every code
   // point up to U+00A0, the no-break space, is tried between two letters.
   const isControl = (code: number): boolean =>
@@ -310,6 +310,45 @@ test('stripFormat takes out the control characters, and keeps the tab, the line 
   expect(redact('echo ghp_abc\u001bdefgh12345678')).toBe('echo •••')
   // A vertical tab between a word and a secret is the space that it was for shorten: the secret keeps its mask.
   expect(redact(stripFormat('Bearer\u000babcdefghijklmnop'))).not.toContain('abcdefghijklmnop')
+})
+
+// An ANSI escape sequence goes whole, not its ESC alone: a coloured log reads as its text, and the rest of a sequence
+// (`[31m`) does not glue to the word after it, which a pattern of redact that starts at a word boundary would miss.
+test('stripFormat takes an ANSI escape sequence out whole: a CSI, and an OSC that has its terminator', () => {
+  expect(stripFormat('\u001b[31mERROR\u001b[0m build failed')).toBe('ERROR build failed')
+  // An OSC ends at `ESC \` (a link, OSC 8) or at BEL (a window title, OSC 0).
+  expect(stripFormat('\u001b]8;;file:///etc/x\u001b\\x\u001b]8;;\u001b\\ done')).toBe('x done')
+  expect(stripFormat('a\u001b]0;title\u0007b')).toBe('ab')
+  // An OSC with no terminator is no sequence: its ESC goes alone, so that it cannot swallow the rest of a line.
+  expect(stripFormat('a\u001b]no end')).toBe('a]no end')
+  // A secret that the sequences of a coloured log stand beside is masked as it is without them: `\bghp_` needs a word
+  // boundary, and the `m` of `ESC [ 33 m` left in front of the `g` would be none.
+  expect(redact(stripFormat('\u001b[1mBearer\u001b[0m abcdefghijklmnop'))).not.toContain('abcdefghijklmnop')
+  const token = 'ghp_abcdefgh12345678'
+  expect(redact(stripFormat(`see \u001b[33m${token}\u001b[0m`))).toBe('see •••')
+})
+
+// A CSI is `ESC [`, parameter bytes (U+0030 to U+003F: the digits, `;`, `?` and the rest), intermediate bytes (U+0020
+// to U+002F), and one final byte (U+0040 to U+007E, `~` included). The first two may be none; each form goes whole.
+test('stripFormat takes a CSI out whole, whatever its parameters, intermediate bytes and final byte', () => {
+  const sequences: Array<[name: string, sequence: string]> = [
+    ['no parameters (reset the colours)', '\u001b[m'],
+    ['parameters with `;` (a 256-colour foreground)', '\u001b[38;5;196m'],
+    ['a private-mode mark `?` (hide the cursor)', '\u001b[?25l'],
+    ['a capital as the final byte (erase the line)', '\u001b[2K'],
+    ['an intermediate byte, a space (a cursor shape)', '\u001b[ q'],
+    ['`~` as the final byte (the start of a bracketed paste)', '\u001b[200~'],
+  ]
+  for (const [name, sequence] of sequences) expect(stripFormat(`a${sequence}b`), name).toBe('ab')
+})
+
+// Each ESC of an unfinished sequence starts one and stops at the next ESC, so 128 KB of them cost one pass: a body that
+// ran on to the end of the text, looking for its terminator, would read the rest of the text again from every start.
+test('stripFormat reads 128 KB of unfinished escape sequences once: milliseconds, not seconds', () => {
+  const started = performance.now()
+  expect(stripFormat(`${'\u001b]'.repeat(65_536)}a`)).toBe(`${']'.repeat(65_536)}a`) // 131,073 units, 128 KB
+  expect(stripFormat(`${'\u001b['.repeat(65_536)}0`)).toBe(`${'['.repeat(65_536)}0`) // the same, with no final byte
+  expect(performance.now() - started).toBeLessThan(300) // generous: a body that ran on to the end took seconds
 })
 
 // U+10EEEE, a private-use code point, is the placeholder that the engine keeps for itself. It refuses a text child that
@@ -400,6 +439,8 @@ test('stripFormat judges a joiner by the neighbours that remain, and a run of jo
 test('stripFormat judges a joiner by what remains once the control characters are gone', () => {
   for (const [name, joiner] of JOINERS) {
     expect(stripFormat(`é${joiner}\u001bé`), name).toBe(`é${joiner}é`)
+    expect(stripFormat(`é${joiner}\u001b[31mé`), name).toBe(`é${joiner}é`)
+    expect(stripFormat(`é${joiner}\u001b[31ma`), name).toBe('éa')
     expect(stripFormat(`é${joiner}\u0085é`), name).toBe(`é${joiner}é`)
     expect(stripFormat(`é${joiner}\u0085a`), name).toBe('éa')
     expect(stripFormat(`a\u009b${joiner}é`), name).toBe('aé')

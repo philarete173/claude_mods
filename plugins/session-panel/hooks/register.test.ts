@@ -3851,6 +3851,22 @@ test('a subagent description with an escape sequence in it leaves the pane drawn
     await expectPaneWithoutControl($)
   })
 
+// A sequence goes whole, so the colour code before a token does not glue to it: the `m` of `ESC [ 33 m` left in front
+// of `ghp_` would take its word boundary, no pattern of redact would match, and the pane would show the token.
+test('a prompt with a coloured token has the token masked, and leaves the pane drawn on both surfaces',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+
+    const token = `ghp_${'a'.repeat(36)}`
+    await $.turn.start({ text: `${'x'.repeat(200)} \u001b[33m${token}\u001b[0m`, turnId: 't1' })
+
+    const { log } = await readState($)
+    expect(log.map(entry => entry.text)).toEqual([`${'x'.repeat(200)} •••`])
+    expect(JSON.stringify(log)).not.toContain(token)
+    await expectPaneWithoutControl($)
+  })
+
 test('a prompt with U+10EEEE in it leaves the pane drawn, on the desktop and on the terminal', WITH_READER,
   async ($, on) => {
     bottom(on, mock.clock(on))

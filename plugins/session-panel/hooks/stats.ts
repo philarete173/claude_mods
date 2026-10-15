@@ -216,13 +216,19 @@ const tagged = (word: string): string =>
 // General Interchange). Any other tag character goes, and the black flag before it stays alone.
 const KEPT_FLAGS = ['gbeng', 'gbsct', 'gbwls'].map(code => `\u{1F3F4}${tagged(code)}\u{E007F}`)
 
-// Either a whole flag of KEPT_FLAGS (group 1), or a format character that is neither joiner, or a control character (C0
-// but tab, line feed and carriage return, DEL and C1), or U+10EEEE, the placeholder that the engine keeps for itself,
-// or a lone surrogate: the engine refuses a text child that holds a control character or the placeholder, and a removal
-// between the two halves of U+10EEEE would join them into it.
+// Either a whole flag of KEPT_FLAGS (group 1), or a format character that is neither joiner, or a whole ANSI escape
+// sequence, or a control character (C0 but tab, line feed and carriage return, DEL and C1), or U+10EEEE, the
+// placeholder that the engine keeps for itself, or a lone surrogate: the engine refuses a text child that holds a
+// control character or the placeholder, and a removal between the two halves of U+10EEEE would join them into it. A
+// sequence is an OSC (`ESC ]`, a body with no BEL or ESC in it, and BEL or `ESC \`) or a CSI (`ESC [`, its parameters,
+// its intermediate bytes and its final byte), and it goes whole, so that a coloured log reads as its text and the rest
+// of a sequence does not glue to a word that a pattern of redact starts at (`Bearer`, `ghp_`). Both come before the
+// class of control characters, which would take the ESC alone. An OSC with no terminator is no sequence, and only its
+// ESC goes, so that it cannot swallow the rest of a line. The pass stays linear (each part of a sequence is read once):
+// a sequence stops at the next ESC.
 const FORMAT_OR_FLAG = new RegExp(
-  String.raw`(${KEPT_FLAGS.join('|')})|(?![\u200C\u200D])\p{Cf}|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\u{10EEEE}` +
-    String.raw`|\p{Cs}`,
+  String.raw`(${KEPT_FLAGS.join('|')})|(?![\u200C\u200D])\p{Cf}|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)` +
+    String.raw`|\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\u{10EEEE}|\p{Cs}`,
   'gu',
 )
 
@@ -237,7 +243,7 @@ const FORMAT_OR_FLAG = new RegExp(
 // no-break spaces there would end the value before it starts): it goes. Its neighbours are those that remain once the
 // rest of Cf is gone (a zero-width space beside it does not make it stay), and a run of joiners stays or goes as a
 // whole. The run is matched once and judged by what is round it: a lookbehind and lookahead pair would read the run
-// again from each of its joiners. The three flags that stay (KEPT_FLAGS) are matched in the same pass, a whole sequence
+// again from each of its joiners. The three flags that stay (KEPT_FLAGS) are matched in the same pass, a whole flag
 // or one format character at a time, so a long run of tag characters is read once as well. The control characters go in
 // the same pass (C0 but tab, line feed and carriage return, DEL and C1), and a joiner's neighbours are those that
 // remain without them too: the engine refuses a text child that holds one (an escape sequence pasted from a terminal
@@ -247,7 +253,11 @@ const FORMAT_OR_FLAG = new RegExp(
 // that the words on either side stay apart. U+10EEEE goes too, in the same pass: it is the placeholder that the engine
 // keeps for itself, and the engine refuses a text child that holds it, as it refuses one that holds a control
 // character. A lone surrogate goes too (a pair is one code point, and stays): a removal between the two halves of
-// U+10EEEE would join them into that placeholder.
+// U+10EEEE would join them into that placeholder. An ANSI escape sequence goes whole, not its ESC alone (a CSI:
+// `ESC [`, its parameters and its final byte; an OSC: `ESC ]` to BEL or `ESC \`): a coloured log reads as its text, and
+// the rest of a sequence (`[31m`) does not glue to the word after it, which a pattern of redact that starts at a word
+// boundary (`Bearer`, `ghp_`) would then miss. An OSC with no terminator is no sequence, and only its ESC goes, so that
+// it cannot swallow the rest of a line. The pass stays linear: each part of a sequence is read once.
 export function stripFormat(s: string): string {
   // A flag (group 1) is put back as it is; a vertical tab and a form feed become a space, any other match goes.
   const rest = s.replace(FORMAT_OR_FLAG, (found, flag: string | undefined) =>
