@@ -1,9 +1,9 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock, Plugin } from 'claude-code/testing'
-import type { On, PluginState, RenderPropsOf, RenderSurface, SessionMessage, UiPane } from 'claude-code'
+import type { On, PluginState, PromptOrigin, RenderPropsOf, RenderSurface, SessionMessage, UiPane } from 'claude-code'
 
 import { LOG_MAX } from './stats'
-import type { AgentRow, LogEntry, TurnAcc, TurnStats } from './stats'
+import type { AgentRow, LogEntry, TaskRow, TurnAcc, TurnStats } from './stats'
 
 type State = PluginState['session-panel']
 
@@ -13,8 +13,9 @@ const mirrorsStats: [
   Same<State['turn'], TurnAcc | null>,
   Same<State['lastTurn'], TurnStats | null>,
   Same<State['agents'], Record<string, AgentRow>>,
+  Same<State['tasks'], Record<string, TaskRow>>,
   Same<State['log'], LogEntry[]>,
-] = [true, true, true, true]
+] = [true, true, true, true, true]
 
 const ROOT = '/work/online_shop'
 const HANDBACK_TOOL: string = 'SubagentHandback' // the tool a subagent reports through in auto mode: not in the types
@@ -85,6 +86,7 @@ const READER: Plugin = {
         turn: (await $.state.get({ plugin: 'session-panel', key: 'turn' } as const)).value,
         lastTurn: (await $.state.get({ plugin: 'session-panel', key: 'lastTurn' } as const)).value,
         agents: (await $.state.get({ plugin: 'session-panel', key: 'agents' } as const)).value,
+        tasks: (await $.state.get({ plugin: 'session-panel', key: 'tasks' } as const)).value,
         log: (await $.state.get({ plugin: 'session-panel', key: 'log' } as const)).value,
         logCount: (await $.state.get({ plugin: 'session-panel', key: 'logCount' } as const)).value,
         collapsed: (await $.state.get({ plugin: 'session-panel', key: 'collapsed' } as const)).value,
@@ -95,6 +97,9 @@ const READER: Plugin = {
     // The version of a value goes up by one with each write that lands: a test reads it to see whether a hook wrote.
     on('command.run', { command: 'read-agents-version' }, async $ => ({
       text: String((await $.state.get({ plugin: 'session-panel', key: 'agents' } as const)).version),
+    }))
+    on('command.run', { command: 'read-tasks-version' }, async $ => ({
+      text: String((await $.state.get({ plugin: 'session-panel', key: 'tasks' } as const)).version),
     }))
   },
 }
@@ -273,12 +278,46 @@ const WRITE_HOLDER: Plugin = {
     })
   },
 }
+// A plugin above the mod's that takes the start out of every row of tasks as it is written, as a task that began before
+// the mod saw it has none (a row with no start cannot be had any other way yet: nothing restores one). Like any plugin
+// of a test it closes over nothing of this file.
+const UNSTARTED: Plugin = {
+  name: 'unstarted',
+  tier: 'prepend',
+  register(on) {
+    on('state.set', (_$, e, next) => {
+      if (e.plugin !== 'session-panel' || e.key !== 'tasks') return next(e)
+      const rows = Object.fromEntries(Object.entries(e.value).map(([id, row]) => [id, { ...row, startedAt: null }]))
+
+      return next({ ...e, value: rows })
+    })
+  },
+}
+// A plugin beneath the mod's (the `append` tier lies inside the tier of the plugins that a person installs, and the
+// bottom of the test inside that) that notes the status of every row of tasks as a prompt reaches it, and says what it
+// saw when it is asked. Like any plugin of a test it closes over nothing of this file.
+const PROMPT_PROBE: Plugin = {
+  name: 'prompt-probe',
+  tier: 'append',
+  register(on) {
+    const seen: Array<Record<string, string>> = []
+    on('prompt.submit', async ($, e, next) => {
+      const rows = (await $.state.get({ plugin: 'session-panel', key: 'tasks' } as const)).value ?? {}
+      seen.push(Object.fromEntries(Object.entries(rows).map(([id, row]) => [id, row.status])))
+
+      return next(e)
+    })
+    on('command.run', { command: 'read-prompt-probe' }, async () => ({ text: JSON.stringify(seen) }))
+  },
+}
 const WITH_ABANDONER = { plugins: [READER, ABANDONER], timeoutMs: 30_000 }
 const WITH_INTERRUPTER = { plugins: [READER, INTERRUPTER], timeoutMs: 30_000 }
 const WITH_FRACTIONAL_CLOCK = { plugins: [READER, FRACTIONAL_CLOCK], timeoutMs: 30_000 }
 const WITH_STORE = { plugins: [READER, OTHER_SESSION], timeoutMs: 30_000 }
 const WITH_WRITE_HOLDER = { plugins: [READER, WRITE_HOLDER], timeoutMs: 30_000 }
 const WITH_CLOCK_SKEW = { plugins: [READER, CLOCK_SKEW], timeoutMs: 30_000 }
+const WITH_UNSTARTED = { plugins: [READER, UNSTARTED], timeoutMs: 30_000 }
+const WITH_PROMPT_PROBE = { plugins: [READER, PROMPT_PROBE], timeoutMs: 30_000 }
 const WITH_SUSPENDER = { plugins: [SUSPENDER] }
 const PANE_PROPS: RenderPropsOf['Pane'] = {
   title: 'Session', isFocused: false, bodyColumns: 40, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {},
@@ -292,6 +331,8 @@ const readState = async ($: Engine): Promise<State> => {
 
 const agentsVersion = async ($: Engine): Promise<number> =>
   Number((await $.command.run({ ...RUN, command: 'read-agents-version' })).text)
+const tasksVersion = async ($: Engine): Promise<number> =>
+  Number((await $.command.run({ ...RUN, command: 'read-tasks-version' })).text)
 
 // The map of folds in the store as the second plugin reads it back, a write of it as another session would make it, and
 // the pane mounted on the desktop, where a press of a header can be made (a surface can be given).
@@ -375,6 +416,7 @@ type World = {
   isStoreUnreadable: boolean // a read of the store rejects (only where `bottom` was given a store that can break)
   storeLag: number // how long each call of that store takes, in mock ms
   toolFailMs: number // how long a failing tool call takes, in mock ms
+  taskId: string // the id that a call which starts a task in the background answers with
   tokens: number | undefined // context.tokens of usage(): none before the first response of the window
   rawMaxTokens: number | undefined // the window the breakdown measures against; undefined: no breakdown in usage()
   mcpServers: string[] // the server of each MCP tool the breakdown holds, so a server with two tools is listed twice
@@ -459,6 +501,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     isStoreUnreadable: false,
     storeLag: 0,
     toolFailMs: 0,
+    taskId: 'b1',
     tokens: undefined,
     rawMaxTokens: 1_000_000,
     mcpServers: ['codebase-memory', 'codebase-memory', 'issue-hub', 'ccd_session'],
@@ -492,6 +535,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
   on('session.measure', (_$, e) => ({ changed: e.changed }))
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
   on('session.compact', () => w.compacted as never)
+  on('prompt.submit', (_$, e) => ({ text: e.text, origin: e.origin }))
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('agent.spawn', () => {
@@ -514,24 +558,32 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
   })
   on('tool.call', async (_$, e) => {
     // What a call says decides how it ends: the command of a Bash, the new text of an Edit, the description of an
-    // Agent, the message of a SendMessage or of a SubagentHandback. One that starts with `deny` is denied, one that
-    // starts with `fail` fails.
+    // Agent, the message of a SendMessage or of a SubagentHandback, the id of a TaskStop. One that starts with `deny`
+    // is denied, one that starts with `fail` fails.
     let says = ''
     if (e.tool === 'Bash') says = e.command
     if (e.tool === 'Edit') says = e.new_string
     if (e.tool === 'Agent') says = e.description
     if (e.tool === 'SendMessage') says = e.message
+    if (e.tool === 'TaskStop') says = e.task_id ?? ''
     if (e.tool === HANDBACK_TOOL) says = String('message' in e ? e.message : '')
     if (says.startsWith('deny')) return { deny: 'no' }
     const readOnly = w.isReadOnly ? { isReadOnly: true as const } : {}
+    // A Bash told to run in the background, a Monitor and a Workflow start a task: their result holds its id
+    // (`w.taskId`) under the name that the tool gives it. A failing one holds it too, which a real error does not, so
+    // that a test of a failure shows the outcome of the call deciding, and not the shape of its result.
+    let started: unknown
+    if (e.tool === 'Bash' && e.run_in_background === true) started = { stdout: '', backgroundTaskId: w.taskId }
+    if (e.tool === 'Monitor') started = { taskId: w.taskId, timeoutMs: e.timeout_ms }
+    if (e.tool === 'Workflow') started = { status: 'async_launched', taskId: w.taskId, workflowName: 'review' }
     if (says.startsWith('fail')) {
       if (w.toolFailMs > 0) await clock.sleep(w.toolFailMs)
 
-      return { isError: true as const, result: 'boom', text: 'boom', ...readOnly }
+      return { isError: true as const, result: started ?? 'boom', text: 'boom', ...readOnly }
     }
     await clock.sleep(300)
 
-    return { result: { stdout: 'ok' } as never, text: 'ok', ...readOnly }
+    return { result: (started ?? { stdout: 'ok' }) as never, text: 'ok', ...readOnly }
   })
   // Calls on `$`; the test host serves `state` itself and mock.clock serves `clock`.
   on('command.register', (_$, e) => {
@@ -4376,6 +4428,438 @@ test('Tool time counts an Agent call and a SendMessage call of the main loop, th
     expect((await readState($)).lastTurn?.toolMs).toBe(600)
   })
 
+// The tasks of a session (the v2 spec, §4). A call that starts one has its id in the answer of the bottom (`w.taskId`);
+// the notice of its end is a prompt that the engine submits itself, with the origin `task-notification`.
+const background = (description = 'run tests') =>
+  ({ tool: 'Bash', command: 'npm test', description, run_in_background: true }) as const
+const monitor = () => ({ tool: 'Monitor', description: 'watch the log', timeout_ms: 60_000 }) as const
+const workflow = () => ({ tool: 'Workflow', name: 'review' }) as const
+const stopTask = (id: string) => ({ tool: 'TaskStop', task_id: id }) as const
+
+// The notice of a task as the engine sends it (the v2 spec, §8.5): its header and its summary, and for a subagent or
+// a workflow a usage block with the time it ran.
+const notice = (id: string, status: string, tail = ''): string =>
+  `<task-notification>\n<task-id>${id}</task-id>\n<status>${status}</status>\n<summary>s</summary>\n${tail}` +
+  '</task-notification>'
+const usageBlock = (ms: number): string => `<usage><duration_ms>${ms}</duration_ms></usage>\n`
+const submitNotice = ($: Engine, text: string, origin: PromptOrigin = { kind: 'task-notification' }) =>
+  $.prompt.submit({ text, wait: false, origin })
+
+// The call `call` starts the task `id`, and the clock runs until the call is over.
+const startTask = ($: Engine, clock: MockClock, w: World, id: string, call: object = background()) => {
+  w.taskId = id
+
+  return drive(clock, $.tool.call(call as never))
+}
+// The task `id` starts, and `ms` pass after its start. Answers when it started: its call took 300 ms.
+const runFor = async (
+  $: Engine, clock: MockClock, w: World, id: string, ms: number, call?: object,
+): Promise<number> => {
+  const startedAt = clock.now() + 300
+  await startTask($, clock, w, id, call)
+  await clock.advance(startedAt + ms - clock.now())
+
+  return startedAt
+}
+// The rows of tasks by id, none until the first is written; and the lines of the log as [who, text, kind, outcome],
+// newest first, none until the first is written.
+const taskRows = async ($: Engine): Promise<State['tasks']> => (await readState($)).tasks ?? {}
+const logRows = async ($: Engine): Promise<unknown[][]> =>
+  ((await readState($)).log ?? []).map(entry => [entry.who, entry.text, entry.kind, entry.outcome])
+
+test('a Bash that went to the background has a running row in tasks, and its line in the log says → background',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+
+    await drive(clock, $.tool.call({ tool: 'Bash', command: 'ls' })) // in the foreground: no task, and its time
+    const startedAt = clock.now() + 300 // the task is there when its call is over, which the bottom takes 300 ms to do
+    await startTask($, clock, w, 'b1')
+
+    expect(await taskRows($)).toEqual({
+      b1: {
+        id: 'b1', kind: 'shell', description: 'run tests', status: 'running', startedAt, endedAt: null,
+        durationMs: null,
+      },
+    })
+    expect(await logRows($)).toEqual([
+      ['main', 'Bash npm test', 'ok', '→ background'],
+      ['main', 'Bash ls', 'ok', '✓ 0.3s'],
+    ])
+    expect((await readState($)).log[0]?.at).toBe(startedAt)
+  })
+
+test('a Monitor and a Workflow that started have their rows in tasks, and their lines say → background', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+
+    await startTask($, clock, w, 'm1', monitor())
+    await startTask($, clock, w, 'w1', workflow())
+
+    expect(Object.values(await taskRows($)).map(row => [row.id, row.kind, row.description, row.status])).toEqual([
+      ['m1', 'monitor', 'watch the log', 'running'],
+      ['w1', 'workflow', 'review', 'running'],
+    ])
+    expect(await logRows($)).toEqual([
+      ['main', 'Workflow', 'ok', '→ background'],
+      ['main', 'Monitor', 'ok', '→ background'],
+    ])
+  })
+
+// The failed call has the id in its result, as no real error has: only its outcome can keep a row from being made.
+test('a call that was denied or failed starts no task: no row, and its line is the denial or the failure', WITH_READER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+
+    await $.tool.call({ ...background(), command: 'deny it' })
+    await $.tool.call({ ...background(), command: 'fail it' })
+
+    expect(await taskRows($)).toEqual({})
+    expect(await logRows($)).toEqual([
+      ['main', 'Bash fail it', 'error', '✗ 0.0s'],
+      ['main', 'Bash deny it', 'error', 'denied'],
+    ])
+  })
+
+// The row is the main agent's: a subagent's task is its own, and may end with it. The line says what the call did,
+// whoever made it.
+test('a call of a subagent that went to the background says → background and makes no row', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.agent.spawn(SPAWN) // a1: an engineer
+
+    await startTask($, clock, w, 'b1', { ...background(), agentId: 'a1' })
+    await startTask($, clock, w, 'b2', { ...background(), agentId: 'a9' }) // no agent.spawn announced it
+
+    expect(await taskRows($)).toEqual({})
+    expect((await logRows($)).slice(0, 2)).toEqual([
+      ['agent', 'Bash npm test', 'ok', '→ background'],
+      ['engineer', 'Bash npm test', 'ok', '→ background'],
+    ])
+  })
+
+test('a TaskStop that succeeded stops the task it names: the row, and a line of its own after the call\'s',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    const startedAt = await runFor($, clock, w, 'b1', 120_000)
+
+    await drive(clock, $.tool.call(stopTask('b1'))) // the call is over 300 ms after it starts, and that ends the task
+
+    expect((await taskRows($)).b1).toEqual({
+      id: 'b1', kind: 'shell', description: 'run tests', status: 'stopped', startedAt, endedAt: startedAt + 120_300,
+      durationMs: 120_300,
+    })
+    expect((await logRows($)).slice(0, 3)).toEqual([
+      ['main', 'stopped · shell: run tests', 'info', '2m 00s'],
+      ['main', 'TaskStop', 'ok', '✓ 0.3s'],
+      ['main', 'Bash npm test', 'ok', '→ background'],
+    ])
+  })
+
+// The id of a task tells the bottom how a TaskStop of it ends: one that starts with `fail` fails, one that starts with
+// `deny` is denied. Nothing is written for any of them, not even the value of tasks over again.
+test('a TaskStop that failed, was denied, names no task or names one that is over changes nothing', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await runFor($, clock, w, 'fail-b1', 1000)
+    await runFor($, clock, w, 'deny-b2', 1000)
+    await runFor($, clock, w, 'b3', 1000)
+    await submitNotice($, notice('b3', 'completed')) // b3 is over
+    const before = await readState($)
+    const version = await tasksVersion($)
+
+    await $.tool.call(stopTask('fail-b1'))
+    await $.tool.call(stopTask('deny-b2'))
+    await drive(clock, $.tool.call(stopTask('nobody')))
+    await drive(clock, $.tool.call(stopTask('b3')))
+
+    expect(await taskRows($)).toEqual(before.tasks)
+    expect(await tasksVersion($)).toBe(version)
+    // Each call is a line of a call, and no line says that a task stopped.
+    expect((await logRows($)).slice(0, 4)).toEqual([
+      ['main', 'TaskStop', 'ok', '✓ 0.3s'],
+      ['main', 'TaskStop', 'ok', '✓ 0.3s'],
+      ['main', 'TaskStop', 'error', 'denied'],
+      ['main', 'TaskStop', 'error', '✗ 0.0s'],
+    ])
+    expect((await readState($)).log).toHaveLength(before.log.length + 4)
+  })
+
+// TaskStop names its task by `task_id`, and by the deprecated `shell_id` too; with both, `task_id` is the one. It gives
+// no notice of its own, so a stop by `shell_id` that was left out would leave the row running for good.
+test('a TaskStop that names its task by shell_id stops it too, and task_id is the one when it gives both',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    for (const id of ['b1', 'b2', 'b3']) await runFor($, clock, w, id, 1000)
+
+    await drive(clock, $.tool.call({ tool: 'TaskStop', shell_id: 'b1' }))
+    expect(Object.values(await taskRows($)).map(row => row.status)).toEqual(['stopped', 'running', 'running'])
+    await drive(clock, $.tool.call({ tool: 'TaskStop', task_id: 'b2', shell_id: 'b3' }))
+
+    expect(Object.values(await taskRows($)).map(row => row.status)).toEqual(['stopped', 'stopped', 'running'])
+    expect((await logRows($)).filter(row => String(row[1]).startsWith('stopped')).map(row => row[1])).toEqual([
+      'stopped · shell: run tests', 'stopped · shell: run tests',
+    ])
+  })
+
+// A TaskStop is the call of whoever made it: a subagent may stop a task that the main agent started, and it is stopped.
+test('a TaskStop that a subagent made stops the task it names, though the main agent started it', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.agent.spawn(SPAWN) // a1: an engineer
+    await runFor($, clock, w, 'b1', 1000)
+
+    await drive(clock, $.tool.call({ ...stopTask('b1'), agentId: 'a1' } as never))
+
+    expect((await taskRows($)).b1?.status).toBe('stopped')
+    expect((await logRows($)).slice(0, 2)).toEqual([
+      ['main', 'stopped · shell: run tests', 'info', '1.3s'],
+      ['engineer', 'TaskStop', 'ok', '✓ 0.3s'],
+    ])
+  })
+
+// `killed` and `stopped` are both a stop; the engine has said both. A shell command's notice has no time, so the row
+// has the time from its start to the notice.
+test('the notice of a task closes its row: completed is done, failed is failed, killed and stopped are stopped',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    const ends: Array<[notified: string, shown: string, kind: string, outcome: string]> = [
+      ['completed', 'done', 'ok', '✓ 5.0s'],
+      ['failed', 'failed', 'error', '✗ 5.0s'],
+      ['killed', 'stopped', 'info', '5.0s'],
+      ['stopped', 'stopped', 'info', '5.0s'],
+    ]
+
+    for (const [i, [notified, shown, kind, outcome]] of ends.entries()) {
+      const id = `b${i + 1}`
+      const startedAt = await runFor($, clock, w, id, 5000)
+      await submitNotice($, notice(id, notified))
+
+      expect((await taskRows($))[id], notified).toEqual({
+        id, kind: 'shell', description: 'run tests', status: shown, startedAt, endedAt: startedAt + 5000,
+        durationMs: 5000,
+      })
+      // The line of the end is the newest: who ended it is the main agent, and the outcome is drawn as a subagent's is.
+      expect((await logRows($))[0], notified).toEqual(['main', `${shown} · shell: run tests`, kind, outcome])
+    }
+  })
+
+test('a notice that gives the time the task ran gives it to the row, whatever the clock says', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    const startedAt = await runFor($, clock, w, 'w1', 5000, workflow())
+
+    await submitNotice($, notice('w1', 'completed', usageBlock(72_000)))
+
+    expect((await taskRows($)).w1).toMatchObject({ status: 'done', endedAt: startedAt + 5000, durationMs: 72_000 })
+    expect((await logRows($))[0]).toEqual(['main', 'done · workflow: review', 'ok', '✓ 1m 12s'])
+  })
+
+test('the end line of a task is cut to 512 characters, as the lines of a prompt and of a subagent are', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await runFor($, clock, w, 'b1', 1000, background('x'.repeat(600)))
+
+    await submitNotice($, notice('b1', 'completed'))
+
+    const [line] = (await readState($)).log
+    expect(line?.text.length).toBe(512)
+    expect(line?.text.startsWith('done · shell: xxx')).toBe(true)
+    expect(line?.text.endsWith('x…')).toBe(true)
+  })
+
+// A task whose start is not known has no time to show: the end line has an outcome only when the notice brings the
+// time.
+test('a task whose start is not known has an end line with no outcome, unless the notice gives the time',
+  WITH_UNSTARTED, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await startTask($, clock, w, 'b1')
+    await startTask($, clock, w, 'w1', workflow())
+    expect((await taskRows($)).b1?.startedAt).toBeNull() // the plugin took it out
+
+    await submitNotice($, notice('b1', 'completed'))
+    await submitNotice($, notice('w1', 'failed', usageBlock(72_000)))
+
+    expect((await taskRows($)).b1).toMatchObject({ status: 'done', durationMs: null })
+    expect((await taskRows($)).w1).toMatchObject({ status: 'failed', durationMs: 72_000 })
+    const [failed, done] = (await readState($)).log
+    expect([done?.text, done?.kind, done === undefined ? null : 'outcome' in done]).toEqual([
+      'done · shell: run tests', 'ok', false,
+    ])
+    expect([failed?.text, failed?.kind, failed?.outcome]).toEqual(['failed · workflow: review', 'error', '✗ 1m 12s'])
+  })
+
+test('the hook of prompt.submit passes on what the chain beneath answered, for a notice and for any other prompt',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    const text = notice('b1', 'completed')
+
+    expect(await submitNotice($, text)).toEqual({ text, origin: { kind: 'task-notification' } })
+    expect(await submitNotice($, 'hi', { kind: 'composer' })).toEqual({ text: 'hi', origin: { kind: 'composer' } })
+  })
+
+// The hook looks at the notice after the chain beneath has run, as the hooks of the file do: the plugin beneath it
+// still finds the task running as the prompt reaches it, and the row is closed once the prompt is in.
+test('the hook of prompt.submit closes the task after the chain beneath has run, not before', WITH_PROMPT_PROBE,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await runFor($, clock, w, 'b1', 1000)
+
+    await submitNotice($, notice('b1', 'completed'))
+
+    const seen = JSON.parse((await $.command.run({ ...RUN, command: 'read-prompt-probe' })).text ?? '[]')
+    expect(seen).toEqual([{ b1: 'running' }])
+    expect((await taskRows($)).b1?.status).toBe('done')
+  })
+
+// A notice for an id with no row: a subagent's (its id is in `agents`, and its own turn ends it there), or that of a
+// task of an earlier session, which comes when this one starts and says `failed` or `stopped`, with a <note>. Nothing
+// is written for it, not even the value of tasks over again, and no line is added.
+test('a notice for an id with no row changes nothing: a subagent\'s, and an earlier session\'s', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.agent.spawn(SPAWN) // a1
+    await runFor($, clock, w, 'b1', 1000) // tasks holds a row that runs
+    const before = await readState($)
+    const version = await tasksVersion($)
+
+    await submitNotice($, notice('a1', 'completed', usageBlock(72_000)))
+    await submitNotice($, notice('bc3d9f2kx', 'stopped', '<note>earlier session</note>\n'))
+
+    const after = await readState($)
+    expect([after.tasks, after.agents, after.log, after.logCount]).toEqual([
+      before.tasks, before.agents, before.log, before.logCount,
+    ])
+    expect(after.agents.a1?.status).toBe('running')
+    expect(await tasksVersion($)).toBe(version)
+  })
+
+test('only a prompt that the engine raised for a task counts: the same text from the person or a plugin closes nothing',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await runFor($, clock, w, 'b1', 1000)
+    const text = notice('b1', 'completed')
+
+    await submitNotice($, text, { kind: 'composer' })
+    await submitNotice($, text, { kind: 'plugin', name: 'other' })
+    await submitNotice($, text, { kind: 'peer' })
+    expect((await taskRows($)).b1?.status).toBe('running')
+    expect((await logRows($)).map(row => row[1])).toEqual(['Bash npm test'])
+
+    await submitNotice($, text)
+    expect((await taskRows($)).b1?.status).toBe('done')
+  })
+
+// A task-id may notify more than once. The first end stands: the row keeps its status and its times, and no second line
+// says it ended. So does the end that a TaskStop made.
+test('a task is closed once: a second notice, whatever it says, changes nothing, nor does one after a TaskStop',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await runFor($, clock, w, 'b1', 1000)
+    await runFor($, clock, w, 'b2', 1000)
+    await submitNotice($, notice('b1', 'completed'))
+    await drive(clock, $.tool.call(stopTask('b2')))
+    const closed = await readState($)
+    const version = await tasksVersion($)
+    await clock.advance(1000)
+
+    await submitNotice($, notice('b1', 'failed'))
+    await submitNotice($, notice('b1', 'completed'))
+    await submitNotice($, notice('b2', 'killed'))
+
+    const after = await readState($)
+    expect([after.tasks, after.log, after.logCount]).toEqual([closed.tasks, closed.log, closed.logCount])
+    expect(after.tasks.b1?.status).toBe('done')
+    expect(after.tasks.b2?.status).toBe('stopped')
+    expect(await tasksVersion($)).toBe(version)
+  })
+
+// The notice of a task and the TaskStop that ended it may be seen at once. The write of the first one's row is held,
+// the second one closes the task meanwhile, and the held write then misses: its update runs again and finds the row
+// closed, so the first one adds no line and takes nothing back.
+test('a notice and a TaskStop that close one task at once leave one line and the first closing', WITH_WRITE_HOLDER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await runFor($, clock, w, 'b1', 1000)
+    await armHold($, { keys: ['tasks'], mode: 'before', ms: 500 })
+
+    const notified = submitNotice($, notice('b1', 'completed')) // its write of the row waits 500 ms
+    await clock.settle()
+    await drive(clock, $.tool.call(stopTask('b1'))) // the call is over after 300 ms, and the task is closed
+    await clock.advance(500) // the held write goes on: it misses, and the update runs again
+    await notified
+
+    expect((await taskRows($)).b1?.status).toBe('stopped')
+    expect((await logRows($)).filter(row => String(row[1]).includes(' · shell: '))).toEqual([
+      ['main', 'stopped · shell: run tests', 'info', expect.any(String)],
+    ])
+  })
+
+// A hot reload raises session.start again, for the mod alone, and the values of `$.state` stay: so do the tasks.
+test('a second session.start, which a hot reload raises, keeps the tasks', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  await startTask($, clock, w, 'b1')
+  const before = await taskRows($)
+  expect(Object.keys(before)).toEqual(['b1'])
+
+  await $.session.start(START)
+  await clock.advance(1)
+
+  expect(await taskRows($)).toEqual(before)
+})
+
 test('every 30 s the pane is redrawn and statuses follow $.agent.list; usage refreshes every second tick', WITH_READER,
   async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })
@@ -4591,7 +5075,7 @@ test('a compaction is logged and refreshes usage; a skipped one and a subagent\'
 // The count of every line put on the log, which the log's 200 lines do not hold once there are more.
 test('every path that puts a line on the log adds one to its count', SLOW_READER, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
-  bottom(on, clock)
+  const w = bottom(on, clock)
   await $.session.start(START)
   await clock.advance(1)
 
@@ -4602,6 +5086,8 @@ test('every path that puts a line on the log adds one to its count', SLOW_READER
     ['the end of a subagent', () => finish($, 'a1')],
     ['a message that wakes the subagent', () => runStep($, clock, { turnId: 't1', index: 1, agentId: 'a1' })],
     ['a compaction', () => $.session.compact({ trigger: 'manual', messages: MESSAGES })],
+    ['a call that starts a task', () => startTask($, clock, w, 'b1')],
+    ['the end of a task', () => submitNotice($, notice('b1', 'completed'))],
   ]
   let expected = 0
   for (const [name, run] of paths) {
@@ -4671,6 +5157,7 @@ const checkStartsOver = async ($: Engine, on: On, reason: 'clear' | 'resume'): P
   await clock.advance(1)
   await $.turn.start({ text: 'go', turnId: 't1' })
   await $.agent.spawn(SPAWN)
+  await startTask($, clock, w, 'm1', monitor())
   w.stepCost = 0.5
   await runStep($, clock, { turnId: 't1', index: 1 })
   await clock.advance(10)
@@ -4680,6 +5167,7 @@ const checkStartsOver = async ($: Engine, on: On, reason: 'clear' | 'resume'): P
   expect(before.lastTurn).toBeTruthy()
   expect(before.turn?.turnId).toBe('t2')
   expect(Object.keys(before.agents)).toEqual(['a1'])
+  expect(Object.keys(before.tasks)).toEqual(['m1'])
   expect(before.log.length).toBeGreaterThan(0)
   expect(before.logCount).toBe(before.log.length)
   expect(before.usage).toMatchObject({ contextTokens: 90_000, contextPct: 9 })
@@ -4690,7 +5178,9 @@ const checkStartsOver = async ($: Engine, on: On, reason: 'clear' | 'resume'): P
 
   expect(await $.session.end({ reason, sessionId: 's1', resume: { id: 's1' } })).toEqual({ sessionId: 's1' })
   const after = await readState($)
-  expect([after.turn, after.lastTurn, after.agents, after.log, after.logCount]).toEqual([null, null, {}, [], 0])
+  expect([after.turn, after.lastTurn, after.agents, after.tasks, after.log, after.logCount]).toEqual([
+    null, null, {}, {}, [], 0,
+  ])
   expect(after.project).toEqual(before.project)
   // The context reads empty until the next response; the window, the cost, the limits and the skills are the session's.
   const { contextTokens, contextPct, ...kept } = before.usage

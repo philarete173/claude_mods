@@ -10,10 +10,11 @@ import type {
 } from 'claude-code'
 
 import {
-  addAgentCost, attributeCost, computeTurnStats, fmtDuration, fmtTokens, fmtUsd, LOG_TEXT_MAX, logHead, parseStatus,
-  plainText, pushLog, redact, shortType, shorten, stripFormat, sumNumstat, toolLabel,
+  addAgentCost, attributeCost, computeTurnStats, finishTask, fmtDuration, fmtTokens, fmtUsd, LOG_TEXT_MAX, logHead,
+  parseStatus, parseTaskNotification, plainText, pushLog, redact, shortType, shorten, stripFormat, sumNumstat,
+  taskFromCall, toolLabel,
 } from './stats'
-import type { AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, Usage } from './stats'
+import type { AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, TaskEnd, TaskRow, Usage } from './stats'
 import { renderPane } from './view'
 import type { PaneData, SectionId } from './view'
 
@@ -28,6 +29,7 @@ const mcpAtom = atom({ plugin: 'session-panel', key: 'mcp' } as const, null)
 const turnAtom = atom({ plugin: 'session-panel', key: 'turn' } as const, null)
 const lastTurnAtom = atom({ plugin: 'session-panel', key: 'lastTurn' } as const, null)
 const agentsAtom = atom({ plugin: 'session-panel', key: 'agents' } as const, {})
+const tasksAtom = atom({ plugin: 'session-panel', key: 'tasks' } as const, {})
 const logAtom = atom({ plugin: 'session-panel', key: 'log' } as const, [])
 const logCountAtom = atom({ plugin: 'session-panel', key: 'logCount' } as const, 0)
 const collapsedAtom = atom({ plugin: 'session-panel', key: 'collapsed' } as const, {})
@@ -37,6 +39,15 @@ const TICK_MS = 30_000
 
 // The words $.agent.list() uses for how a subagent ended; any other word (`running` too) leaves the row as it is.
 const LISTED_STATUS: Record<string, AgentStatus> = { completed: 'done', failed: 'failed', killed: 'stopped' }
+
+// The statuses that the row of a task takes when it ends.
+type TaskEndStatus = 'done' | 'failed' | 'stopped'
+
+// How the notice of a task words its end, and the status its row takes: `killed` and `stopped` are both a stop. Not
+// LISTED_STATUS, which is for $.agent.list() and has no `stopped`.
+const TASK_END: Record<TaskEnd['status'], TaskEndStatus> = {
+  completed: 'done', failed: 'failed', killed: 'stopped', stopped: 'stopped',
+}
 
 // The tools that start a subagent (`Task` is the name of `Agent` in older builds).
 const SPAWN_TOOLS: string[] = ['Agent', 'Task']
@@ -234,6 +245,21 @@ const agentOutcome = (
   const head = row.costUsd === null ? 'done' : `done · ${fmtUsd(row.costUsd)}`
 
   return { text: said === '' ? head : `${head} — ${said}`, outcome: `✓ ${took}` }
+}
+
+// The log line of a task that has ended, drawn as the end of a subagent is (agentOutcome): the text is the status, the
+// kind and what the task was; the outcome is the time it ran behind a mark (✓ for a task that finished, ✗ for one that
+// failed; a stop is no fault, so it has no mark). A task whose time is not known has no outcome.
+const taskLine = (
+  status: TaskEndStatus, row: TaskRow,
+): { text: string; kind: LogKind; outcome: string | undefined } => {
+  const mark = status === 'done' ? '✓ ' : status === 'failed' ? '✗ ' : ''
+
+  return {
+    text: shorten(`${status} · ${row.kind}: ${row.description}`, LOG_TEXT_MAX),
+    kind: status === 'done' ? 'ok' : status === 'stopped' ? 'info' : 'error',
+    outcome: row.durationMs === null ? undefined : `${mark}${fmtDuration(row.durationMs)}`,
+  }
 }
 
 // Whether a value of the store is a map of booleans, the shape of the folded sections: an object that is neither null
@@ -625,6 +651,29 @@ async function reviveAgent($: EngineInterface, agentId: string): Promise<void> {
   }
 }
 
+// Closes the row of a task that runs: its status, its end and the time it ran, and one line on the log. A row that is
+// missing, or that does not run, stays as it is, with no line and no write, apart from a race (a row that another call
+// closes between the check and the write is written over as it stands): a notice may name a task of an earlier
+// session, or come twice for one task, and a TaskStop may name any id.
+async function closeTask(
+  $: EngineInterface, id: string, status: TaskEndStatus, at: number, durationMs: number | null,
+): Promise<void> {
+  const held = (await read($, tasksAtom))[id]
+  if (held === undefined || held.status !== 'running') return
+  let closed = null as TaskRow | null // the cast stops TypeScript narrowing it to `null`: the update callback sets it
+  await update($, tasksAtom, rows => {
+    const row = rows[id]
+    // The update runs again when its write misses, so it sets `closed` on every run.
+    closed = row !== undefined && row.status === 'running' ? finishTask(row, status, at, durationMs) : null
+
+    return closed === null ? rows : { ...rows, [id]: closed }
+  })
+  if (closed !== null) {
+    const { text, kind, outcome } = taskLine(status, closed)
+    await addLog($, at, 'main', text, kind, outcome)
+  }
+}
+
 // Takes a cost reading, shows it as Total, and charges what is new since the last reading to the agent whose request
 // has just stopped. The main loop's share is not kept anywhere: Session is Total less the subagents. The engine books
 // a request as it stops, so a timer takes the reading, off the stream.
@@ -726,6 +775,7 @@ export const register: Register = on => {
         await update($, turnAtom, () => turnAtom.initial)
         await update($, lastTurnAtom, () => lastTurnAtom.initial)
         await update($, agentsAtom, () => agentsAtom.initial)
+        await update($, tasksAtom, () => tasksAtom.initial)
         await update($, logCountAtom, () => logCountAtom.initial)
         await update($, logAtom, () => logAtom.initial)
         await update($, usageAtom, held => ({ ...held, contextTokens: undefined, contextPct: undefined }))
@@ -852,6 +902,11 @@ export const register: Register = on => {
       const message = 'message' in e ? e.message : undefined
       if (typeof message === 'string') handbacks.set(e.agentId, message)
     }
+    // A call that started a task in the background says so in its line, whichever agent made it: the time it took is
+    // only the time of the start. Only the main agent's call has a row: the task of a subagent is its own and may end
+    // with it, so its row could stay running for good. A call that failed or was denied started none.
+    const task = isFailed ? null : taskFromCall(e.tool, e, ran.result, t1)
+    if (task !== null && e.agentId === undefined) await update($, tasksAtom, rows => ({ ...rows, [task.id]: task }))
     // A call that started a subagent, woke one or handed a report back has its lines in the log already (`spawned · …`,
     // `resumed · …`, the agent's own `done`): only a call that failed or was denied is logged here.
     const isAgentCall =
@@ -869,8 +924,12 @@ export const register: Register = on => {
       // nobody caused (the 0.4.1 live check). The pane cannot tell a fork from a workflow's agent, whose failure is
       // real, so the failure of an agent with no row is drawn dim, and still shown.
       const kind: LogKind = isAbandoned || (isFailed && isUnknown) ? 'info' : isFailed ? 'error' : 'ok'
-      await addLog($, t1, who, label, kind, outcome)
+      await addLog($, t1, who, label, kind, task === null ? outcome : '→ background')
     }
+    // A TaskStop that went through ends the task it names, by `task_id` or by the deprecated `shell_id`: it gives no
+    // notice of its own (the v2 spec, §8.5), so a task it names that is left running would stay so for good.
+    const stopId = e.tool === 'TaskStop' ? (e.task_id ?? e.shell_id) : undefined
+    if (stopId !== undefined && !isFailed) await closeTask($, stopId, 'stopped', t1, null)
 
     return ran
   })
@@ -939,6 +998,17 @@ export const register: Register = on => {
     }
 
     return spawned
+  })
+
+  on('prompt.submit', async ($, e, next) => {
+    const submitted = await next(e)
+    // The notice of a background task is the engine's word that the task is over, and how it ended. Only a prompt that
+    // the engine raised for a task counts (the origin), not the same text typed or sent by a plugin; one that names no
+    // row of tasks, an earlier session's or a subagent's, closes nothing (closeTask).
+    const end = e.origin?.kind === 'task-notification' ? parseTaskNotification(e.text) : null
+    if (end !== null) await closeTask($, end.id, TASK_END[end.status], await $.clock.now(), end.durationMs)
+
+    return submitted
   })
 
   on('session.compact', async ($, e, next) => {

@@ -778,14 +778,30 @@ test('taskFromCall: a Bash command that went to the background is a running shel
     id: 'bzzvhtd8a', kind: 'shell', description: 'Wait for two minutes', status: 'running', startedAt: 1000,
     endedAt: null, durationMs: null,
   })
-  // Ctrl+B and a timeout send a command that runs to the background: its result has the same id, beside a flag.
-  for (const flag of [{ backgroundedByUser: true }, { timedOutAfterMs: 120_000 }]) {
-    const row = taskFromCall('Bash', { command: 'sleep 120' }, { backgroundTaskId: 'b2', ...flag }, 5)
-    expect(row, JSON.stringify(flag)).toEqual({
-      id: 'b2', kind: 'shell', description: 'sleep 120', status: 'running', startedAt: 5, endedAt: null,
-      durationMs: null,
-    })
+  // Ctrl+B sends a command that runs to the background: its result has the same id, beside a flag.
+  const row = taskFromCall('Bash', { command: 'sleep 120' }, { backgroundTaskId: 'b2', backgroundedByUser: true }, 5)
+  expect(row).toEqual({
+    id: 'b2', kind: 'shell', description: 'sleep 120', status: 'running', startedAt: 5, endedAt: null, durationMs: null,
+  })
+})
+
+// A command that hit its timeout ran in the foreground for that long before the engine sent it to the background (the
+// result says so: `timedOutAfterMs`), so the task began that long before the call returned. Any other value is no time
+// to count back: a negative one, one that is no finite number, and one that is no number at all.
+test('taskFromCall: a Bash command that timed out in the foreground began that long before the call returned', () => {
+  const input = { command: 'sleep 120' }
+  expect(taskFromCall('Bash', input, { backgroundTaskId: 'b2', timedOutAfterMs: 120_000 }, 1_000_000)).toEqual({
+    id: 'b2', kind: 'shell', description: 'sleep 120', status: 'running', startedAt: 880_000, endedAt: null,
+    durationMs: null,
+  })
+  const startOf = (flag: object): number | null | undefined =>
+    taskFromCall('Bash', input, { backgroundTaskId: 'b2', ...flag }, 1_000_000)?.startedAt
+  expect(startOf({ timedOutAfterMs: 0 })).toBe(1_000_000)
+  for (const timedOutAfterMs of [-1, Number.NaN, Number.POSITIVE_INFINITY, '120000', null, undefined]) {
+    expect(startOf({ timedOutAfterMs }), String(timedOutAfterMs)).toBe(1_000_000)
   }
+  expect(startOf({ backgroundedByUser: true })).toBe(1_000_000) // Ctrl+B sends no time
+  expect(startOf({})).toBe(1_000_000)
 })
 
 test('taskFromCall: the description of a shell task is the one the model gave, else the command, else `shell`', () => {
@@ -949,6 +965,20 @@ test('parseTaskNotification: a result that quotes the tags does not change the i
     '</result>\n'
   const text = notification('a1', 'completed', 'Agent "x" finished', quoted + usageBlock(900))
   expect(parseTaskNotification(text)).toEqual({ id: 'a1', status: 'completed', durationMs: 900 })
+})
+
+// A notice of Monitor has not been seen, and what a monitor watches or a result says can hold any tag. The status is
+// the header's: what stands before the summary, or the whole text when there is no summary.
+test('parseTaskNotification reads the status from the header alone: one in the summary or a result is none', () => {
+  const header = '<task-notification>\n<task-id>mq8x1</task-id>\n'
+  const quoted = '<result>build done <status>completed</status></result>\n'
+  expect(parseTaskNotification(`${header}<summary>Monitor event</summary>\n${quoted}</task-notification>`)).toBe(null)
+  const inSummary = '<summary>line <status>completed</status></summary>\n'
+  expect(parseTaskNotification(`${header}${inSummary}</task-notification>`)).toBe(null)
+  // With no summary the whole text is the header.
+  expect(parseTaskNotification(`${header}<status>failed</status>\n</task-notification>`)).toEqual({
+    id: 'mq8x1', status: 'failed', durationMs: null,
+  })
 })
 
 test('parseTaskNotification: a text with no <task-id> is no notification, nor is one whose status is no end', () => {

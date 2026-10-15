@@ -438,13 +438,21 @@ function runningTask(kind: TaskKind, id: string, texts: string[], now: number): 
 // The task that a tool call has started in the background, or null when it started none. A Bash command that runs in
 // the background has a `backgroundTaskId` in its result, whoever sent it there: its own input, Ctrl+B or its timeout. A
 // Monitor and a Workflow have a `taskId`. Each is the id that the notification of the task names (`<task-id>`). Another
-// tool starts none that the pane tracks: a subagent has its row in Subagents.
+// tool starts none that the pane tracks: a subagent has its row in Subagents. A task starts at `now`, the time its call
+// returned; a command that hit its timeout began earlier (see below).
 export function taskFromCall(tool: string, input: unknown, result: unknown, now: number): TaskRow | null {
   const given = asRecord(input)
   const got = asRecord(result)
   switch (tool) {
-    case 'Bash':
-      return runningTask('shell', str(got.backgroundTaskId), [str(given.description), str(given.command)], now)
+    case 'Bash': {
+      // A command that hit its timeout ran in the foreground for `timedOutAfterMs` before the engine sent it to the
+      // background, so its task began that long before the call returned. Any other value is no time to count back (a
+      // negative one, or one that is no finite number), and Ctrl+B says none.
+      const waited = got.timedOutAfterMs
+      const ranMs = typeof waited === 'number' && Number.isFinite(waited) && waited >= 0 ? waited : 0
+
+      return runningTask('shell', str(got.backgroundTaskId), [str(given.description), str(given.command)], now - ranMs)
+    }
     case 'Monitor':
       return runningTask('monitor', str(got.taskId), [str(given.description)], now)
     case 'Workflow':
@@ -473,14 +481,16 @@ function tagText(text: string, tag: string, fromEnd = false): string | undefined
 }
 
 // How a task ended, from its notification: the text of a `prompt.submit` whose origin is `task-notification` (the v2
-// spec, §8.5). The `<task-id>`, the `<status>` and the `<duration_ms>` of the usage block, which a shell command has
-// none of; a duration that is no safe integer is none either. Null for a text with no id, and for a status that is no
-// end of a task: `completed`, `failed`, `killed` and `stopped` are the four that end one. The notice of a task that an
-// earlier session left running has a `<note>` and says `failed` or `stopped`: it parses, and names an id that this
-// session has no row for.
+// spec, §8.5). The `<task-id>`, the `<status>` of the header (what stands before the `<summary>`, or the whole text
+// when there is none: a result, or a line that a monitor watched, can quote the tag) and the `<duration_ms>` of the
+// usage block, which a shell command has none of; a duration that is no safe integer is none either. Null for a text
+// with no id, and for a status that is no end of a task: `completed`, `failed`, `killed` and `stopped` are the four
+// that end one. The notice of a task that an earlier session left running has a `<note>` and says `failed` or
+// `stopped`: it parses, and names an id that this session has no row for.
 export function parseTaskNotification(text: string): TaskEnd | null {
   const id = tagText(text, 'task-id')
-  const status = tagText(text, 'status')
+  const summaryAt = text.indexOf('<summary>')
+  const status = tagText(summaryAt < 0 ? text : text.slice(0, summaryAt), 'status')
   const duration = tagText(text, 'duration_ms', true)
   if (id === undefined || id === '') return null
   if (status !== 'completed' && status !== 'failed' && status !== 'killed' && status !== 'stopped') return null

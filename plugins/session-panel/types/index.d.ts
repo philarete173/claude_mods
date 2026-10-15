@@ -51,6 +51,19 @@ export type AgentRow = {
   endedAt: number | null
   costUsd: number | null
 }
+export type TaskKind = 'shell' | 'monitor' | 'workflow'
+// `ended`: the task is over, and how it ended is not known.
+export type TaskStatus = 'running' | 'done' | 'failed' | 'stopped' | 'ended'
+export type TaskRow = {
+  id: string
+  kind: TaskKind
+  description: string
+  status: TaskStatus
+  // Null for a task that began before the mod saw it: its start, and so its time, is not known.
+  startedAt: number | null
+  endedAt: number | null
+  durationMs: number | null
+}
 export type LogKind = 'info' | 'ok' | 'error'
 export type LogEntry = { at: number; who: string; text: string; kind: LogKind; outcome?: string }
 
@@ -106,6 +119,8 @@ declare module 'claude-code' {
       turn: TurnAcc | null
       lastTurn: TurnStats | null
       agents: Record<string, AgentRow>
+      // The background tasks that the main agent started, by id; a /clear or a resume empties them.
+      tasks: Record<string, TaskRow>
       log: LogEntry[]
       // Every line put on the log since it was last emptied (a /clear or a resume); `log` keeps the newest 200.
       logCount: number
