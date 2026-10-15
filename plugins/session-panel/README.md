@@ -66,26 +66,28 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   as an error: it is not red, its `who` and outcome are dim as on every line that is no error, and its outcome is the
   time alone, with no ✗; this rests on the engine's `next.signal`, and was seen live for a subagent stopped with
   `TaskStop` and for Esc on the main agent, while a call that fails by itself stays red. A call of an agent that is not
-  in Subagents (such as one of the engine's own forks, most of which have every tool refused) is labeled `agent`, and
-  its failure is drawn dim, not red: the pane cannot tell a fork's refused try from a real failure. A subagent's answer
-  loses its markdown marks (a pair of `**`, unless an ASCII letter, digit or `_` touches it on the outside, so
-  `2**10 and 3**4` stays, and a letter of another script does not stop it: `这是**重要**的` gives `这是重要的`; backticks; a
-  heading's `#`). In auto mode a subagent's `done` line shows the report it handed back, even when auto mode withheld or
-  flagged it; the text is masked as any other, and the main agent did not get it, a known limitation. In a narrow pane
-  the `who` column gives way first, and then the outcome moves in front of the text; where there is no `who`, a prompt
-  reads `you › …` and an engine message (a tagged one, such as `agent-message`) reads `engine › …`. A subagent's type
-  then shows in the Log only in its `spawned · type: …` line, if the cut leaves it: a known limit. Unicode format
-  characters (the bidi controls, zero-width spaces, the BOM and the rest) are taken out of the branch, the folder name,
-  the Subagents rows, the MCP server names and every log text, since a U+202E would reorder what the pane shows. A ZWJ
-  or ZWNJ stays only between two characters that are above U+007F and are no spaces, so emoji sequences joined by ZWJ
-  stay whole and Persian and Indic scripts keep their joiners. Tag characters go too, since they can carry invisible
-  ASCII, except in the flags of England, Scotland and Wales, which stay whole; any other run of tags after a black flag
-  goes and leaves the plain black flag. Beside an ASCII character, a space of any kind or an end of the text a joiner
-  would join nothing, and it could hide a character in a branch name or split a secret so that its mask misses it, so it
-  goes. Control characters (C0 but tab, line feed and carriage return; DEL; C1) and U+10EEEE, a placeholder of the
-  engine's, go from the same texts (the vertical tab and the form feed become spaces): the engine refuses a text that
-  holds one and draws its own pane in place of the panel's, which a pasted ANSI escape used to cause. Common secret
-  patterns (tokens, keys, passwords in URLs and flags) are masked.
+  in Subagents is labeled `agent`, and its failure is drawn dim, not red: the pane cannot tell a fork's refused try from
+  a real failure. Such an agent is one of the engine's own forks (most of them have every tool refused), or a subagent
+  that was started before the session was reopened (or Claude Code restarted) and is resumed after it, whose row the
+  pane no longer has: a known limit. A subagent's answer loses its markdown marks (a pair of `**`, unless an ASCII
+  letter, digit or `_` touches it on the outside, so `2**10 and 3**4` stays, and a letter of another script does not
+  stop it: `这是**重要**的` gives `这是重要的`; backticks; a heading's `#`). In auto mode a subagent's `done` line shows the
+  report it handed back, even when auto mode withheld or flagged it; the text is masked as any other, and the main agent
+  did not get it, a known limitation. In a narrow pane the `who` column gives way first, and then the outcome moves in
+  front of the text; where there is no `who`, a prompt reads `you › …` and an engine message (a tagged one, such as
+  `agent-message`) reads `engine › …`. A subagent's type then shows in the Log only in its `spawned · type: …` line, if
+  the cut leaves it: a known limit. Unicode format characters (the bidi controls, zero-width spaces, the BOM and the
+  rest) are taken out of the branch, the folder name, the Subagents rows, the MCP server names and every log text, since
+  a U+202E would reorder what the pane shows. A ZWJ or ZWNJ stays only between two characters that are above U+007F and
+  are no spaces, so emoji sequences joined by ZWJ stay whole and Persian and Indic scripts keep their joiners. Tag
+  characters go too, since they can carry invisible ASCII, except in the flags of England, Scotland and Wales, which
+  stay whole; any other run of tags after a black flag goes and leaves the plain black flag. Beside an ASCII character,
+  a space of any kind or an end of the text a joiner would join nothing, and it could hide a character in a branch name
+  or split a secret so that its mask misses it, so it goes. Control characters (C0 but tab, line feed and carriage
+  return; DEL; C1) and U+10EEEE, a placeholder of the engine's, go from the same texts (the vertical tab and the form
+  feed become spaces, and a colour or cursor sequence (CSI) or a title or link sequence (OSC) goes whole, so a coloured
+  log reads as its text): the engine refuses a text that holds one and draws its own pane in place of the panel's, which
+  a pasted ANSI escape used to cause. Common secret patterns (tokens, keys, passwords in URLs and flags) are masked.
 
 ## How costs are measured
 

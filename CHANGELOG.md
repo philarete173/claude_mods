@@ -3,14 +3,15 @@
 ## 0.4.3 — 2026-10-15
 
 - A pane maximized on a wide monitor is filled to its edge: the rules between sections reach the right edge (the line
-  was 1600 px wide and ended mid-pane on a 21:9 monitor), and the context and limit meters reach their percent (they
-  stopped at 560 and 240 px). The engine takes an image of 4096 px at most, so on a pane wider than that (a 32:9
-  monitor at 100 % scale) the rules end short of the edge.
+  was 1600 px wide and ended mid-pane on a 21:9 monitor), and the context and limit meters stretch across their rows
+  (they stopped at 560 and 240 px). The engine takes an image of 4096 px at most, so on a pane wider than that (a 32:9
+  monitor at 100 % scale) the rules end short of the edge and the meters short of their values.
 - A Log line keeps up to 512 characters of its text instead of 64 to 80, and the pane cuts it to its width, so a wide
   pane shows more of a prompt, a tool call or a subagent's answer. A narrow pane shows what it showed before.
 - A text with a control character, such as an ANSI escape in pasted terminal output, no longer blanks the pane: the
-  engine refuses a text that holds one and drew its own pane in place of the panel's. Control characters are now
-  taken out with the invisible format characters.
+  engine refuses such a text, and it drew its own pane in place of the panel's. Control characters are now taken out
+  with the invisible format characters, and a colour or cursor sequence (CSI) or a title or link sequence (OSC) goes
+  whole, so a coloured log reads as its text.
 
 ## 0.4.2 — 2026-10-14
 

@@ -1457,7 +1457,8 @@ Not checked in the 0.3.0 live check, or pending a look:
    - So `stripFormat` removes them with the format characters (0.4.3): before, a prompt with an ANSI escape from
      pasted terminal output blanked the pane until its line left the Log. The vertical tab and the form feed are
      whitespace, so they become spaces; a lone surrogate goes too, so that no removal can join two halves into
-     U+10EEEE.
+     U+10EEEE. An ANSI escape sequence (a CSI, or an OSC with its terminator) goes whole, so a coloured log reads as its
+     text.
 
 ## 13. Test impact (view.test.tsx)
 
