@@ -191,7 +191,12 @@ const WHO_CELLS_MAX = TYPE_MAX // terminal: the longest `who` that shortType kee
 const TYPE_CELLS = 15 // desktop: the `@type` of a subagent
 const TYPE_CELLS_MAX = TYPE_MAX + 1 // terminal: the `@` and the longest type that shortType keeps
 const TEXT_METER_CELLS = 10
-const RULE_PX = 1600 // the divider image; the Box around it cuts it to the pane
+// The engine refuses an Svg whose width or height prop is above this (2.1.288: "Svg width and height are pixels, at
+// most 4096"), and a refused tree makes it draw its own pane in place of this one. A pane wider than this (a 32:9
+// monitor at 100 % scale) gets a rule that ends short of its right edge, and meters that stop short: a gap before the
+// percent of the context meter, and before the countdown of a limit meter.
+const SVG_MAX_PX = 4096
+const RULE_PX = SVG_MAX_PX // the divider image; the Box around it cuts it to the pane
 const MAX_AGENT_ROWS = 8
 // The Log keeps at least this many lines, and when they do not fit the pane scrolls (the user's decision, 2026-10-08),
 // as the Subagents list shows up to 8.
@@ -292,7 +297,10 @@ function divider(d: Draw): RenderElement {
 
 How the rule gets the exact pane width:
 
-- The line is wider than any pane, and its `overflow="hidden"` Box cuts it at the body's edge. No px estimate is involved.
+- The line is as wide as the engine lets an Svg be, 4096 px (`SVG_MAX_PX`, §12 item 8), wider than a pane maximized on a
+  21:9 monitor (about 3100 px), and its `overflow="hidden"` Box cuts it at the body's edge. No px estimate is involved.
+  A pane wider than 4096 px (a 32:9 monitor at 100 % scale) gets a rule that ends short of its right edge. Until 0.4.3
+  the line was 1600 px, and on a 21:9 monitor the rules ended mid-pane (the user's check, 2026-10-14).
 - A plain line has no caps, so the cut is invisible.
 - v1 already showed that the body clips content running past it, without widening the pane.
 - `preserveAspectRatio="none"` keeps the line 1 px tall if the surface scales an image down to its slot (l.11588–11590).
@@ -522,13 +530,20 @@ function contextRows(d: Draw): RenderElement[] {
 `meter(d, pct, alt, widthPx)` is v1's `meter` with the width passed in. It draws `meterSvg` unchanged, or `▰▱` on the terminal.
 
 ```ts
-// The context meter shares its row with the percent only: the body less the 1-cell gap and PCT_CELLS.
+// The context meter shares its row with the percent only: the body less the 1-cell gap and PCT_CELLS, up to SVG_MAX_PX,
+// so that it reaches the percent in a wide pane too.
 export function contextMeterWidth(bodyColumns: number): number {
-  return Math.min(560, Math.max(48, (bodyColumns - 7) * CELL_PX))
+  return Math.min(SVG_MAX_PX, Math.max(48, (bodyColumns - 7) * CELL_PX))
 }
 ```
 
 At the default width (≈ 45 columns) this gives 304 px. The bar ends about 25 px before the `8` of `88.2%`: the 8 px gap, the 0–7 px left over by `bodyColumns`, and the room `88.2%` leaves in its 6 cells.
+
+The bar stops at 4096 px (`SVG_MAX_PX`), so it reaches the percent in any pane up to about 4150 px wide (519 columns); a
+wider pane gets a gap before the percent. Until 0.4.3 it stopped at 560 px, the widest pane of the design preview, and
+in a pane maximized on a 21:9 monitor it ended far before its percent (the user's check, 2026-10-14). Whatever `CELL_PX`
+misses grows with the width: in a 3100 px pane a cell 1 % off is about 30 px, as space before the percent, or as the end
+of the bar cut off by its Box.
 
 ### 6.3 Project block
 
@@ -691,13 +706,16 @@ return section(d, 'usage', 'Usage', `${label(lead.kind)} ${fmtPct(lead.percentUs
 ```
 
 ```ts
-// A limit meter shares its row with the label, the percent and the countdown: 7 + 1 + 1 + 5 + 1 + 9 + 1 spare cells.
+// A limit meter shares its row with the label, the percent and the countdown: 7 + 1 + 1 + 5 + 1 + 9 + 1 spare cells, up
+// to SVG_MAX_PX, as the context meter.
 export function limitMeterWidth(bodyColumns: number): number {
-  return Math.min(240, Math.max(40, (bodyColumns - 25) * CELL_PX))
+  return Math.min(SVG_MAX_PX, Math.max(40, (bodyColumns - 25) * CELL_PX))
 }
 ```
 
-At ≈ 45 columns this gives 160 px. Limit meters line up with each other: same label width, same meter width. The countdown is right-aligned and dim. A kind with no label of its own (raw `kind`) is cut inside its 7 cells.
+At ≈ 45 columns this gives 160 px, and it too stops at 4096 px (until 0.4.3, at 240). Limit meters line up with each
+other: same label width, same meter width. The countdown is right-aligned and dim. A kind with no label of its own (raw
+`kind`) is cut inside its 7 cells.
 
 ### 6.6 Turn stats
 
@@ -1270,13 +1288,15 @@ Butt caps keep the arc honest: round caps would add a stroke-width to its visibl
 | MCP chip | the name, only when it alone is wider than the pane | nothing | the dot |
 | Log row | text (ellipsis) | `who` leaves the row; then the outcome moves in front of the text (each below 8 cells of text, §6.10) | time, the outcome while it is a column; `who` cuts inside its own column |
 
-The ellipsis is the surface's own, from `wrap="truncate"`. No string is shortened by hand for layout: `shorten()` in the log formulas is content and stays as it is.
+The ellipsis is the surface's own, from `wrap="truncate"`. No string is shortened by hand for layout: `shorten()` in the
+log formulas keeps up to 512 characters of a text (`LOG_TEXT_MAX`, from 0.4.3; before, 64 to 80), more than a line of a
+pane maximized on a 21:9 monitor shows (about 400), and the surface cuts the line to its room.
 
 ## 10. Terminal surface
 
 | Element | Desktop | Terminal |
 |---|---|---|
-| Divider | 1600 × 1 px SVG in a clipping Box, one line high | `Text dimColor` of `'─'.repeat(bodyColumns)`, one row |
+| Divider | 4096 × 1 px SVG in a clipping Box, one line high | `Text dimColor` of `'─'.repeat(bodyColumns)`, one row |
 | Section icon, ring, branch, changes | `Svg` in a 2-cell slot | dropped (`iconSlot` returns null) |
 | Project block | rule; bold `Project` + the folder name at the right; branch icon + branch; changes icon + `12 files changed`, the numbers at the right | text rule; `Project` + the folder name at the right; `🌿 main`; `📝 12 files changed`, the numbers at the right |
 | Meter | `meterSvg` at the computed px width | ten cells of `▰▱` in the meter colours, as v1 |
@@ -1425,6 +1445,19 @@ Not checked in the 0.3.0 live check, or pending a look:
    - The dividers avoid the question by clipping.
    - The meters are wrapped in clipping Boxes, so an error cannot push a value out of the row.
 7. **No `maxWidth`** (Box has `width`, `minWidth`, `height`, `minHeight` only; l.806–809). So `@type` sits in a column of fixed width (15 cells on the desktop, the longest drawn on the terminal, §6.7), and its text is cut inside that column.
+8. **Svg width and height are at most 4096 px.**
+   - The engine refuses an Svg whose `width` or `height` prop is larger ("Svg width and height are pixels, at most
+     4096", 2.1.288), and a refused tree makes it draw its own pane in place of the mod's. Only the props are checked,
+     not the markup. The d.ts does not say so; `claude plugin test` shows it (found in 0.4.3, 2026-10-14).
+   - So the rule and the meters stop at `SVG_MAX_PX`, and a pane wider than 4096 px gets a rule that ends short of its
+     edge, a gap before the percent of the context meter, and one before the countdown of each limit meter.
+9. **No control characters in a text.**
+   - The engine refuses a text child that holds a C0 control (but tab, line feed and carriage return), DEL, a C1
+     control or U+10EEEE (a placeholder of its own), and draws its own pane in place of the mod's.
+   - So `stripFormat` removes them with the format characters (0.4.3): before, a prompt with an ANSI escape from
+     pasted terminal output blanked the pane until its line left the Log. The vertical tab and the form feed are
+     whitespace, so they become spaces; a lone surrogate goes too, so that no removal can join two halves into
+     U+10EEEE.
 
 ## 13. Test impact (view.test.tsx)
 
