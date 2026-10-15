@@ -746,18 +746,41 @@ test('the meters take the width of the body: 8 px a cell, less the room of their
   const clock = mock.clock(on, { now: NOW })
   await seed($, clock, bottom(on, clock))
 
-  // The context bar shares its row with the percent: (columns - 7) cells, from 48 px to 560.
-  expect([0, 12, 20, 25, 32, 40, 45, 80, 100].map(contextMeterWidth)).toEqual([
-    48, 48, 104, 144, 200, 264, 304, 560, 560,
+  // The context bar shares its row with the percent: (columns - 7) cells, from 48 px up to 4096, the most the engine
+  // takes for an Svg.
+  expect([0, 12, 20, 25, 32, 40, 45, 80, 100, 390, 600].map(contextMeterWidth)).toEqual([
+    48, 48, 104, 144, 200, 264, 304, 584, 744, 3064, 4096,
   ])
-  // A limit bar shares its row with a label, a percent and a countdown: (columns - 25) cells, from 40 px to 240.
-  expect([0, 12, 25, 32, 40, 45, 55, 80, 100].map(limitMeterWidth)).toEqual([40, 40, 40, 56, 120, 160, 240, 240, 240])
+  // A limit bar shares its row with a label, a percent and a countdown: (columns - 25) cells, from 40 px up to 4096.
+  expect([0, 12, 25, 32, 40, 45, 55, 80, 100, 390, 600].map(limitMeterWidth)).toEqual([
+    40, 40, 40, 56, 120, 160, 240, 440, 600, 2920, 4096,
+  ])
 
   const ui = await mountPane($, 'desktop')
   for (const [bodyColumns, context, limit] of [[40, 264, 120], [32, 200, 56], [12, 48, 40]] as const) {
     await ui.redraw({ ...PANE_PROPS, bodyColumns })
     expect((await meters(ui)).map(el => el.props.width), `${bodyColumns} columns`).toEqual([context, limit, limit])
   }
+  await ui.unmount()
+})
+
+// The engine refuses a tree that holds an Svg above 4096 px in width or height, and draws its own pane in place of
+// this one. A pane of 600 columns is 4800 px at 8 px a cell: the mount is the engine's own check, and it throws.
+test('a pane of 600 columns mounts: the rule and the meters stop at the 4096 px of an Svg', SLOW, async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  await seed($, clock, bottom(on, clock))
+
+  const ui = await mountPane($, 'desktop', { ...PANE_PROPS, bodyColumns: 600 })
+  const images = await ui.findAll({ type: 'Svg' })
+
+  // No Svg of the tree is above the limit, in either size.
+  const sizes = images.flatMap(el => [el.props.width, el.props.height])
+  expect(sizes.filter(px => typeof px !== 'number' || px > 4096)).toEqual([])
+  // The context bar and the limit bars would be 4744 and 4600 px: they stop at 4096, and so does the rule.
+  expect((await meters(ui)).map(el => el.props.width)).toEqual([4096, 4096, 4096])
+  const rules = images.filter(el => el.props.alt === 'rule')
+  expect(rules).not.toHaveLength(0)
+  expect(rules.map(el => el.props.width)).toEqual(rules.map(() => 4096))
   await ui.unmount()
 })
 
@@ -1121,9 +1144,9 @@ const agentRows = (tree: unknown): Node[] =>
       return isRow(node) && childrenOf(node).length === 3 && group?.props?.flexGrow === 1 &&
         group.props.columnGap === 1 && cost?.props?.width === 7 && cost.props.justifyContent === 'flex-end'
     })
-// The rules: on the desktop an image 1600 px wide, on the terminal a row of ─.
+// The rules: on the desktop the image whose alt is `rule`, on the terminal a row of ─.
 const isRuleNode = (node: Node): boolean =>
-  (node.type === 'Svg' && node.props?.width === 1600) || (node.type === 'Text' && /^─+$/.test(textsOf(node)[0] ?? ''))
+  (node.type === 'Svg' && node.props?.alt === 'rule') || (node.type === 'Text' && /^─+$/.test(textsOf(node)[0] ?? ''))
 const ruleCount = (tree: unknown): number => flat(tree).filter(({ node }) => isRuleNode(node)).length
 // The rules of a terminal body with no columns: a dim Text cut to the pane, with no `─` in it.
 const emptyRules = (tree: unknown): Node[] =>
@@ -1155,7 +1178,7 @@ test('the row check reports each way a row can outgrow the pane, and passes the 
   const box = (props: Record<string, unknown>, ...children: Node[]): Node => ({ type: 'Box', props, children })
   const cut = (text: string): Node => ({ type: 'Text', props: { wrap: 'truncate' }, children: [text] })
   const dim = (text: string): Node => ({ type: 'Text', props: { dimColor: true }, children: [text] })
-  const image: Node = { type: 'Svg', props: { alt: 'rule', width: 1600, height: 1 }, children: [] }
+  const image: Node = { type: 'Svg', props: { alt: 'rule', width: 4096, height: 1 }, children: [] }
   const flex = { flexDirection: 'row', flexShrink: 1, minWidth: 0, overflow: 'hidden' }
   const fixed = { flexDirection: 'row', flexShrink: 0 }
   const row = (...cells: Node[]): Node => box({ flexDirection: 'row' }, ...cells)
@@ -2316,8 +2339,9 @@ test('the divider is an image cut by its Box on the desktop and a text rule on t
   const rules = flat(draw(onSurface(FULL, 'desktop'))).filter(({ node }) => isRuleNode(node))
   expect(rules).toHaveLength(7) // the Project block and the six sections
   for (const { node, parent } of rules) {
-    // A line 1 px tall, centred in a clipping Box one line high; it is wider than any pane, so the Box cuts it. The
-    // Box has no margin: a margin is about 8 px, not a line, so a rule built from margins is not a whole line.
+    // A line 1 px tall, centred in a clipping Box one line high; it is wider than a pane maximized on a 21:9 monitor,
+    // so the Box cuts it. The Box has no margin: a margin is about 8 px, not a line, so a rule built from margins is
+    // not a whole line.
     expect(node.props).toMatchObject({ height: 1, alt: 'rule' })
     expect(parent?.props).toMatchObject({ height: 1, alignItems: 'center', overflow: 'hidden' })
     expect(Object.keys(parent?.props ?? {}).filter(key => key.startsWith('margin'))).toEqual([])

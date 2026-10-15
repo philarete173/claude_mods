@@ -69,7 +69,12 @@ const WHO_CELLS_MAX = TYPE_MAX // terminal: the longest `who` that shortType kee
 const TYPE_CELLS = 15 // desktop: the `@type` of a subagent
 const TYPE_CELLS_MAX = TYPE_MAX + 1 // terminal: the `@` and the longest type that shortType keeps
 const TEXT_METER_CELLS = 10
-const RULE_PX = 1600 // the divider image; the Box around it cuts it to the pane
+// The engine refuses an Svg whose width or height prop is above this (2.1.288: "Svg width and height are pixels, at
+// most 4096"), and a refused tree makes it draw its own pane in place of this one. A pane wider than this (a 32:9
+// monitor at 100 % scale) gets a rule that ends short of its right edge, and meters that stop short: a gap before the
+// percent of the context meter, and before the countdown of a limit meter.
+const SVG_MAX_PX = 4096
+const RULE_PX = SVG_MAX_PX // the divider image; the Box around it cuts it to the pane
 const MAX_AGENT_ROWS = 8
 // The Log keeps at least this many lines, and when they do not fit the pane scrolls (the user's decision, 2026-10-08),
 // as the Subagents list shows up to 8.
@@ -130,8 +135,9 @@ const orNull = (x: number | null, format: (n: number) => string): string | null 
 
 // ---- Images (§5.1, §7, §8) ----
 
-// The divider: a line far wider than any pane. Its Box cuts it at the body's edge, so no px estimate is involved, and
-// `none` keeps it 1 px tall if a surface scales the image down to its slot.
+// The divider: a line as wide as the engine lets an Svg be, wider than a pane maximized on a 21:9 monitor (about 3100
+// px). Its Box cuts it at the body's edge, so no px estimate is involved, and `none` keeps it 1 px tall if a surface
+// scales the image down to its slot.
 const RULE_SVG =
   `<svg xmlns="http://www.w3.org/2000/svg" width="${RULE_PX}" height="1" viewBox="0 0 ${RULE_PX} 1"` +
   ` preserveAspectRatio="none"><rect width="${RULE_PX}" height="1" fill="#808080" fill-opacity="0.35"/></svg>`
@@ -223,14 +229,16 @@ export function meterSvg(pct: number, widthPx: number): string {
   ].join('')
 }
 
-// The context meter shares its row with the percent only: the body less the 1-cell gap and PCT_CELLS.
+// The context meter shares its row with the percent only: the body less the 1-cell gap and PCT_CELLS, up to SVG_MAX_PX,
+// so that it reaches the percent in a wide pane too.
 export function contextMeterWidth(bodyColumns: number): number {
-  return Math.min(560, Math.max(48, (bodyColumns - 7) * CELL_PX))
+  return Math.min(SVG_MAX_PX, Math.max(48, (bodyColumns - 7) * CELL_PX))
 }
 
-// A limit meter shares its row with the label, the percent and the countdown: 7 + 1 + 1 + 5 + 1 + 9 + 1 spare cells.
+// A limit meter shares its row with the label, the percent and the countdown: 7 + 1 + 1 + 5 + 1 + 9 + 1 spare cells, up
+// to SVG_MAX_PX, as the context meter.
 export function limitMeterWidth(bodyColumns: number): number {
-  return Math.min(240, Math.max(40, (bodyColumns - 25) * CELL_PX))
+  return Math.min(SVG_MAX_PX, Math.max(40, (bodyColumns - 25) * CELL_PX))
 }
 
 // ---- Shared pieces (§5) ----
