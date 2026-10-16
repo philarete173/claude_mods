@@ -920,6 +920,34 @@ test('the section that a press flips is the one the pane shows, whatever the sto
     await ui.unmount()
   })
 
+// The Tasks section folds as the others do, and the store keeps its fold under `tasks` (the v2 spec, §4.1: the fold is
+// remembered, as `collapsed.tasks`). A press folds it: the row goes, the header stays with its summary and its chevron
+// turns; a second press unfolds it.
+test('a press of the Tasks header folds the section and the store keeps it; a second press unfolds it', WITH_STORE,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await startTask($, clock, w, 'b1') // the main agent's background Bash call: a task that runs
+    const ui = await mountPane($)
+    const chevron = async (): Promise<unknown> => (await ui.find({ key: 'toggle:tasks' }))?.props.label
+    const hasRow = async (): Promise<boolean> => (await ui.find({ type: 'Text', text: /^run tests$/ })) !== undefined
+    const summaries = async (): Promise<number> => (await ui.findAll({ type: 'Text', text: /^1\/1$/ })).length
+    expect([await chevron(), await hasRow(), await summaries()], 'open').toEqual(['▾', true, 1])
+
+    await ui.press({ key: 'toggle:tasks' })
+    expect(await readStore($)).toEqual({ tasks: true })
+    expect((await readState($)).collapsed).toEqual({ tasks: true })
+    expect([await chevron(), await hasRow(), await summaries()], 'folded').toEqual(['▸', false, 1])
+
+    await ui.press({ key: 'toggle:tasks' })
+    expect(await readStore($)).toEqual({ tasks: false })
+    expect((await readState($)).collapsed).toEqual({ tasks: false })
+    expect([await chevron(), await hasRow(), await summaries()], 'unfolded').toEqual(['▾', true, 1])
+    await ui.unmount()
+  })
+
 test('a press before the map was loaded from the store at the start does not start from an empty map', WITH_STORE,
   async ($, on) => {
     const clock = mock.clock(on)
@@ -4859,6 +4887,47 @@ test('a second session.start, which a hot reload raises, keeps the tasks', SLOW_
 
   expect(await taskRows($)).toEqual(before)
 })
+
+// The pane draws the tasks of the state (the v2 spec, §4.1) and draws again when they change, which is the read of the
+// atom that subscribes it: no section before the task starts, a row and `1/1` while it runs, `1` and the mark of a done
+// task once the notice of its end has come. The mark is the alt of an image on the desktop and a glyph on the terminal.
+for (const surface of ['desktop', 'terminal'] as const) {
+  test(`the ${surface} pane shows the Tasks section: a running row, then a done one once the notice comes`,
+    SLOW_READER, async ($, on) => {
+      const clock = mock.clock(on, { now: 1_000_000 })
+      const w = bottom(on, clock)
+      await $.session.start(START)
+      await clock.advance(1)
+      const ui = await mountPane($, surface)
+      const isDesktop = surface === 'desktop'
+      // The marks of the rows, as the pane draws them.
+      const marks = async (): Promise<string[]> => {
+        if (!isDesktop) return (await ui.findAll({ type: 'Text', text: /^[◐✓]$/ })).map(el => el.text)
+        const alts = (await ui.findAll({ type: 'Svg' })).map(el => String(el.props.alt))
+
+        return alts.filter(alt => /^(running|done)$/.test(alt))
+      }
+      expect(await ui.find({ key: 'toggle:tasks' }), 'no task').toBeUndefined()
+
+      const startedAt = clock.now() + 300 // the task is there once its call is over, which takes the bottom 300 ms
+      await startTask($, clock, w, 'b1')
+
+      expect(await ui.find({ key: 'toggle:tasks' }), 'a task runs').toBeDefined()
+      expect(await ui.findAll({ type: 'Text', text: /^1\/1$/ }), 'its summary').toHaveLength(1)
+      expect(await ui.find({ type: 'Text', text: /^run tests$/ }), 'its description').toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^@shell$/ }), 'its kind').toBeDefined()
+      expect(await marks(), 'its mark').toEqual([isDesktop ? 'running' : '◐'])
+
+      await clock.advance(startedAt + 5000 - clock.now()) // the notice comes 5 s after the start
+      await submitNotice($, notice('b1', 'completed'))
+
+      expect(await ui.findAll({ type: 'Text', text: /^1\/1$/ }), 'none runs').toEqual([])
+      expect(await ui.findAll({ type: 'Text', text: /^1$/ }), 'its summary, the total alone').toHaveLength(1)
+      expect(await ui.find({ type: 'Text', text: /^5\.0s$/ }), 'the time it ran').toBeDefined()
+      expect(await marks(), 'its mark').toEqual([isDesktop ? 'done' : '✓'])
+      await ui.unmount()
+    })
+}
 
 test('every 30 s the pane is redrawn and statuses follow $.agent.list; usage refreshes every second tick', WITH_READER,
   async ($, on) => {

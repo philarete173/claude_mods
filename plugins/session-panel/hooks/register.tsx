@@ -1044,6 +1044,7 @@ export const register: Register = on => {
       mcp: await read($, mcpAtom),
       lastTurn: await read($, lastTurnAtom),
       agents: await read($, agentsAtom),
+      tasks: await read($, tasksAtom),
       log: await read($, logAtom),
       logCount: await read($, logCountAtom),
       collapsed: await read($, collapsedAtom),
