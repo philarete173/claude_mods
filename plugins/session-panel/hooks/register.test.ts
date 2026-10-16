@@ -559,7 +559,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
   on('tool.call', async (_$, e) => {
     // What a call says decides how it ends: the command of a Bash, the new text of an Edit, the description of an
     // Agent, the message of a SendMessage or of a SubagentHandback, the id of a TaskStop. One that starts with `deny`
-    // is denied, one that starts with `fail` fails.
+    // is denied, one that starts with `fail` fails, and a Bash that starts with `move` is moved to the background.
     let says = ''
     if (e.tool === 'Bash') says = e.command
     if (e.tool === 'Edit') says = e.new_string
@@ -574,6 +574,10 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     // that a test of a failure shows the outcome of the call deciding, and not the shape of its result.
     let started: unknown
     if (e.tool === 'Bash' && e.run_in_background === true) started = { stdout: '', backgroundTaskId: w.taskId }
+    // A Bash that asked for nothing but is moved to the background while it runs has the id too, beside a flag.
+    if (e.tool === 'Bash' && says.startsWith('move')) {
+      started = { stdout: '', backgroundTaskId: w.taskId, backgroundedToDeliverMessage: true }
+    }
     if (e.tool === 'Monitor') started = { taskId: w.taskId, timeoutMs: e.timeout_ms }
     if (e.tool === 'Workflow') started = { status: 'async_launched', taskId: w.taskId, workflowName: 'review' }
     if (says.startsWith('fail')) {
@@ -4517,6 +4521,26 @@ test('a Bash that went to the background has a running row in tasks, and its lin
       ['main', 'Bash ls', 'ok', '✓ 0.3s'],
     ])
     expect((await readState($)).log[0]?.at).toBe(startedAt)
+  })
+
+// A Bash that was moved to the background while it ran (Ctrl+B, a message queued for the model) began in the
+// foreground, so its row starts when its call did. One that asked for the background started as its call returned. The
+// bottom takes 300 ms over a call, and the clock moves meanwhile.
+test('a Bash that was moved to the background while it ran has a row that starts with its call, not with its return',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+
+    const movedStart = clock.now()
+    await startTask($, clock, w, 'b1', { tool: 'Bash', command: 'move npm test', description: 'run tests' })
+    const askedStart = clock.now() + 300
+    await startTask($, clock, w, 'b2')
+
+    const rows = await taskRows($)
+    expect(rows.b1?.startedAt).toBe(movedStart)
+    expect(rows.b2?.startedAt).toBe(askedStart)
   })
 
 test('a Monitor and a Workflow that started have their rows in tasks, and their lines say → background', SLOW_READER,

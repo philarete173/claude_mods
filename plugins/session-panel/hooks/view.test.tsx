@@ -3187,6 +3187,39 @@ test('the time of a running task follows the time of the drawing, and the time o
   expect(timesAt(NOW + 30_000)).toEqual(['2m 00s', '1m 12s'])
 })
 
+// A value is drawn whole or not at all, and the row stays one line, which the Log's count of rows relies on. No task
+// runs 1000 hours, but a notice can carry any safe integer as the time the task ran, which is 15 characters in a cell
+// of 8: a time wider than the cell is drawn as not known. `999h 59m` is the widest that fits.
+test('a time wider than the cell of a task is drawn as a dim dash: one row, and the Log counts on it', () => {
+  const hours = (h: number, m = 0): number => (h * 60 + m) * 60_000
+  const cases: Array<[name: string, row: TaskRow, time: string | null]> = [
+    ['a duration of 2^53 - 1 ms', task(1, 'done', { durationMs: Number.MAX_SAFE_INTEGER }), null],
+    ['done in 1000 hours', task(1, 'done', { durationMs: hours(1000) }), null],
+    ['done in 999h 59m', task(1, 'done', { durationMs: hours(999, 59) }), '999h 59m'],
+    ['running since 1000 hours', task(1, 'running', { startedAt: NOW - hours(1000) }), null],
+    ['running since 999h 59m', task(1, 'running', { startedAt: NOW - hours(999, 59) }), '999h 59m'],
+  ]
+  const log = logLines(60)
+
+  for (const surface of SURFACES) {
+    for (const bodyColumns of [20, 45]) {
+      for (const [name, row, time] of cases) {
+        const where = `${surface} ${bodyColumns} columns: ${name}`
+        const tree = draw(onSurface({ ...withLog(log), tasks: tasksOf([row]) }, surface), bodyColumns, 40)
+        expect(taskRows(tree), where).toHaveLength(1)
+        expect(rowProblems(tree), where).toEqual([])
+        const cell = childrenOf(taskRows(tree)[0])[2]
+        expect(textsOf(cell), where).toEqual([time ?? '—'])
+        expect(childrenOf(cell).map(styleOf), where).toEqual([[undefined, time === null ? true : undefined, undefined]])
+        expect(String(textsOf(cell)[0]).length, where).toBeLessThanOrEqual(Number(cell?.props?.width))
+        // The Log has the rows of the block fewer, as for any one task: the rule, the header and the row.
+        expect(logRows(tree), where).toHaveLength(32 - 3)
+        expect(rowsAbove(tree, bodyColumns), where).toBe(5 + 3)
+      }
+    }
+  }
+})
+
 test('the header counts `running/total` while a task runs, and the total alone when none does', () => {
   const cases: Array<[name: string, rows: TaskRow[], summary: string]> = [
     ['one of three runs', [task(1, 'running'), task(2, 'done'), task(3, 'failed')], '1/3'],

@@ -903,9 +903,9 @@ export const register: Register = on => {
       if (typeof message === 'string') handbacks.set(e.agentId, message)
     }
     // A call that started a task in the background says so in its line, whichever agent made it: the time it took is
-    // only the time of the start. Only the main agent's call has a row: the task of a subagent is its own and may end
+    // the call's, not the task's. Only the main agent's call has a row: the task of a subagent is its own and may end
     // with it, so its row could stay running for good. A call that failed or was denied started none.
-    const task = isFailed ? null : taskFromCall(e.tool, e, ran.result, t1)
+    const task = isFailed ? null : taskFromCall(e.tool, e, ran.result, t1, t0)
     if (task !== null && e.agentId === undefined) await update($, tasksAtom, rows => ({ ...rows, [task.id]: task }))
     // A call that started a subagent, woke one or handed a report back has its lines in the log already (`spawned · …`,
     // `resumed · …`, the agent's own `done`): only a call that failed or was denied is logged here.

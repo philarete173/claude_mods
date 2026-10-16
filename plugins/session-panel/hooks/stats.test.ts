@@ -804,6 +804,37 @@ test('taskFromCall: a Bash command that timed out in the foreground began that l
   expect(startOf({})).toBe(1_000_000)
 })
 
+// A command whose input did not ask for the background began in the foreground and was moved while it ran (Ctrl+B, a
+// message queued for the model, a plugin's turn abort, any other move), so it began about when its call did:
+// `calledAt`, before the engine ran it. One that asked for it came back as soon as it started, whenever it was called,
+// and a timeout counts back from the return.
+test('taskFromCall: a Bash command that was moved to the background while it ran began when its call did', () => {
+  const command = { command: 'sleep 120' }
+  const startOf = (input: object, result: object): number | null | undefined =>
+    taskFromCall('Bash', input, { backgroundTaskId: 'b2', ...result }, 1_000_000, 940_000)?.startedAt
+  const moves = [
+    { backgroundedToDeliverMessage: true }, { backgroundedByUser: true }, { backgroundedByTurnAbort: true }, {},
+  ]
+  for (const move of moves) expect(startOf(command, move), JSON.stringify(move)).toBe(940_000)
+  // `false` asks for nothing, as an input without it does.
+  expect(startOf({ ...command, run_in_background: false }, { backgroundedToDeliverMessage: true })).toBe(940_000)
+  // The command that asked for the background started as the call came back: now, not the time of the call.
+  expect(startOf({ ...command, run_in_background: true }, {})).toBe(1_000_000)
+  // A timeout is counted back from the return, whichever way the input asked. A value that is no timeout is none.
+  expect(startOf(command, { timedOutAfterMs: 120_000 })).toBe(880_000)
+  expect(startOf({ ...command, run_in_background: true }, { timedOutAfterMs: 120_000 })).toBe(880_000)
+  expect(startOf(command, { timedOutAfterMs: -1 })).toBe(940_000)
+  // The time of the call is optional: it is the time of the return when none is given.
+  expect(taskFromCall('Bash', command, { backgroundTaskId: 'b2' }, 1_000_000)?.startedAt).toBe(1_000_000)
+})
+
+test('taskFromCall: a Monitor and a Workflow start when their call returns, whenever it was called', () => {
+  const startOf = (tool: string, input: object, result: object): number | null | undefined =>
+    taskFromCall(tool, input, result, 1_000_000, 940_000)?.startedAt
+  expect(startOf('Monitor', { description: 'd' }, { taskId: 'm1' })).toBe(1_000_000)
+  expect(startOf('Workflow', { name: 'w' }, { taskId: 'w1' })).toBe(1_000_000)
+})
+
 test('taskFromCall: the description of a shell task is the one the model gave, else the command, else `shell`', () => {
   const descriptionOf = (input: object): string | undefined =>
     taskFromCall('Bash', input, { backgroundTaskId: 'b1' }, 0)?.description
@@ -841,6 +872,8 @@ test('taskFromCall: a Workflow with a taskId is a workflow task, named by its re
     // A name that nothing is left of once it is cleaned is none, and the next one stands in.
     expect(row({ name: 'review' }, { workflowName: '\u200B' })?.description).toBe('review')
     expect(row({ name: ' ' }, { workflowName: ' ' })?.description).toBe('workflow')
+    // An `error` that is empty is none: the workflow started, and has its row.
+    expect(row({ name: 'review' }, { error: '' })?.id).toBe('wcq0w65wv')
   })
 
 test('taskFromCall: a call that started no background task, or none the pane tracks, is null', () => {
@@ -849,7 +882,9 @@ test('taskFromCall: a call that started no background task, or none the pane tra
     ['Bash', { command: 'ls' }, { backgroundTaskId: '' }],
     ['Bash', { command: 'ls' }, { backgroundTaskId: 7 }],
     ['Monitor', { description: 'd' }, { timeoutMs: 1000 }],
+    // A workflow whose syntax check failed did not start, though its result may name a task: no notice would end a row.
     ['Workflow', { name: 'w' }, { status: 'async_launched', error: 'a syntax error' }],
+    ['Workflow', { name: 'w' }, { status: 'async_launched', taskId: 'w1', error: 'a syntax error' }],
     // A workflow sent to the cloud is a remote agent, which the pane leaves out: either word of its result says so.
     ['Workflow', { name: 'w' }, { status: 'remote_launched', taskId: 'r1' }],
     ['Workflow', { name: 'w' }, { status: 'async_launched', taskId: 'r1', taskType: 'remote_agent' }],
@@ -968,14 +1003,18 @@ test('parseTaskNotification: a result that quotes the tags does not change the i
 })
 
 // A notice of Monitor has not been seen, and what a monitor watches or a result says can hold any tag. The status is
-// the header's: what stands before the summary, or the whole text when there is no summary.
+// the header's: what stands before the first summary or result, whichever comes first, or the whole text when there is
+// neither.
 test('parseTaskNotification reads the status from the header alone: one in the summary or a result is none', () => {
   const header = '<task-notification>\n<task-id>mq8x1</task-id>\n'
   const quoted = '<result>build done <status>completed</status></result>\n'
   expect(parseTaskNotification(`${header}<summary>Monitor event</summary>\n${quoted}</task-notification>`)).toBe(null)
   const inSummary = '<summary>line <status>completed</status></summary>\n'
   expect(parseTaskNotification(`${header}${inSummary}</task-notification>`)).toBe(null)
-  // With no summary the whole text is the header.
+  // A result with no summary before it ends the header too, and so does one that comes before the summary.
+  expect(parseTaskNotification(`${header}${quoted}</task-notification>`)).toBe(null)
+  expect(parseTaskNotification(`${header}${quoted}<summary>s</summary>\n</task-notification>`)).toBe(null)
+  // With neither a summary nor a result the whole text is the header.
   expect(parseTaskNotification(`${header}<status>failed</status>\n</task-notification>`)).toEqual({
     id: 'mq8x1', status: 'failed', durationMs: null,
   })

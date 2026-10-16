@@ -61,8 +61,8 @@ const PCT_CELLS = 6 // `100.0%`
 const LIMIT_LABEL_CELLS = 7 // `5-hour`, `Weekly`, `Spend`
 const LIMIT_PCT_CELLS = 5 // `100%`
 const COST_CELLS = 7 // `$148.59`, `<$0.001`
-// A time from 100 hours on takes 8 cells (`100h 00m`), the widest this cell holds. A task of 1000 hours or more
-// (`1000h 00m`) overflows it, as a cost of $1000 or more overflows COST_CELLS.
+// A time from 100 hours on takes 8 cells (`100h 00m`), the widest this cell holds. A time of 1000 hours or more
+// (`1000h 00m`) would overflow it, and taskTime draws it as not known; a cost of $1000 or more overflows COST_CELLS.
 const TASK_TIME_CELLS = 8
 const TIME_CELLS = 8 // `22:09:07`
 // The desktop widths of an agent type are measured on the live pane, in the app's own font. In the log,
@@ -730,11 +730,15 @@ function agentsSection(d: Draw): Block {
 
 // What a task's row shows at the right: how long a running one has run, never under 0 (the wall clock may have been put
 // back since it began), and how long a finished one ran. Null where it is not known: a running task whose start the mod
-// did not see, a finished one that has no duration.
+// did not see, a finished one that has no duration, and one whose time is wider than its cell (1000 hours or more: no
+// task runs that long, but a notice can carry any safe integer as its duration). A value is drawn whole, never cut, so
+// such a time is drawn as not known, and the row stays one line.
 function taskTime(task: TaskRow, now: number): string | null {
-  if (task.status === 'running') return task.startedAt === null ? null : fmtDuration(Math.max(0, now - task.startedAt))
+  const ran = task.startedAt === null ? null : Math.max(0, now - task.startedAt)
+  const ms = task.status === 'running' ? ran : task.durationMs
+  const text = ms === null ? null : fmtDuration(ms)
 
-  return task.durationMs === null ? null : fmtDuration(task.durationMs)
+  return text === null || text.length > TASK_TIME_CELLS ? null : text
 }
 
 // The background tasks, running ones first and then the newest start, as the subagents are; the value of a row is its
