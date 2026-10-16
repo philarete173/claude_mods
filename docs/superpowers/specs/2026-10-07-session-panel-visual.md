@@ -6,10 +6,11 @@
 > with a changes row (§6.3); a count that is only a lower bound has a plus, but a lower bound of no lines has no numbers
 > (§6.3); in a narrow log a prompt reads `you › …` and an engine message `engine › …` (§6.10); the Log fills the pane's
 > free height, 8 lines at least (§6.12); the rule above a section is one line high, with no margins (§5.1); the Log's
-> header counts every event, and a dim `+N more` line counts the ones it does not draw (§6.12). The HTML preview
+> header counts every event, and a dim `+N more` line counts the ones it does not draw (§6.12); the Tasks section lists
+> the background tasks after the Subagents, in rows built as theirs are (§6.7). The HTML preview
 > `docs/design/session-panel-preview.html` stays the approved v2 mock-up and predates these changes.
 
-Date: 2026-10-07. Status: implemented and shipped (0.4.0). The user approved the look in
+Date: 2026-10-07. Status: implemented and shipped (0.5.0). The user approved the look in
 `docs/design/session-panel-preview.html` before implementation.
 
 Scope: presentation only. The sections, their content, the formats and every formula of `2026-10-07-session-panel-design.md` §3–§4 stay as they are. Where the two specs differ on looks, this one replaces §3.1 of the main spec. Engine 2.1.288. "d.ts" below means `plugin-authoring/types/claude-code.d.ts` of that engine, cited by line.
@@ -184,8 +185,8 @@ const PCT_CELLS = 6 // `100.0%`
 const LIMIT_LABEL_CELLS = 7 // `5-hour`, `Weekly`, `Spend`
 const LIMIT_PCT_CELLS = 5 // `100%`
 const COST_CELLS = 7 // `$148.59`, `<$0.001`
-// A time from 100 hours on takes 8 cells (`100h 00m`), the widest this cell holds. A task of 1000 hours or more
-// (`1000h 00m`) overflows it, as a cost of $1000 or more overflows COST_CELLS.
+// A time from 100 hours on takes 8 cells (`100h 00m`), the widest this cell holds. A time of 1000 hours or more
+// (`1000h 00m`) would overflow it, and taskTime draws it as not known; a cost of $1000 or more overflows COST_CELLS.
 const TASK_TIME_CELLS = 8
 const TIME_CELLS = 8 // `22:09:07`
 // The desktop widths of an agent type are measured on the live pane, in the app's own font. In the log,
@@ -840,11 +841,15 @@ function agentsSection(d: Draw): Block {
 
 // What a task's row shows at the right: how long a running one has run, never under 0 (the wall clock may have been put
 // back since it began), and how long a finished one ran. Null where it is not known: a running task whose start the mod
-// did not see, a finished one that has no duration.
+// did not see, a finished one that has no duration, and one whose time is wider than its cell (1000 hours or more: no
+// task runs that long, but a notice can carry any safe integer as its duration). A value is drawn whole, never cut, so
+// such a time is drawn as not known, and the row stays one line.
 function taskTime(task: TaskRow, now: number): string | null {
-  if (task.status === 'running') return task.startedAt === null ? null : fmtDuration(Math.max(0, now - task.startedAt))
+  const ran = task.startedAt === null ? null : Math.max(0, now - task.startedAt)
+  const ms = task.status === 'running' ? ran : task.durationMs
+  const text = ms === null ? null : fmtDuration(ms)
 
-  return task.durationMs === null ? null : fmtDuration(task.durationMs)
+  return text === null || text.length > TASK_TIME_CELLS ? null : text
 }
 
 // The background tasks, running ones first and then the newest start, as the subagents are; the value of a row is its
@@ -883,9 +888,10 @@ The row has four columns. The description and the tag column sit in one group, b
    - Tasks: the time, `TASK_TIME_CELLS`, 8 cells (`taskTime`). A running task shows how long it has run, never under 0
      (the wall clock may have been put back since it began); the pane redraws at least every 30 s, so the time moves
      with it. An ended task shows how long it ran. The time is unknown for a running task whose start the mod did not
-     see, and for an ended one with no duration. A time from 100 hours on takes 8 cells (`100h 00m`), the widest this
-     cell holds; a task of 1000 hours or more (`1000h 00m`) overflows it, as a cost of $1000 or more overflows
-     `COST_CELLS`.
+     see, for an ended one with no duration, and for one whose time is wider than the cell. A time from 100 hours on
+     takes 8 cells (`100h 00m`), the widest this cell holds, so `999h 59m` still fits; a time of 1000 hours or more does
+     not: no task runs that long, but a notice can carry any safe integer as its duration. A value is never cut, so such
+     a time is drawn as not known, a dim `—`, and the row stays one line.
 
 **In a narrow pane the tag gives way first**, as `who` does in the log (§6.10). `statusSection` works out what a
 description would keep beside the tag: the body less the mark (`markCellsOf(d)`: `ICON_CELLS` on the desktop,
@@ -1186,7 +1192,7 @@ function logParts(d: Draw, above: number): RenderElement[] {
   fault. The end of a background task has one by the same rule: its line reads `done · shell: …`, `failed · …` or
   `stopped · …`, its `who` and outcome are red for `failed` only, and an end that came between turns has the engine's
   `task-notification` line beside it. A call that started a background task has `→ background` instead of `✓` and its
-  time, whichever agent made the call: its time would be only the launch.
+  time, whichever agent made the call: its time would be the call's, not the task's.
   - The column is FIXED and right-aligned (`justifyContent="flex-end"`). It holds one `Text wrap="truncate"`, styled like the `who` of the same line: red for an error line, dim otherwise.
   - A line without an outcome (a prompt, `spawned`, `resumed`, a compaction) gets the same cell, empty, so every text is cut at the same x.
 - **Outcome width per surface.** Worked out once per section, from the lines drawn.
@@ -1230,6 +1236,7 @@ function logParts(d: Draw, above: number): RenderElement[] {
 | No context reading | empty ring + `Context` + dim `—` at the right; no meter row (§6.2) |
 | No total cost | `Session` alone on the first row; no split line |
 | No subagents | no split line; no Subagents section (and no rule for it) |
+| No tasks | no Tasks section (and no rule for it) (§6.7) |
 | No completed turn | Turn stats header with no summary, body `No completed turn yet` (dim) |
 | No project name | no Project block (§6.3) |
 | No branch | the Project block without the branch row |
@@ -1238,7 +1245,8 @@ function logParts(d: Draw, above: number): RenderElement[] {
 | New files not all counted | `+2061+ / −4`; with no line counted, no numbers, as in the next row (§6.3) |
 | Lines unknown (an unborn HEAD, a failed diff) or both 0 (only binary files changed) | the changes row with the count alone, no numbers |
 | Subagent cost unknown | dim `—` in the cost column |
-| More than 8 subagents | `+N more` (§6.7) |
+| Task time not known (none, or wider than its cell) | dim `—` in the time column (§6.7) |
+| More than 8 subagents or tasks | `+N more` (§6.7) |
 | Events the Log does not draw | a dim `+N more` at its bottom; none when all are drawn or the Log is folded (§6.12) |
 | No rate limits, MCP servers, sources or log | the section and its rule are left out |
 
@@ -1446,6 +1454,7 @@ Butt caps keep the arc honest: round caps would add a stroke-width to its visibl
 | Branch row | the branch (ellipsis, from the end) | nothing | icon |
 | Changes row | the label `N files changed` (ellipsis) | nothing | the numbers cell (`+A / −D`), icon |
 | Subagent row | the `@type` column, which leaves every row when the description would keep fewer than 12 cells (§6.7) | description (ellipsis) | mark, cost |
+| Task row | the `@kind` column, as the `@type` does (§6.7) | description (ellipsis) | mark, time (whole, or `—`) |
 | MCP chip | the name, only when it alone is wider than the pane | nothing | the dot |
 | Log row | text (ellipsis) | `who` leaves the row; then the outcome moves in front of the text (each below 8 cells of text, §6.10) | time, the outcome while it is a column; `who` cuts inside its own column |
 
@@ -1465,6 +1474,8 @@ pane maximized on a 21:9 monitor shows (about 400), and the surface cuts the lin
 | `+N more` indent | 3 cells | 2 cells |
 | `who` column | 13 cells | longest `who` among the lines drawn, ≤ 14 |
 | `@type` column | 15 cells | longest drawn `@type`, ≤ 15 |
+| `@kind` column | 10 cells | longest drawn `@kind`, ≤ 10 |
+| Task time column | 8 cells, right-aligned | 8 cells, right-aligned |
 | Outcome column | longest drawn outcome + 1 cell | longest drawn outcome |
 | Header | `[icon] Title ▾ … summary` | `Title ▾ … summary`. The plain Button draws the glyph alone, and the focus inverts it (l.896–897, l.929–934). |
 
@@ -1538,7 +1549,7 @@ Check since the review of Task 13, for the 0.3.1 release:
     live check (every live session reads the tree once a minute) is not fixed.
 
 Checks for the 0.5.0 release: the Tasks section (§4.5 of the 0.4–0.6 spec, `2026-10-12-session-panel-v2-design.md`),
-and three checks of 0.4.3 that were left for it:
+three checks of 0.4.3 that were left for it, and four that the final review of 0.5.0 added (27 to 30):
 
 14. **The three kinds of task.** A background `sleep 120`, a Monitor and a local Workflow in one session. Each gets a
     row in Tasks, after Subagents, with `@shell`, `@monitor` or `@workflow`, the blue running icon and a time that
@@ -1547,9 +1558,9 @@ and three checks of 0.4.3 that were left for it:
     whole duration, and the Log has `done · shell: …` (or `failed ·`) with the same time.
 15. **TaskStop.** One running task stopped with TaskStop: its row turns to the grey stop square with the time it ran,
     and the Log has `stopped · …` with the time alone, not red. No notification comes for it (§8.5 of the 0.4–0.6 spec).
-16. **Ctrl+B in a terminal.** A command sent to the background with Ctrl+B gets a row. Its time counts from that moment,
-    not from the start of the command: the result says no earlier start, a known limit. (On the desktop, Ctrl+B did
-    not send a command to the background.)
+16. **Ctrl+B in a terminal.** A command moved to the background with Ctrl+B while it runs gets a row. Its time counts
+    from the start of its call, not from the key press, and the wait for a permission prompt is in it. (On the desktop,
+    Ctrl+B did not move a command to the background; a message should, check 29.)
 17. **The desktop's own task list.** The statuses and the times in Tasks agree with the desktop's list of background
     tasks: the same tasks, the same outcomes, and times within a few seconds. A shell task's time may run past the end
     of its command: its notification has no duration, so the pane counts until the notification arrives (a known
@@ -1575,6 +1586,16 @@ and three checks of 0.4.3 that were left for it:
     pane cuts it at its edge.
 26. **A pasted ANSI-coloured text** (left from 0.4.3, §12 item 9). The pane stays, and the Log line reads as plain text,
     with no `[31m` left in it.
+27. **A Monitor that prints several lines.** A Monitor whose command prints several lines before it exits has a notice
+    for each line. The row stays running through them and closes once, when the Monitor ends.
+28. **Two commands that end while the session is idle.** Two background commands that end while no turn runs: each
+    notice comes as a prompt of its own and closes its own row (the parser reads one notification per text). Both rows
+    close, and each has its end line in the Log.
+29. **A message while a command runs (the desktop).** A message sent while a long foreground command runs: the engine
+    moves the command to the background so that the message reaches the model. The command gets a row, and its time
+    counts from the start of its call, as the desktop's own task list counts it.
+30. **A Workflow with a syntax error.** A Workflow whose script fails the syntax check (its result has a non-empty
+    `error`) starts no task: there is no row, and its Log line ends in its time, not in `→ background`.
 
 Results of the live renders (2026-10-07, 2026-10-08, 2026-10-09, 2026-10-12 and 2026-10-13):
 
