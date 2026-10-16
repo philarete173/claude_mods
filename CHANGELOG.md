@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.0 — 2026-10-16
+
+- A Tasks section, after Subagents, lists the background tasks of the main agent: a Bash command that runs in the
+  background (started there, sent there by its timeout, or by Ctrl+B in a terminal), a Monitor and a local Workflow. A
+  row is a status mark, the description, `@shell`, `@monitor` or `@workflow`, and the time: how long a running task has
+  run, or how long an ended one ran. A task ends with the engine's notification (done, failed or stopped) or with a
+  TaskStop that names it. The engine gives the pane no task list, so a task that began before it loaded does not show,
+  a task whose notification never comes stays running until `/clear` or a resume, and a shell task's time runs until its
+  notification reaches the pane.
+- The Log shows `→ background` as the outcome of a call that started a task, since its time would be only the launch,
+  and logs the end of a task (`done · shell: …`, `failed ·`, `stopped ·`) with its time, as it logs a subagent's end.
+  While a `→ background` line is drawn the outcome column is wider, so in a narrow pane `who` gives way sooner: below 45
+  columns on the desktop instead of 39.
+- A stopped subagent is a dim `■` in a terminal, as a stopped task is, where it was a dim `✗`: a failed and a stopped
+  one differ by shape, not by colour alone.
+
 ## 0.4.3 — 2026-10-15
 
 - A pane maximized on a wide monitor is filled to its edge: the rules between sections reach the right edge (the line

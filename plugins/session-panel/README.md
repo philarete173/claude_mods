@@ -50,6 +50,32 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
 - **Subagents**: up to 8 rows, running ones first, in columns: a status mark, the description, `@type` and cost; the
   rest are counted as `+N more`. In a narrow pane `@type` gives way first. A subagent resumed with SendMessage shows
   as running again.
+- **Tasks**: the background tasks of the main agent: up to 8 rows, running ones first and then the newest start, in
+  columns: a status mark, the description, `@shell`, `@monitor` or `@workflow`, and the time; the rest are counted as
+  `+N more`. The header reads `running/total` while a task runs and the total otherwise, and a pane with no tasks has no
+  section. A running task's time is how long it has run (the pane redraws at least every 30 s), and an ended task's is
+  how long it ran. In a narrow pane `@kind` gives way first, on every row. The marks are `◐` running, `✓` done, `✗`
+  failed and `■` stopped in a terminal, and status icons on the desktop (a half-filled ring, a check, a cross, a stop
+  square). Subagents use the same marks: a stopped subagent is `■` and a failed one `✗`, so the two differ by shape, not
+  by colour alone. A row comes from a call of the main agent that started a task: a Bash command that runs in the
+  background, however it got there (it asked for it, its timeout sent it there, or Ctrl+B did in a terminal), a Monitor,
+  or a local Workflow. A remote Workflow is no task, since its end never reaches this session, and a subagent's
+  background call makes no row: its task is its own and may end with it. The description is the Bash description or else
+  its command, the Monitor's description or the workflow's name, cleaned as a Log text is (secrets masked, format and
+  control characters taken out, up to 512 characters), and the name of its kind when nothing is left. A task counts from
+  the moment its call came back, so the wait for a permission prompt is not in its time. A command that its timeout sent
+  to the background counts from when it began, but one that Ctrl+B sent there counts from that moment, since its result
+  says no earlier start: a known limit. A task ends with the engine's task notification (`completed` is done, `failed`
+  is failed, `killed` and `stopped` are stopped) or with a successful `TaskStop` that names it (stopped). The status is
+  read from the notification's header only, so one that a summary or a result quotes closes nothing, and a notification
+  of a task with no row changes nothing. An ended task's time is the duration that the notification gives, where it has
+  one (a Workflow's), and otherwise the time from the start to the moment the pane learns of the end, when the
+  notification reaches it or the `TaskStop` returns: a shell notification has no duration, so a shell task's time can
+  run past the end of its command, a known limit. `/clear` and a resume empty the list. The engine gives a mod no list
+  of its background tasks, so the pane has none to reconcile with: a task that began before the panel loaded (Claude
+  Code was restarted, or the desktop reopened the session) does not show, and a task whose notification never comes
+  stays running until `/clear` or a resume. A Monitor's notification has not been seen live: it is read by the common
+  format.
 - **MCP**: the servers that have tools in the context, by name, with their count. The desktop app's own servers
   (`ccd_*`, `Claude_Browser`, `scheduled-tasks`, `terminal`) are hidden and not counted.
 - **Context sources**: how many skills and MCP servers feed the context.
@@ -62,7 +88,14 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   resumes and results (a successful Agent call, a SendMessage to a known subagent or a subagent's `SubagentHandback` is
   not logged: their lines say it), compactions. A line keeps up to 512 characters of its text, and the pane cuts it to
   its width. Tool calls and subagent results both carry their outcome (✓/✗ and the time, or denied) in a right-aligned
-  column. A call that comes back as an error because it was abandoned (you interrupted it, or a stop did) is not drawn
+  column. A call that started a background task has `→ background` there in place of ✓ and its time, which would be only
+  the launch, whichever agent made the call. The end of a task has a line of its own, as the end of a subagent has:
+  `done · shell: <description>` (or `failed ·`, `stopped ·`), with ✓ and its time, ✗ and its time (an error line) or,
+  for a stop, the time alone; an end that comes between turns also has the engine's `task-notification` line, as a
+  subagent's notice has. While a `→ background` line is drawn, the outcome column is as wide as it (12 characters, 13
+  cells on the desktop; it is kept whole on purpose), so in a narrow pane `who` gives way sooner: below 45 body columns
+  on the desktop instead of 39 (with `✓ 0.3s`), and below 35 in a terminal instead of 29 (with `main` as the `who`).
+  A call that comes back as an error because it was abandoned (you interrupted it, or a stop did) is not drawn
   as an error: it is not red, its `who` and outcome are dim as on every line that is no error, and its outcome is the
   time alone, with no ✗; this rests on the engine's `next.signal`, and was seen live for a subagent stopped with
   `TaskStop` and for Esc on the main agent, while a call that fails by itself stays red. A call of an agent that is not
