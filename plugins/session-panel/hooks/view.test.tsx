@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock, Plugin } from 'claude-code/testing'
-import type { On, RenderPropsOf, SessionRateLimit } from 'claude-code'
+import type { On, RenderPropsOf, RenderSurface, SessionRateLimit } from 'claude-code'
 
 import { chipRows, contextMeterWidth, limitMeterWidth, meterSvg, renderPane, ringSvg } from './view'
 import type { PaneData } from './view'
@@ -362,7 +362,7 @@ const draw = (data: PaneData, bodyColumns = 45, bodyRows = PANE_PROPS.scroll.bod
   renderPane(
     PLAIN_ELEMENTS, data, { bodyColumns, scroll: { bodyRows } }, { onToggle: () => undefined },
   ) as unknown as Node
-const onSurface = (data: PaneData, surface: Surface): PaneData => ({ ...data, surface })
+const onSurface = (data: PaneData, surface: RenderSurface): PaneData => ({ ...data, surface })
 
 const EMPTY: PaneData = {
   usage: { rateLimits: [] },
@@ -1794,26 +1794,31 @@ const lastFour = (tree: Node): Node[] => childrenOf(tree).slice(-4)
 const hasZeroHeight = (tree: Node): boolean => flat(tree).some(({ node }) => node.props?.height === 0)
 
 const sumOf = (numbers: number[]): number => numbers.reduce((sum, n) => sum + n, 0)
+// The cells that a capital A to Z of a chip's name weighs on a surface: the terminal's cells are even, and the desktop
+// draws a capital wider (the live check of 2026-10-13: about 9 to 11 px against the 8 px of a cell). The editor and the
+// mobile app draw vectors as the desktop does, and are counted as it is.
+const CAPITAL_CELLS: Record<RenderSurface, number> = { desktop: 1.5, mobile: 1.5, terminal: 1, vscode: 1.5 }
 // The rows a drawn block takes in a body of `columns` cells, counted from its tree alone: a Box with a `height` is that
-// tall, a column stacks its cells, a row is as tall as its tallest cell, the chips of MCP wrap whole as chipRows says,
-// and any other element is one line. The panel counts them as it builds the blocks, and this counts them again from
-// what it built.
-const rowsOf = (node: Node, columns: number): number => {
+// tall, a column stacks its cells, a row is as tall as its tallest cell, the chips of MCP wrap whole as chipRows says
+// (a capital in a name weighing `capital` cells), and any other element is one line. The panel counts them as it
+// builds the blocks, and this counts them again from what it built.
+const rowsOf = (node: Node, columns: number, capital: number): number => {
   if (node.type !== 'Box') return 1
   if (typeof node.props?.height === 'number') return node.props.height
   const cells = childrenOf(node)
-  if (node.props?.flexWrap === 'wrap') return chipRows(cells.map(chip => textsOf(chip)[1] ?? ''), columns)
-  const heights = cells.map(cell => rowsOf(cell, columns))
+  if (node.props?.flexWrap === 'wrap') return chipRows(cells.map(chip => textsOf(chip)[1] ?? ''), columns, capital)
+  const heights = cells.map(cell => rowsOf(cell, columns, capital))
 
   return node.props?.flexDirection === 'column' ? sumOf(heights) : Math.max(0, ...heights)
 }
 // The rows above the Log: those of the children of the pane that come before the Log's rule, which is the child before
-// its header. Where the Log is not drawn, all of them.
-const rowsAbove = (tree: Node, columns: number): number => {
+// its header. Where the Log is not drawn, all of them. The chips of MCP are counted with the capital of the surface.
+const rowsAbove = (tree: Node, columns: number, surface: RenderSurface): number => {
   const blocks = childrenOf(tree)
   const at = blocks.findIndex(block => headerRows(block).some(header => header.id === 'log'))
+  const capital = CAPITAL_CELLS[surface]
 
-  return sumOf(blocks.slice(0, at < 0 ? blocks.length : at - 1).map(block => rowsOf(block, columns)))
+  return sumOf(blocks.slice(0, at < 0 ? blocks.length : at - 1).map(block => rowsOf(block, columns, capital)))
 }
 // A pane of a Log and nothing else. Above the Log are the Session card (2 rows: the context has no reading) and the
 // placeholder of Turn stats (3), and the Log's rule and header make 2 more, so the Log has the body's rows less 7.
@@ -1825,7 +1830,7 @@ test('the Log is a rule, a header, a head of 8, a tail and a `+N more`, children
     // A body of 70 rows: the blocks above the Log take 46 (45 columns, FULL) and its rule and header 2, which leaves 22
     // rows: 21 lines and the line that counts the other 116 of the 137 events.
     const tree = draw(onSurface({ ...FULL, log: logLines(60) }, surface), 45, 70)
-    expect(rowsAbove(tree, 45), surface).toBe(46)
+    expect(rowsAbove(tree, 45, surface), surface).toBe(46)
     // The root is at least as tall as the body, and has no height of its own.
     expect(tree.props, surface).toStrictEqual({ flexDirection: 'column', minHeight: 70 })
     // The Log's five parts are the last children of the root: no Box wraps them.
@@ -2123,10 +2128,39 @@ test('the Log has the rows that the blocks above it leave, whatever they are, an
       const where = `${surface}: ${name}`
       const tree = draw(onSurface({ ...SURROUNDED, ...patch }, surface), bodyColumns, bodyRows)
       // What the blocks above take, counted again from their trees: the number the Log works from is true.
-      expect(rowsAbove(tree, bodyColumns), where).toBe(above)
+      expect(rowsAbove(tree, bodyColumns, surface), where).toBe(above)
       expect(logRows(tree), where).toHaveLength(drawn)
       expect(moreOf(tree), where).toBe(more)
     }
+  }
+})
+
+// A capital weighs what its surface draws it as: a cell on the terminal, whose cells are even, and 1.5 on the desktop,
+// whose font is proportional (chipRows); the editor and the mobile app, which draw vectors too, are counted as the
+// desktop is. Two names in capitals at the edge of a line are one row of chips on the terminal where they are two on
+// the others, and the Log has the row that the terminal does not take. `GITHUB` and `SLACK` are 17 cells at 1 with the
+// gap between them, so 19 columns hold them, and 23 at 1.5, so 25 columns do.
+const CAPITAL_MCP = { servers: [{ name: 'GITHUB' }, { name: 'SLACK' }] }
+
+test('the chips of MCP are counted with the capital of the surface: a cell on the terminal, 1.5 on the desktop', () => {
+  // [the columns, the surface, the rows above the Log, the lines it draws in a body of 60 rows, the events it counts]:
+  // the blocks above the Log are 44 rows with the chips in one row (SURROUNDED), and 45 with them in two. The editor
+  // and the mobile app are drawn where 1 and 1.5 differ, 24 and 19 columns, and count as the desktop does.
+  const cases = [
+    [25, 'terminal', 44, 13, 124], [25, 'desktop', 44, 13, 124],
+    [24, 'terminal', 44, 13, 124], [24, 'desktop', 45, 12, 125],
+    [24, 'vscode', 45, 12, 125], [24, 'mobile', 45, 12, 125],
+    [19, 'terminal', 44, 13, 124], [19, 'desktop', 45, 12, 125],
+    [19, 'vscode', 45, 12, 125], [19, 'mobile', 45, 12, 125],
+    [18, 'terminal', 45, 12, 125], [18, 'desktop', 45, 12, 125],
+  ] as const
+  for (const [columns, surface, above, drawn, more] of cases) {
+    const where = `${surface} ${columns} columns`
+    const tree = draw(onSurface({ ...SURROUNDED, mcp: CAPITAL_MCP }, surface), columns, 60)
+    // The count that the Log works from is the number of the rows above, and the rows are counted again from the tree.
+    expect(rowsAbove(tree, columns, surface), where).toBe(above)
+    expect(logRows(tree), where).toHaveLength(drawn)
+    expect(moreOf(tree), where).toBe(more)
   }
 })
 
@@ -2179,7 +2213,7 @@ test('the Log fills the body: no line is cut, and no row is left that a line cou
             const total = Math.max(count, held)
             // The rows the pane takes with every line one row high: what is above, the rule and header of the Log, its
             // lines, and the line that counts the rest.
-            const natural = rowsAbove(tree, bodyColumns) + 2 + drawn + (more === undefined ? 0 : 1)
+            const natural = rowsAbove(tree, bodyColumns, surface) + 2 + drawn + (more === undefined ? 0 : 1)
 
             // `+N more` counts the events that are not drawn, and is there when there are any.
             expect(drawn, where).toBeLessThanOrEqual(held)
@@ -2649,6 +2683,36 @@ test('chipRows counts a capital wider: A to Z are 1.5 cells each, and the total 
   // chips of 8 and 7, 17 with the gap) would have said one line down to 19 columns.
   expect(chipRows(['GITHUB', 'SLACK'], 25)).toBe(1)
   expect(chipRows(['GITHUB', 'SLACK'], 24)).toBe(2)
+})
+
+// The weight of a capital is the third argument, 1.5 where it is left out (the desktop's, as above). A surface whose
+// cells are even, the terminal, passes 1: a capital is a cell there, as any letter is, and the names in capitals of a
+// line take the room of their letters. The weight is that of A to Z alone, and what a name adds up to is rounded up.
+test('chipRows takes the weight of a capital as its third argument: 1 holds more names in capitals on a line', () => {
+  // `GITHUB` and `SLACK` at a cell a capital are chips of 8 and 7 cells, 17 with the gap, so 19 columns hold them and
+  // 18 do not. At 1.5 they are 23, so 25 columns hold them and 24 do not: at 24 columns they are one line at 1.
+  expect(chipRows(['GITHUB', 'SLACK'], 19, 1)).toBe(1)
+  expect(chipRows(['GITHUB', 'SLACK'], 18, 1)).toBe(2)
+  expect(chipRows(['GITHUB', 'SLACK'], 25, 1.5)).toBe(1)
+  expect(chipRows(['GITHUB', 'SLACK'], 24, 1.5)).toBe(2)
+  expect(chipRows(['GITHUB', 'SLACK'], 24, 1)).toBe(1)
+  // A line of 40 columns holds 38 cells: five chips of `ABCD` at 1 (6 cells each, and 4 gaps), four at 1.5 (8 cells
+  // each, and 3 gaps). So five of them are one line at 1 and two at 1.5, and six are two lines at 1.
+  expect(chipRows(Array(5).fill('ABCD'), 40, 1)).toBe(1)
+  expect(chipRows(Array(6).fill('ABCD'), 40, 1)).toBe(2)
+  expect(chipRows(Array(4).fill('ABCD'), 40, 1.5)).toBe(1)
+  expect(chipRows(Array(5).fill('ABCD'), 40, 1.5)).toBe(2)
+  // Left out, the weight is 1.5: the calls of two arguments count as they did.
+  expect(chipRows(['GITHUB', 'SLACK'], 25)).toBe(1)
+  expect(chipRows(['GITHUB', 'SLACK'], 24)).toBe(2)
+  expect(chipRows(Array(5).fill('ABCD'), 40)).toBe(2)
+  // The weight is the capitals' alone: U+00C9 twice (a capital E with an acute) is 4 cells at any weight, so with
+  // `abcd` the two are 14, which 16 columns hold and 15 do not; `A` and U+00E9 are 1 + 2 = 3 cells at 1 (4 at 1.5, in
+  // the next test), so with `abcd` the two are 13: 15 columns hold them and 14 do not.
+  expect(chipRows(['abcd', '\u{C9}\u{C9}'], 16, 1)).toBe(1)
+  expect(chipRows(['abcd', '\u{C9}\u{C9}'], 15, 1)).toBe(2)
+  expect(chipRows(['abcd', 'A\u{E9}'], 15, 1)).toBe(1)
+  expect(chipRows(['abcd', 'A\u{E9}'], 14, 1)).toBe(2)
 })
 
 // What is not a capital keeps its count: an ASCII character that is no capital is 1 cell (the digits and the `_`, `-`
@@ -3220,7 +3284,7 @@ test('a time wider than the cell of a task is drawn as a dim dash: one row, and 
         expect(String(textsOf(cell)[0]).length, where).toBeLessThanOrEqual(Number(cell?.props?.width))
         // The Log has the rows of the block fewer, as for any one task: the rule, the header and the row.
         expect(logRows(tree), where).toHaveLength(32 - 3)
-        expect(rowsAbove(tree, bodyColumns), where).toBe(5 + 3)
+        expect(rowsAbove(tree, bodyColumns, surface), where).toBe(5 + 3)
       }
     }
   }
@@ -3428,7 +3492,7 @@ test('the Log draws fewer lines by exactly the rows of the Tasks block: rule, he
         expect(logRows(tree), where).toHaveLength(32 - blockRows)
         expect(moreOf(tree), where).toBe(60 - (32 - blockRows))
         // The rows that the panel counts above the Log are those of the trees: counted again from them.
-        expect(rowsAbove(tree, bodyColumns), where).toBe(5 + blockRows)
+        expect(rowsAbove(tree, bodyColumns, surface), where).toBe(5 + blockRows)
       }
     }
   }

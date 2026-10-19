@@ -36,7 +36,9 @@ type Kit = {
   Box: ElementConstructor<BoxProps>
   Text: ElementConstructor<TextProps>
   Button: ElementConstructor<ButtonProps>
-  // Only on a surface that draws vectors. The table of the terminal holds an Svg too, but a stub: it draws nothing.
+  // Only on a surface that draws vectors. The terminal's table is typed with no Svg (2.1.288), but the engine completes
+  // every table to all the element names, and an omitted one draws a fragment: what `$.ui.resolve` hands out for the
+  // terminal holds an Svg that draws nothing. renderPane leaves it out there.
   Svg: ElementConstructor<SvgProps> | undefined
 }
 // `cols` and `rows` are the body in cells, `rows` 0 where its height is not known; the two meter widths are worked out
@@ -102,6 +104,8 @@ const HEADER_ROWS = 1
 // free.
 const CHIP_GAP_CELLS = 2
 const CHIP_MARGIN_CELLS = 2
+// The cells of an ASCII capital in a chip name where the font is proportional: the desktop's 9 to 11 px against CELL_PX
+const WIDE_CAPITAL_CELLS = 1.5
 const MIN_LOG_TEXT_CELLS = 8 // the least text a log line keeps: below it `who` gives way, then the outcome column
 // In a narrow pane the identity column gives way first, as in the log: a subagent row or a task row leaves out its `@…`
 // tag (the `@type` of a subagent, the `@kind` of a task), on every row of its list, when the description would keep
@@ -763,16 +767,17 @@ function tasksSection(d: Draw): Block {
 // The cells that the name of a chip takes, counted high, because the estimate of chipRows must err on the side of more
 // rows (the 0.4.0 spec, §3.2): `.length` counts a CJK character as one cell, and it is drawn two wide. Every code point
 // above U+007F counts as 2 cells (the wide ones, CJK and emoji, and some that are not, an accented letter), a capital
-// ASCII letter (A to Z) as 1.5, every other as 1, and the total of a name is rounded up. A capital is more than a cell
-// because the desktop's font is proportional: the live check of 2026-10-13 (docs/live-check-2026-10-13-0.4.0.md)
-// measured capitals at about 9 to 11 px against the 8 px of a cell (CELL_PX), so two long names in capitals at the edge
-// of a line made the estimate a row short. It goes by code point, not by UTF-16 unit: an astral emoji is one code point
-// and 2 cells, where its two units would make 4.
-const nameCells = (name: string): number => {
+// ASCII letter (A to Z) as `capital` cells, every other as 1, and the total of a name is rounded up. On the desktop a
+// capital is more than a cell, because its font is proportional: the live check of 2026-10-13
+// (docs/live-check-2026-10-13-0.4.0.md) measured capitals at about 9 to 11 px against the 8 px of a cell (CELL_PX), so
+// two long names in capitals at the edge of a line made the estimate a row short, and `capital` is 1.5 there. The
+// terminal's cells are even: a capital is one cell, and `capital` is 1. It goes by code point, not by UTF-16 unit: an
+// astral emoji is one code point and 2 cells, where its two units would make 4.
+const nameCells = (name: string, capital: number): number => {
   let cells = 0
   for (const char of name) {
     const code = char.codePointAt(0) ?? 0
-    cells += code > 0x7f ? 2 : char >= 'A' && char <= 'Z' ? 1.5 : 1
+    cells += code > 0x7f ? 2 : char >= 'A' && char <= 'Z' ? capital : 1
   }
 
   return Math.ceil(cells)
@@ -784,13 +789,14 @@ const nameCells = (name: string): number => {
 // must not err on. The chips go in the order they come, whole, onto a line while the next one fits it with the gap that
 // parts them, and a chip wider than the line (it is cut) is a line of its own. A line is the body less
 // CHIP_MARGIN_CELLS, so the estimate errs on the side of a row too many: the Log then draws a line fewer than would
-// fit, where a row too few would cut its last line (logLinesFit).
-export function chipRows(names: string[], columns: number): number {
+// fit, where a row too few would cut its last line (logLinesFit). `capital` is the cells of an ASCII capital in a name:
+// 1.5, the desktop's, unless the caller says that the cells are even (nameCells).
+export function chipRows(names: string[], columns: number, capital = WIDE_CAPITAL_CELLS): number {
   const lineCells = columns - CHIP_MARGIN_CELLS
   let rows = 0
   let used = 0
   for (const name of names) {
-    const chipCells = DOT.length + nameCells(name)
+    const chipCells = DOT.length + nameCells(name, capital)
     if (rows > 0 && used + CHIP_GAP_CELLS + chipCells <= lineCells) {
       used += CHIP_GAP_CELLS + chipCells
     } else {
@@ -805,7 +811,9 @@ export function chipRows(names: string[], columns: number): number {
 // The MCP servers, a green dot and the name each, wrapped whole; the summary is their count. The mod only learns which
 // servers have tools in the context (WaitForMcpServers is not there for a module), so it cannot tell a failed one
 // from a connected one: every dot is green. A name wider than the pane goes on its own line and is cut. The chips are
-// the one body of a section that is more than one line high, as many as chipRows says.
+// the one body of a section that is more than one line high, as many as chipRows says. A capital in a name weighs 1
+// cell where the pane draws no Svg, on the terminal, whose cells are even, and 1.5 where it does: the desktop draws
+// capitals wider, about 9 to 11 px against the 8 px of a cell (CELL_PX).
 function mcpSection(d: Draw): Block {
   const { Box, Text } = d.ui
   const { mcp } = d.data
@@ -827,7 +835,7 @@ function mcpSection(d: Draw): Block {
         {chips}
       </Box>,
     ],
-    chipRows(names, d.cols),
+    chipRows(names, d.cols, d.ui.Svg === undefined ? 1 : WIDE_CAPITAL_CELLS),
   )
 }
 
