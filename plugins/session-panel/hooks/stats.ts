@@ -213,10 +213,10 @@ const SECRETS: [RegExp, string][] = [
   [/(\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s@]+@/gi, '$1•••@'],
 ]
 
-// Whether the character beside a joiner holds it: one above U+007F that is no space. A space is what `\s` says, as in
-// the patterns of redact, so the no-break space and the wide ones are spaces. The character is read as one UTF-16 unit:
-// every unit of an astral code point is above U+007F (a surrogate), so the unit beside a joiner tells what the
-// character is. No unit, past an end of the text, holds nothing.
+// Whether the character beside a joiner, or beside a run of invisibles, holds it: one above U+007F that is no space. A
+// space is what `\s` says, as in the patterns of redact, so the no-break space and the wide ones are spaces. The
+// character is read as one UTF-16 unit: every unit of an astral code point is above U+007F (a surrogate), so the unit
+// beside a run tells what the character is. No unit, past an end of the text, holds nothing.
 const holdsJoiner = (char: string | undefined): boolean =>
   char !== undefined && char.charCodeAt(0) > 0x7f && !/\s/.test(char)
 
@@ -231,21 +231,63 @@ const tagged = (word: string): string =>
 // General Interchange). Any other tag character goes, and the black flag before it stays alone.
 const KEPT_FLAGS = ['gbeng', 'gbsct', 'gbwls'].map(code => `\u{1F3F4}${tagged(code)}\u{E007F}`)
 
-// Either a whole flag of KEPT_FLAGS (group 1), or a format character that is neither joiner, or a whole ANSI escape
+// Either a whole flag of KEPT_FLAGS (group 1), or a format character that is neither joiner, or a whole escape
 // sequence, or a control character (C0 but tab, line feed and carriage return, DEL and C1), or U+10EEEE, the
-// placeholder that the engine keeps for itself, or a lone surrogate: the engine refuses a text child that holds a
+// placeholder that the engine keeps for itself, or a lone surrogate: the engine refuses a pane whose text holds a
 // control character or the placeholder, and a removal between the two halves of U+10EEEE would join them into it. A
-// sequence is an OSC (`ESC ]`, a body with no BEL or ESC in it, and BEL or `ESC \`) or a CSI (`ESC [`, its parameters,
-// its intermediate bytes and its final byte), and it goes whole, so that a coloured log reads as its text and the rest
-// of a sequence does not glue to a word that a pattern of redact starts at (`Bearer`, `ghp_`). Both come before the
-// class of control characters, which would take the ESC alone. An OSC with no terminator is no sequence, and only its
-// ESC goes, so that it cannot swallow the rest of a line. The pass stays linear (each part of a sequence is read once):
-// a sequence stops at the next ESC.
+// sequence goes whole, so that no `31m` or `(B` is left glued to the word after it, where it would hide a token from
+// the `\b` of SECRETS (`Bearer`, `ghp_`). It is a control string (an OSC, a DCS, a SOS, a PM or an APC, 7-bit with
+// `ESC` or 8-bit with one C1 character, up to its BEL, `ESC \` or U+009C on the same line), a CSI (7-bit, or 8-bit with
+// a parameter or an intermediate byte), an nF escape (`ESC`, the intermediate bytes that a terminal's output uses, a
+// final byte: the `ESC ( B` that `tput sgr0` ends in) or an escape of two bytes (`ESC` followed by `7`, `8`, `=`, `>`,
+// `[`, `\`, `]`, `^` or `_`; any other byte after a stray ESC stays). They come before the class of control characters,
+// which would take the ESC alone. A stray ESC or U+009B goes alone, so that it cannot take the first letter of a token
+// with it: `ESC c` and `ESC M` are no two-byte escape here, a space or `-` right after an ESC is no intermediate byte
+// (in the 7-bit form only: right after U+009B each is one), and U+009B before a letter is no CSI. Crafted input can
+// still lose a letter: `ESC (` before a letter is an nF escape that ends at it, and U+009B with a parameter or an
+// intermediate byte (a space, `-`) before a letter is a CSI that does, so `\x1b(ghp_…` reads `hp_…`, `x \x9b Bearer …`
+// reads `x earer …` and `\x9b--token x` reads `oken x`; the mask leaves that gap, as it leaves `ESC[Bearer`. A control
+// string with no terminator loses its introducer, and its body
+// stays, unlike a terminal, which would swallow the text up to a terminator; but `ESC P` and `ESC X` are no two-byte
+// escape here, so for a DCS or a SOS the ESC alone goes and the letter stays (`aPq`, `aXx`). The body ends at a line
+// end (`\n` or `\r`) too, so that a lone introducer cannot take whole lines up to a BEL or an ST far below it. `ESC [`
+// followed by a letter is a whole CSI (the letter is its final byte), so `ESC[Bearer x` reads `earer x` as a terminal
+// shows it, a gap that the mask leaves. The pass stays linear (each part of a sequence is read once): the body of a
+// control string and the parameters of a CSI stop at the next introducer, terminator or line end.
 const FORMAT_OR_FLAG = new RegExp(
-  String.raw`(${KEPT_FLAGS.join('|')})|(?![\u200C\u200D])\p{Cf}|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)` +
-    String.raw`|\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\u{10EEEE}|\p{Cs}`,
+  String.raw`(${KEPT_FLAGS.join('|')})|(?![\u{200C}\u{200D}])\p{Cf}` +
+    String.raw`|(?:\x1b[\]PX^_]|[\x90\x98\x9d-\x9f])[^\x07\x1b\x90\x98\x9c-\x9f\n\r]*(?:\x07|\x1b\\|\x9c)` +
+    String.raw`|\x1b\[[0-?]*[ -/]*[@-~]|\x9b(?:[0-?]+[ -/]*|[ -/]+)[@-~]` +
+    String.raw`|\x1b[#$%()*+]+[0-~]|\x1b[78=>\[\\\]^_]` +
+    String.raw`|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\u{10EEEE}|\p{Cs}`,
   'gu',
 )
+
+// Joiners and invisibles, one run at a time, judged by what is round the run once the rest has gone (see stripFormat).
+// A run is the joiners, the default ignorable code points that are no Cf (the first pass has taken the rest of Cf but
+// the tag characters of a kept flag, which remain after it: `(?!\p{Cf})` keeps them out of a run), and four more: the
+// braille blank (U+2800), the Khitan small script filler (U+16FE4), the Tifinagh consonant joiner (U+2D7F) and the
+// enclosing keycap (U+20E3).
+const INVISIBLE_RUN = new RegExp(
+  String.raw`(?:[\u{200C}\u{200D}]|(?!\p{Cf})\p{Default_Ignorable_Code_Point}` +
+    String.raw`|[\u{2800}\u{16FE4}\u{2D7F}\u{20E3}])+`,
+  'gu',
+)
+// A run with a joiner in it is judged as a joiner is: it stays only between two characters that holdsJoiner accepts.
+const HAS_JOINER = /[\u{200C}\u{200D}]/u
+// What a keycap stands on: a digit, `#` or `*`.
+const KEYCAP_BASE = /^[0-9#*]$/
+// A character of a word, or of a `sk-` or `ghp_` token: letters, digits, `_` and `-` (`\w` lacks the `-`).
+const ASCII_WORD = /^[A-Za-z0-9_-]$/
+// A character that a Bearer token can hold, the widest token alphabet of SECRETS: a keycap tail before one goes.
+const BEARER_CHAR = /^[A-Za-z0-9._~+/-]$/
+// What closes a keycap: U+FE0F U+20E3, or U+20E3 alone.
+const KEYCAP_TAIL = new Set(['\u{FE0F}\u{20E3}', '\u{20E3}'])
+// Whether the last unit of `tail` is the base of a keycap (a digit, `#` or `*`) that stands alone on its left: one that
+// an ASCII word touches is part of that word, and a mark after it is no keycap (a digit in a token, then U+FE0F
+// U+20E3). It judges the left side only; the run pass checks the right side (no token character after the keycap).
+const isKeycapBase = (tail: string): boolean =>
+  KEYCAP_BASE.test(tail.slice(-1)) && !ASCII_WORD.test(tail.slice(-2, -1))
 
 // Takes out the control characters and the Unicode format characters (category Cf): the bidi controls (U+202A to
 // U+202E, U+2066 to U+2069), the zero-width space, the byte order mark and the rest. They draw nothing, so a U+202E in
@@ -268,18 +310,60 @@ const FORMAT_OR_FLAG = new RegExp(
 // that the words on either side stay apart. U+10EEEE goes too, in the same pass: it is the placeholder that the engine
 // keeps for itself, and the engine refuses a text child that holds it, as it refuses one that holds a control
 // character. A lone surrogate goes too (a pair is one code point, and stays): a removal between the two halves of
-// U+10EEEE would join them into that placeholder. An ANSI escape sequence goes whole, not its ESC alone (a CSI:
-// `ESC [`, its parameters and its final byte; an OSC: `ESC ]` to BEL or `ESC \`): a coloured log reads as its text, and
-// the rest of a sequence (`[31m`) does not glue to the word after it, which a pattern of redact that starts at a word
-// boundary (`Bearer`, `ghp_`) would then miss. An OSC with no terminator is no sequence, and only its ESC goes, so that
-// it cannot swallow the rest of a line. The pass stays linear: each part of a sequence is read once.
+// U+10EEEE would join them into that placeholder. An escape sequence goes whole, not its ESC alone (a CSI, an OSC and
+// the other control strings, an nF escape such as `ESC ( B`, an escape of two bytes such as `ESC 7`): a coloured log
+// reads as its text, and no `31m` or `(B` is left glued to the word after it, where it would hide a token from the
+// `\b` of a pattern of redact (`Bearer`, `ghp_`). A stray ESC or U+009B goes alone, so that it cannot take the first
+// letter of a token (crafted input still can: `ESC (`, or U+009B with a parameter or an intermediate byte (a space,
+// `-`), before a letter takes that letter, so `\x1b(ghp_…` reads `hp_…`, `x \x9b Bearer …` reads `x earer …` and
+// `\x9b--token x` reads `oken x`: a gap that the mask leaves). A control string with no terminator loses its
+// introducer, and its body stays, unlike a terminal, which would swallow the text up to a terminator (`ESC P` and
+// `ESC X` are no two-byte escape here: the ESC alone goes and the letter stays); the body ends at a line end, so that
+// a lone introducer takes no whole lines. `ESC [` followed by a letter is a whole CSI (the letter is its final byte),
+// so `ESC[Bearer x` reads `earer x` as a terminal shows it, a gap that the mask leaves too. The pass stays linear: each
+// part of a sequence is read once. The invisible characters that are no Cf (the combining grapheme joiner U+034F, the
+// variation selectors, the fillers, the braille blank, the enclosing keycap U+20E3) go too, in a second pass over runs
+// of them and of the joiners: they go unless they modify a character above U+007F (an emoji's U+FE0F) or close a keycap
+// (`1` U+FE0F U+20E3) that stands apart, with no ASCII word character before its digit and no character of a Bearer
+// token after its marks (keycaps glued to one another or to a word lose their marks). An invisible beside an ASCII
+// character would split a token, so that no pattern of redact matches its two halves.
 export function stripFormat(s: string): string {
   // A flag (group 1) is put back as it is; a vertical tab and a form feed become a space, any other match goes.
   const rest = s.replace(FORMAT_OR_FLAG, (found, flag: string | undefined) =>
     flag ?? (found === '\x0b' || found === '\x0c' ? ' ' : ''))
 
-  return rest.replace(/[\u200C\u200D]+/g, (run, at: number) =>
-    holdsJoiner(rest[at - 1]) && holdsJoiner(rest[at + run.length]) ? run : '')
+  // A run of joiners and invisibles is judged once, by the characters that remain round it. A run with a joiner in it
+  // stays only between two characters above U+007F that are no spaces; one with none stays after such a character (the
+  // base it modifies: an emoji's U+FE0F), and after a digit, `#` or `*` that no ASCII word character touches when it is
+  // the keycap tail (U+FE0F U+20E3, or U+20E3) and no character a Bearer token can hold follows it either: a token can
+  // begin with a digit (`Bearer 4` U+20E3 `/3Q7x…`), so keycaps glued to one another or to a word lose their marks. The
+  // characters round it are those that remain, so that one that goes cannot shield an invisible, and a second pass
+  // takes out nothing more.
+  const parts: string[] = []
+  // The last two UTF-16 units kept so far: a run is judged by them. Indexing into a string that is built up would
+  // flatten it at each run, which takes quadratic time.
+  let tail = ''
+  let from = 0
+  for (const found of rest.matchAll(INVISIBLE_RUN)) {
+    const run = found[0]
+    const at = found.index ?? 0
+    const between = rest.slice(from, at)
+    parts.push(between)
+    tail = between.length >= 2 ? between.slice(-2) : (tail + between).slice(-2)
+    const before = tail[tail.length - 1]
+    const after = rest[at + run.length]
+    const isKept = HAS_JOINER.test(run)
+      ? holdsJoiner(before) && holdsJoiner(after)
+      : holdsJoiner(before) || (isKeycapBase(tail) && KEYCAP_TAIL.has(run) && !BEARER_CHAR.test(after ?? ''))
+    if (isKept) {
+      parts.push(run)
+      tail = (tail + run).slice(-2)
+    }
+    from = at + run.length
+  }
+  parts.push(rest.slice(from))
+
+  return parts.join('')
 }
 
 // The format and control characters go first, as shorten takes them out too: one inside a secret would keep a pattern

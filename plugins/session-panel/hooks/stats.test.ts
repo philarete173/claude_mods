@@ -330,8 +330,17 @@ test('stripFormat takes an ANSI escape sequence out whole: a CSI, and an OSC tha
   // An OSC ends at `ESC \` (a link, OSC 8) or at BEL (a window title, OSC 0).
   expect(stripFormat('\u001b]8;;file:///etc/x\u001b\\x\u001b]8;;\u001b\\ done')).toBe('x done')
   expect(stripFormat('a\u001b]0;title\u0007b')).toBe('ab')
-  // An OSC with no terminator is no sequence: its ESC goes alone, so that it cannot swallow the rest of a line.
-  expect(stripFormat('a\u001b]no end')).toBe('a]no end')
+  // A control string ends at its first terminator: a second one is a stray control character, and goes alone.
+  expect(stripFormat('a\x1b]0;t\x07 mid \x07b')).toBe('a mid b')
+  expect(stripFormat('a\x9d0;t\x9c mid \x9cb')).toBe('a mid b')
+  // A control string with no terminator is no sequence: its introducer goes and its body stays, so that it cannot
+  // swallow the rest of a line (a terminal would swallow the text up to a terminator).
+  expect(stripFormat('a\x1b]no end')).toBe('ano end')
+  expect(stripFormat('a\x1b]0;title')).toBe('a0;title')
+  expect(stripFormat('a\x1bPq')).toBe('aPq') // `ESC P` is no two-byte escape here: its ESC goes alone
+  expect(stripFormat('a\x1b_x')).toBe('ax')
+  expect(stripFormat('a\x1b^x')).toBe('ax')
+  expect(stripFormat('a\x1bXx')).toBe('aXx') // `ESC X` is no two-byte escape here either: its ESC goes alone
   // A secret that the sequences of a coloured log stand beside is masked as it is without them: `\bghp_` needs a word
   // boundary, and the `m` of `ESC [ 33 m` left in front of the `g` would be none.
   expect(redact(stripFormat('\u001b[1mBearer\u001b[0m abcdefghijklmnop'))).not.toContain('abcdefghijklmnop')
@@ -353,13 +362,104 @@ test('stripFormat takes a CSI out whole, whatever its parameters, intermediate b
   for (const [name, sequence] of sequences) expect(stripFormat(`a${sequence}b`), name).toBe('ab')
 })
 
+// A control string (an OSC, a DCS, a SOS, a PM or an APC, with `ESC` and a character or with one C1 character), an
+// 8-bit CSI, an nF escape (`ESC`, intermediate bytes and a final byte) and an escape of two bytes go whole too, so that
+// no `31m` or `(B` is left to glue to the word after it. Spelled as escapes, so that this file holds no control
+// character.
+test('stripFormat takes the other whole sequences out: control strings, an 8-bit CSI, nF and two-byte escapes', () => {
+  const sequences: Array<[name: string, sequence: string]> = [
+    ['an 8-bit CSI (a colour)', '\x9b31m'],
+    ['an 8-bit CSI with a private-mode mark (hide the cursor)', '\x9b?25l'],
+    ['an 8-bit OSC ended by ST (a window title)', '\x9d0;title\x9c'],
+    ['an 8-bit OSC ended by BEL', '\x9d0;t\x07'],
+    ['a DCS ended by `ESC \\`', '\x1bPq#0\x1b\\'],
+    ['an 8-bit DCS', '\x90q\x9c'],
+    ['a SOS', '\x1bXx\x1b\\'],
+    ['a PM', '\x1b^x\x1b\\'],
+    ['an APC', '\x1b_x\x1b\\'],
+    ['an 8-bit SOS', '\x98x\x9c'],
+    ['an 8-bit PM', '\x9ex\x9c'],
+    ['an 8-bit APC', '\x9fx\x9c'],
+    ['`ESC ( B`, what `tput sgr0` ends in', '\x1b(B'],
+    ['`ESC ) 0`', '\x1b)0'],
+    ['`ESC # 8`', '\x1b#8'],
+    ['`ESC % G`', '\x1b%G'],
+    ['`ESC $ ( B`, two intermediate bytes', '\x1b$(B'],
+    ['`ESC 7`', '\x1b7'],
+    ['`ESC 8`', '\x1b8'],
+    ['`ESC =`', '\x1b='],
+    ['`ESC >`', '\x1b>'],
+    ['a lone `ESC \\`, a terminator with no start', '\x1b\\'],
+    ['`ESC * 0` and `ESC + B`', '\x1b*0\x1b+B'],
+    ['an 8-bit CSI with an intermediate byte only (a cursor shape)', '\x9b q'],
+    ['an 8-bit CSI with a parameter and an intermediate byte', '\x9b2 q'],
+    ['a DCS with no body', '\x1bP\x1b\\'],
+  ]
+  for (const [name, sequence] of sequences) expect(stripFormat(`a${sequence}b`), name).toBe('ab')
+  // `@` is a final byte, in a 7-bit and in an 8-bit CSI, and `~` is the last final byte of an nF escape.
+  expect(stripFormat('a\x1b[1@b\x9b1@c')).toBe('abc')
+  expect(stripFormat('a\x1b(~b')).toBe('ab')
+})
+
+// A stray ESC or U+009B goes alone, and the letter after it stays: `ESC c` and `ESC M` are no sequence here, and U+009B
+// before a letter is no CSI (it has no parameter and no intermediate byte).
+test('stripFormat takes a stray ESC or U+009B out alone, and leaves the letter after it', () => {
+  expect(stripFormat('a\x1bcb')).toBe('acb')
+  expect(stripFormat('a\x1bMb')).toBe('aMb')
+  expect(stripFormat('a\x1b1b')).toBe('a1b') // a digit after a stray ESC stays too (`ESC 7` and `ESC 8` apart)
+  expect(stripFormat('h\u{9b}i')).toBe('hi')
+})
+
+// A stray ESC takes no character with it, not even through a space or a dash after it: the first character of a token,
+// a key or a flag stays (`ghp_` needs its `g`, `--token` its dash, `Bearer` its `B`), or the pattern of redact that
+// starts there misses the secret.
+test('a stray ESC takes no character of a secret: redact masks what stands after it', () => {
+  const token = 'ghp_a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8' // `ghp_` and 36 letters and digits
+  expect(redact('\x1bpassword=hunter22secret')).toBe('password=•••')
+  expect(redact(` \x1b${token}`)).toBe(' •••')
+  expect(redact('\x1b--token abcdefgh12345678')).toBe('--token •••')
+  expect(redact('x \x1b Bearer abcdefgh12345678')).toBe('x  Bearer •••')
+})
+
+// The body of a control string ends at a line end (`\n` or `\r`) as well: a lone introducer, in pasted text, must not
+// take whole lines up to a BEL or an ST far below it. It loses itself and nothing else, and the lines stay for redact.
+test('stripFormat ends the body of a control string at a line end: a lone introducer takes no line', () => {
+  expect(stripFormat('line1\n\x9d\nline2 x\nline3\x07 line4')).toBe('line1\n\nline2 x\nline3 line4')
+  expect(stripFormat('line1\r\x9d\rline2 x\rline3\x07 line4')).toBe('line1\r\rline2 x\rline3 line4')
+  expect(redact('a\x1b]0;x\npassword=hunter2secret\x07')).toBe('a0;x\npassword=•••')
+})
+
 // Each ESC of an unfinished sequence starts one and stops at the next ESC, so 128 KB of them cost one pass: a body that
 // ran on to the end of the text, looking for its terminator, would read the rest of the text again from every start.
-test('stripFormat reads 128 KB of unfinished escape sequences once: milliseconds, not seconds', () => {
-  const started = performance.now()
-  expect(stripFormat(`${'\u001b]'.repeat(65_536)}a`)).toBe(`${']'.repeat(65_536)}a`) // 131,073 units, 128 KB
-  expect(stripFormat(`${'\u001b['.repeat(65_536)}0`)).toBe(`${'['.repeat(65_536)}0`) // the same, with no final byte
-  expect(performance.now() - started).toBeLessThan(300) // generous: a body that ran on to the end took seconds
+// The other starts do the same (a C1 introducer, an 8-bit CSI, an nF escape, a start that runs into line ends), and so
+// do the runs of invisibles: 65,536 of them in a text, each judged once.
+test('stripFormat reads 128 KB of unfinished sequences and of invisibles once: milliseconds, not seconds', () => {
+  const cases: Array<[name: string, text: string, want: string]> = [
+    ['ESC ] 65,536 times and a letter', `${'\x1b]'.repeat(65_536)}a`, 'a'], // 131,073 units, 128 KB
+    ['ESC [ 65,536 times and a digit', `${'\x1b['.repeat(65_536)}0`, '0'], // the same, with no final byte
+    ['U+009D', '\x9d'.repeat(131_072), ''],
+    ['U+0090', '\x90'.repeat(131_072), ''],
+    ['U+0098', '\x98'.repeat(131_072), ''],
+    ['U+009E', '\x9e'.repeat(131_072), ''],
+    ['U+009F', '\x9f'.repeat(131_072), ''],
+    ['U+009B and a digit', '\x9b1'.repeat(65_536), '1'.repeat(65_536)],
+    ['ESC and `(`', '\x1b('.repeat(65_536), '('.repeat(65_536)],
+    ['ESC ] and 65,536 lines', `\x1b]${'a\n'.repeat(65_536)}`, 'a\n'.repeat(65_536)],
+    ['`a` and U+034F', 'a\u{34F}'.repeat(65_536), 'a'.repeat(65_536)],
+    ['`a` and ZWJ', `a${ZWJ}`.repeat(65_536), 'a'.repeat(65_536)],
+    ['`a` and U+FE0F U+FE0F U+20E3', 'a\u{FE0F}\u{FE0F}\u{20E3}'.repeat(32_768), 'a'.repeat(32_768)],
+  ]
+  // The best of three rounds: a burst of load slows one round, not all of them, while a quadratic pass takes seconds in
+  // each.
+  let best = Infinity
+  let results: string[] = []
+  for (let round = 0; round < 3; round += 1) {
+    const started = performance.now()
+    results = cases.map(([, text]) => stripFormat(text))
+    best = Math.min(best, performance.now() - started)
+  }
+  cases.forEach(([name, , want], index) => expect(results[index], name).toBe(want))
+  expect(best).toBeLessThan(300) // generous: a body that ran on to the end took seconds
 })
 
 // U+10EEEE, a private-use code point, is the placeholder that the engine keeps for itself. It refuses a text child that
@@ -539,6 +639,118 @@ test('stripFormat reads long runs of tag characters once: 100,000 of them take m
   }
   expect(results).toEqual(['ab', BLACK_FLAG.repeat(partials.length * 2_000)])
   expect(best).toBeLessThan(500)
+})
+
+// The invisible characters that are no format characters (Cf) draw nothing either: the combining grapheme joiner
+// (U+034F), the variation selectors, the Hangul and Khitan fillers, the braille blank, the enclosing keycap (U+20E3).
+// Each one hides a character from a pattern of redact (a token with U+034F in it is two words). With the joiners they
+// go in runs, judged by the characters that remain round the run: it stays only where it modifies a character above
+// U+007F (an emoji's U+FE0F, a filler after a Hangul syllable) or closes a keycap (`1` U+FE0F U+20E3).
+const INVISIBLE =
+  /^(?:[\u{200C}\u{200D}\u{2800}\u{16FE4}\u{2D7F}\u{20E3}]|(?!\p{Cf})\p{Default_Ignorable_Code_Point})$/u
+
+test('stripFormat takes every invisible character out from between two ASCII letters', () => {
+  let tried = 0
+  for (let code = 0; code <= 0x10ffff; code += 1) {
+    const char = String.fromCodePoint(code)
+    if (!INVISIBLE.test(char)) continue
+    tried += 1
+    expect(stripFormat(`a${char}b`), `U+${code.toString(16).toUpperCase().padStart(4, '0')}`).toBe('ab')
+  }
+  expect(tried, 'the class has members').toBeGreaterThan(100)
+})
+
+test('stripFormat leaves an invisible that modifies a character above U+007F, and one that closes a keycap', () => {
+  const kept: Array<[name: string, text: string]> = [
+    ['a heart with U+FE0F', '\u{2764}\u{FE0F}'],
+    ['a rocket with U+FE0F', `${ROCKET}\u{FE0F}`],
+    ['a keycap, `1` U+FE0F U+20E3', '1\u{FE0F}\u{20E3}'],
+    ['a keycap, `#` U+FE0F U+20E3', '#\u{FE0F}\u{20E3}'],
+    ['a keycap, `*` U+20E3', '*\u{20E3}'],
+    ['a family of emoji joined by ZWJ', FAMILY],
+    ['a Persian word with a ZWNJ', PERSIAN],
+    ['a Hangul syllable and the Hangul filler', '\u{AC00}\u{3164}'],
+  ]
+  for (const [name, text] of kept) expect(stripFormat(text), name).toBe(text)
+  for (const [name, flag] of FLAGS) expect(stripFormat(flag), name).toBe(flag)
+  // Keycaps glued side by side lose their marks: an ASCII word character follows each tail, and a token can begin with
+  // a digit, so a tail that one follows would split it. A keycap before a space or at the end of the text keeps its
+  // marks, and every digit is a base.
+  const keycaps = '1\u{FE0F}\u{20E3}2\u{FE0F}\u{20E3}3\u{FE0F}\u{20E3}'
+  expect(stripFormat(keycaps)).toBe('123')
+  expect(stripFormat('1\u{FE0F}\u{20E3} item')).toBe('1\u{FE0F}\u{20E3} item')
+  for (const digit of '0123456789') expect(stripFormat(` ${digit}\u{20E3}`), digit).toBe(` ${digit}\u{20E3}`)
+  // A run that goes holds no keycap tail after it: the `a` touches the `1` once U+034F is gone.
+  expect(stripFormat('a\u{34F}1\u{FE0F}\u{20E3}')).toBe('a1')
+  // A lone U+FE0F, or another invisible, after an ASCII digit is no keycap tail: it goes.
+  expect(stripFormat('1\u{FE0F} x')).toBe('1 x')
+  expect(stripFormat('1\u{34F} x')).toBe('1 x')
+  // Two keycaps whose bases touch no token character both stay: the run that stays is what the second base follows.
+  const pair = '1\u{FE0F}\u{20E3}*\u{FE0F}\u{20E3}'
+  expect(stripFormat(pair)).toBe(pair)
+  // After a space the same filler modifies nothing: it goes. The character before a run decides, not the one after it.
+  expect(stripFormat(' \u{3164}x')).toBe(' x')
+  expect(stripFormat('a\u{34F}\u{E9}')).toBe('a\u{E9}')
+  // A flag stays whole whatever follows it: its tag characters are format characters, and no run takes them.
+  for (const [name, flag] of FLAGS) expect(stripFormat(`${flag}${ZWJ}a`), name).toBe(`${flag}a`)
+})
+
+// A secret that an invisible splits is one word again once the invisible is gone, and a character that goes first
+// cannot hold it there: the run is judged by what remains round it.
+test('redact masks a token that invisible characters split, whatever else goes beside them', () => {
+  const head = 'ghp_A1b2C3'
+  const tail = 'd4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8' // with `head`: `ghp_` and 36 letters and digits
+  const split: Array<[name: string, text: string]> = [
+    ['ZWJ and U+034F, twice', `${head}${ZWJ}\u{34F}${ZWJ}\u{34F}${tail}`],
+    ['a zero-width space and U+034F', `${head}\u{200B}\u{34F}${tail}`],
+    ['BEL and U+FE0F', `${head}\x07\u{FE0F}${tail}`],
+    ['U+034F and U+20E3', `${head}\u{34F}\u{20E3}${tail}`],
+    ['the braille blank, U+2800', `${head}\u{2800}${tail}`],
+    ['a keycap tail after a digit of the token', `${head}\u{FE0F}\u{20E3}${tail}`],
+  ]
+  for (const [name, text] of split) expect(redact(text), name).toBe('•••')
+  expect(redact('Bearer \u{34F}abcdefgh12345678')).toBe('Bearer •••')
+  // The keycap exception is exact: another run after a lone digit goes, and so does a keycap tail after a digit that a
+  // character of a token (a letter, a digit, `_` or `-`) touches, or that one follows: a token can begin with a digit.
+  expect(redact('Bearer 1\u{34F}abcdefgh12345678')).toBe('Bearer •••')
+  expect(redact('Bearer 1\u{FE0F}abcdefgh12345678')).toBe('Bearer •••')
+  expect(redact('Bearer 1\u{FE0F}\u{20E3}abcdefgh12345678')).toBe('Bearer •••')
+  expect(redact('ghp_1\u{FE0F}\u{20E3}abcdefgh12345678abcdefgh12345678')).toBe('•••')
+  expect(redact('sk-1\u{FE0F}\u{20E3}abcdefgh12345678')).toBe('•••')
+  for (const before of ['a', 'Z', '7', '_', '-']) {
+    expect(stripFormat(`${before}1\u{FE0F}\u{20E3}`), before).toBe(`${before}1`)
+  }
+})
+
+// A Bearer token can begin with a digit, and it holds more than a word does: `.`, `~`, `+` and `/` as well. A keycap
+// tail between that digit and the rest would split it, so the tail goes before any character a token can hold. A lone
+// U+FE0F, or another run, after the digit is no keycap tail at all.
+test('redact masks a Bearer token that begins with a digit: a keycap tail goes before any token character', () => {
+  expect(redact('Bearer 4\u{20E3}/3Q7x9Zk2LmN4pR8s')).toBe('Bearer •••')
+  expect(redact('Bearer 4\u{FE0F}\u{20E3}/3Q7x9Zk2LmN4pR8s')).toBe('Bearer •••')
+  for (const after of ['A', 'Z', '_', '-', '9', '.', '~', '+', '/']) {
+    expect(redact(`Bearer 1\u{FE0F}\u{20E3}${after}bcdefgh12345678`), after).toBe('Bearer •••')
+  }
+  expect(redact('Bearer 1\u{20E3}abcdefgh12345678')).toBe('Bearer •••')
+  expect(redact('Bearer 1\u{34F}/abcdefgh12345678')).toBe('Bearer •••')
+  expect(redact('Bearer 1\u{FE0F}/abcdefgh12345678')).toBe('Bearer •••')
+})
+
+// What one pass takes out leaves nothing for a second pass to take: every text of one to three characters from the hard
+// ones (the escapes and their pieces, the invisibles, a joiner, an emoji, a space) comes out as it stays.
+test('stripFormat is idempotent over every short text of the hard characters', () => {
+  const alphabet = [
+    '\x1b', '\u{9b}', '\u{9c}', '\x07', '[', ']', '(', 'B', 'a', '1', ZWJ, ZWNJ, '\u{34F}', '\u{FE0F}', '\u{20E3}',
+    ROCKET, ' ',
+  ]
+  let level = ['']
+  for (let length = 1; length <= 3; length += 1) {
+    level = level.flatMap(prefix => alphabet.map(char => `${prefix}${char}`))
+    for (const text of level) {
+      const once = stripFormat(text)
+      expect(stripFormat(once), JSON.stringify(text)).toBe(once)
+    }
+  }
 })
 
 test('shorten and redact keep the joiners of an emoji sequence and of a Persian word, as stripFormat does', () => {
