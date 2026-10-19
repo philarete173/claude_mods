@@ -324,6 +324,38 @@ const PROMPT_HOLDER: Plugin = {
     })
   },
 }
+// A plugin beneath the mod's that answers a prompt as a hook beneath it may: a text that starts with `drop` is refused,
+// one that starts with `rewrite` enters as `entered`, with a `drop` that holds undefined as a result may; any other
+// goes on. Like any plugin of a test it closes over nothing of this file.
+const PROMPT_ANSWERER: Plugin = {
+  name: 'prompt-answerer',
+  tier: 'append',
+  register(on) {
+    on('prompt.submit', (_$, e, next) => {
+      if (e.text.startsWith('drop')) return { drop: 'x' }
+      if (e.text.startsWith('rewrite')) return { text: 'entered', drop: undefined }
+
+      return next(e)
+    })
+  },
+}
+// A plugin above the mod's that notes how the link of the mod settled on every prompt, as `next.trace` names it
+// (`returned` for a hook that answered, `kept` for one that failed after `next`: the answer from beneath stands then),
+// and says what it saw when it is asked. Like any plugin of a test it closes over nothing of this file.
+const PROMPT_TRACER: Plugin = {
+  name: 'prompt-tracer',
+  tier: 'prepend',
+  register(on) {
+    const seen: string[] = []
+    on('prompt.submit', async (_$, e, next) => {
+      const answered = await next(e)
+      seen.push(next.trace.find(link => link.plugin === 'session-panel')?.outcome ?? 'none')
+
+      return answered
+    })
+    on('command.run', { command: 'read-prompt-tracer' }, async () => ({ text: JSON.stringify(seen) }))
+  },
+}
 // A plugin beneath the mod's that holds every turn end for 500 ms before it passes it on, as a slow plugin beneath may.
 // Like any plugin of a test it closes over nothing of this file.
 const TURN_HOLDER: Plugin = {
@@ -392,6 +424,8 @@ const WITH_CLOCK_SKEW = { plugins: [READER, CLOCK_SKEW], timeoutMs: 30_000 }
 const WITH_UNSTARTED = { plugins: [READER, UNSTARTED], timeoutMs: 30_000 }
 const WITH_PROMPT_PROBE = { plugins: [READER, PROMPT_PROBE], timeoutMs: 30_000 }
 const WITH_PROMPT_HOLDER = { plugins: [READER, PROMPT_HOLDER], timeoutMs: 30_000 }
+const WITH_PROMPT_ANSWERER = { plugins: [READER, PROMPT_ANSWERER], timeoutMs: 30_000 }
+const WITH_PROMPT_TRACER = { plugins: [READER, PROMPT_ANSWERER, PROMPT_TRACER], timeoutMs: 30_000 }
 const WITH_TURN_HOLDER = { plugins: [READER, TURN_HOLDER], timeoutMs: 30_000 }
 const WITH_START_HOLDER = { plugins: [READER, START_HOLDER], timeoutMs: 30_000 }
 const WITH_CLOCK_SPOILER = { plugins: [READER, CLOCK_SPOILER], timeoutMs: 30_000 }
@@ -5642,6 +5676,400 @@ test('a compaction is logged and refreshes usage; a skipped one and a subagent\'
     expect((await readState($)).log).toHaveLength(1)
   })
 
+// A message that the person types over a running turn (`turnId` set) waits in the queue for the next model request of
+// the main loop, and no turn.start comes for it yet, so prompt.submit writes its `you` line, at the time it arrived.
+// The `you` lines of the log, oldest first; and a message typed over the turn `t1`.
+const youLines = async ($: Engine): Promise<LogEntry[]> =>
+  ((await readState($)).log ?? []).filter(entry => entry.who === 'you').reverse()
+const typeOver = ($: Engine, text: string) => submitNotice($, text, { kind: 'composer' }, 't1')
+
+test('a message typed over a running turn has its you line, masked and cut to 512, at the time it arrived',
+  WITH_PROMPT_HOLDER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await startTurn($, 't1')
+    await clock.advance(10)
+    const arrivedAt = clock.now()
+    // The format character goes, the secret is masked and the head is cut.
+    const text = `${BIDI}use token=hunter22secret ${'x'.repeat(600)}`
+
+    const typed = typeOver($, text) // the chain beneath holds it for 500 ms
+    await clock.settle()
+    await clock.advance(500)
+
+    expect(await typed).toEqual({ text, origin: { kind: 'composer' } })
+    const [line, ...others] = await youLines($)
+    expect(others).toEqual([])
+    expect(line).toMatchObject({ at: arrivedAt, who: 'you', kind: 'info' })
+    expect(line?.text.length).toBe(512)
+    expect(line?.text.startsWith('use token=••• xxx')).toBe(true)
+    expect(line?.text.endsWith('x…')).toBe(true)
+  })
+
+test('a message from the composer, the bridge, the SDK or Slack has its you line', WITH_READER, async ($, on) => {
+  bottom(on, mock.clock(on))
+  await $.session.start(START)
+  await startTurn($, 't1')
+
+  for (const origin of [{ kind: 'composer' }, { kind: 'bridge' }, { kind: 'sdk' }, { kind: 'slack-ping' }] as const) {
+    await submitNotice($, `from ${origin.kind}`, origin, 't1')
+  }
+
+  expect((await youLines($)).map(line => line.text)).toEqual([
+    'from composer', 'from bridge', 'from sdk', 'from slack-ping',
+  ])
+})
+
+// The engine's own notice and a peer's message come into a running turn too, and they are not the person's words: no
+// line for them, and nothing kept for the turn that drains one, which writes the line that any turn writes.
+test('a message that the engine or a peer delivers into a running turn has no line, and a turn that drains it has one',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await startTurn($, 't1')
+
+    await submitNotice($, 'from task-notification', { kind: 'task-notification' }, 't1')
+    await submitNotice($, 'from peer', { kind: 'peer' }, 't1')
+    expect(await logRows($)).toEqual([])
+
+    await $.turn.start({ text: 'from peer', turnId: 't2' })
+    expect((await youLines($)).map(line => line.text)).toEqual(['from peer'])
+  })
+
+// With no `turnId` the prompt starts a turn of its own, and the turn.start of that turn has the line.
+test('a message typed while the loop is idle has no line from prompt.submit: its turn.start has it', WITH_READER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+
+    await submitNotice($, 'and the tests', { kind: 'composer' })
+    expect(await logRows($)).toEqual([])
+
+    await $.turn.start({ text: 'and the tests', turnId: 't1' })
+    expect((await youLines($)).map(line => line.text)).toEqual(['and the tests'])
+  })
+
+// A drop is a `drop` that is not undefined: a result may carry the key and leave it undefined, and the prompt entered.
+// The line is of what entered, which a hook beneath may have changed.
+test('a prompt that a hook beneath dropped has no line; one with an undefined drop has the line of what entered',
+  WITH_PROMPT_ANSWERER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await startTurn($, 't1')
+
+    expect(await typeOver($, 'drop it')).toEqual({ drop: 'x' })
+    expect(await logRows($)).toEqual([])
+    // It never entered, so the same text that comes again is a new prompt, with its line.
+    await $.turn.start({ text: 'drop it', turnId: 't2' })
+    expect(await typeOver($, 'rewrite it')).toEqual({ text: 'entered', drop: undefined })
+
+    expect((await youLines($)).map(line => line.text)).toEqual(['drop it', 'entered'])
+  })
+
+// The message that is kept is the one that entered, which a hook beneath may have changed: the turn that drains it has
+// that text.
+test('a message that a hook beneath changed is kept as it entered: the turn that drains it has no second line',
+  WITH_PROMPT_ANSWERER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await startTurn($, 't1')
+
+    await typeOver($, 'rewrite it') // it enters as `entered`
+    await $.turn.start({ text: 'entered', turnId: 't2' })
+
+    expect((await youLines($)).map(line => line.text)).toEqual(['entered'])
+  })
+
+// A prompt that a hook beneath dropped has no `text`, which the hook of the mod must not read. A hook that fails after
+// `next` leaves the answer of the chain as it was, so the answer shows nothing; the trace says how the link settled.
+test('the hook of prompt.submit answers normally when a hook beneath dropped the prompt', WITH_PROMPT_TRACER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await startTurn($, 't1')
+
+    expect(await typeOver($, 'drop it')).toEqual({ drop: 'x' })
+
+    const seen = JSON.parse((await $.command.run({ ...RUN, command: 'read-prompt-tracer' })).text ?? '[]')
+    expect(seen).toEqual(['returned'])
+  })
+
+test('a message of blanks has no line', WITH_READER, async ($, on) => {
+  bottom(on, mock.clock(on))
+  await $.session.start(START)
+  await startTurn($, 't1')
+
+  await typeOver($, ' \n ')
+
+  expect(await logRows($)).toEqual([])
+})
+
+// The origin decides the label, not the text: a turn of the engine's own has its tag at the head (engineTag), and the
+// person may paste one.
+test('a message of the person that opens with the tag of an engine turn is a you line all the same', WITH_READER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await startTurn($, 't1')
+
+    await typeOver($, '<task-notification>done</task-notification>')
+
+    expect(await logRows($)).toEqual([['you', '<task-notification>done</task-notification>', 'info', undefined]])
+  })
+
+// The turn that drains a message skips its line by the text, whatever the label of that line would be: a text with an
+// engine tag at its head would be an `engine` line, and the message has its line already.
+test('a turn that drains a message with an engine tag at its head writes no second line, whatever its label',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await startTurn($, 't1')
+    const text = '<task-notification>x</task-notification>'
+    await typeOver($, text)
+
+    await $.turn.start({ text, turnId: 't2' })
+
+    expect(await logRows($)).toEqual([['you', text, 'info', undefined]])
+  })
+
+// `a.` repeated is a text that the URL pattern of redact reads in quadratic time: the message is cut to its head first
+// (logHead), as the prompt of a turn.start is.
+test('a message of 128 KB typed over a running turn is cut to its head: the hook returns at once', SLOW_READER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await startTurn($, 't1')
+
+    const started = performance.now()
+    await typeOver($, 'a.'.repeat(65_536)) // 131,072 units, 128 KB
+    const took = performance.now() - started
+
+    expect(took).toBeLessThan(300) // generous: the URL pattern took seconds on it
+    expect((await youLines($)).map(line => line.text)).toEqual([`${'a.'.repeat(255)}a…`])
+  })
+
+// The read of the arrival at the entry of prompt.submit may fail: the line is written at a read after the chain then.
+test('a message whose clock read at the entry fails has its line at a read after the chain', WITH_CLOCK_SPOILER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await startTurn($, 't1')
+    await clock.advance(10)
+
+    await $.command.run({ ...RUN, command: 'refuse-clock' })
+    await typeOver($, 'and the tests')
+
+    expect(await youLines($)).toEqual([{ at: clock.now(), who: 'you', text: 'and the tests', kind: 'info' }])
+  })
+
+// No model request of the main loop took the message in, so the terminal starts a turn of its own for it, with its text
+// (the last queued message's): that turn has no second line. The list is taken at that turn.start, so the same text
+// that comes again is a new prompt.
+test('a message that the terminal drains as a turn of its own has the one line, from its arrival', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await startTurn($, 't1')
+    await clock.advance(10)
+    const typedAt = clock.now()
+    await typeOver($, 'and the tests')
+    await endTurn($, 't1') // no request took the message in
+    await clock.advance(10)
+
+    expect(await $.turn.start({ text: 'and the tests', turnId: 't2' })).toEqual({ turnId: 't2' })
+    await clock.advance(10)
+    const againAt = clock.now()
+    await $.turn.start({ text: 'and the tests', turnId: 't3' })
+
+    expect((await youLines($)).map(line => [line.text, line.at])).toEqual([
+      ['and the tests', typedAt], ['and the tests', againAt],
+    ])
+  })
+
+test('two messages typed over a turn have a line each, and the turn that drains them, with the last text, has none',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await startTurn($, 't1')
+    await clock.advance(10)
+    const firstAt = clock.now()
+    await typeOver($, 'first')
+    await clock.advance(10)
+    const secondAt = clock.now()
+    await typeOver($, 'second')
+    await endTurn($, 't1')
+
+    await $.turn.start({ text: 'second', turnId: 't2' })
+
+    expect((await youLines($)).map(line => [line.text, line.at])).toEqual([['first', firstAt], ['second', secondAt]])
+  })
+
+// Every turn.start empties the list, whatever its text: a message that was kept before it is a new prompt when it comes
+// again later.
+test('a turn.start empties the list whatever its text: a text kept before it has a line when it comes again',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await startTurn($, 't1')
+    await typeOver($, 'A')
+
+    await $.turn.start({ text: 'B', turnId: 't2' })
+    await $.turn.start({ text: 'A', turnId: 't3' })
+
+    expect((await youLines($)).map(line => line.text)).toEqual(['A', 'B', 'A'])
+  })
+
+// The engine takes every queued message into the conversation before a model request of the main loop: one that a
+// request took in is no longer waiting, and its text that comes again is a new prompt.
+test('a message that a model request of the main loop took in is a new prompt when its text comes again', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await startTurn($, 't1')
+    await typeOver($, 'and the tests')
+    await runStep($, clock, { turnId: 't1', index: 1 })
+    await endTurn($, 't1')
+
+    await $.turn.start({ text: 'and the tests', turnId: 't2' })
+
+    expect((await youLines($)).map(line => line.text)).toEqual(['and the tests', 'and the tests'])
+  })
+
+test('a request of a subagent takes no message of the main loop in: the line of the message is the only one',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.agent.spawn(SPAWN) // a1
+    await startTurn($, 't1')
+    await clock.advance(10)
+    const typedAt = clock.now()
+    await typeOver($, 'and the tests')
+    await runStep($, clock, { turnId: 't1', index: 1, agentId: 'a1' })
+    await endTurn($, 't1')
+
+    await $.turn.start({ text: 'and the tests', turnId: 't2' })
+
+    expect((await youLines($)).map(line => [line.text, line.at])).toEqual([['and the tests', typedAt]])
+  })
+
+// The message is kept as soon as the chain beneath has answered, before the read of its arrival is waited for: a turn
+// that starts while that read is held finds it kept.
+test('a message is kept for the turn that drains it before the read of its arrival lands', WITH_CLOCK_SPOILER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await startTurn($, 't1')
+    const heldAt = clock.now() + 500 // the read that is held answers 500 ms later, and that is the time of the line
+    await $.command.run({ ...RUN, command: 'hold-clock', args: '500' })
+
+    const typed = typeOver($, 'and the tests') // the read of its arrival is the held one
+    await clock.settle()
+    await $.turn.start({ text: 'and the tests', turnId: 't2' })
+    await clock.advance(500) // the read lands, and the line with it
+    await typed
+
+    expect((await youLines($)).map(line => [line.text, line.at])).toEqual([['and the tests', heldAt]])
+  })
+
+// The request was made with the messages that were queued when it started: the hook empties the list at its entry,
+// before its first wait, and a message that comes during that wait is for the next request.
+test('a message that comes while a main request waits for its clock read stays: the request was made without it',
+  WITH_CLOCK_SPOILER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await startTurn($, 't1')
+    await $.command.run({ ...RUN, command: 'hold-clock', args: '500' })
+
+    const stream = $.turn.step({ model: 'claude-sonnet-5', messageCount: 1, turnId: 't1', index: 1 })
+    const streaming = (async () => {
+      let item = await stream.next() // its first read of the clock is the held one
+      while (item.done !== true) item = await stream.next()
+    })()
+    await clock.settle()
+    const typedAt = clock.now()
+    await typeOver($, 'and the tests')
+    await drive(clock, streaming)
+    await endTurn($, 't1')
+
+    await $.turn.start({ text: 'and the tests', turnId: 't2' })
+
+    expect((await youLines($)).map(line => [line.text, line.at])).toEqual([['and the tests', typedAt]])
+  })
+
+// A turn.start takes the list at its entry, before the chain beneath has run: a message that comes while the chain
+// holds the start is for the request that follows, not for this start.
+test('a message that comes while the chain beneath holds a turn start stays for the turn that drains it',
+  WITH_START_HOLDER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    const first = $.turn.start({ text: 'go', turnId: 't1' }) // the chain beneath holds it for 500 ms
+    await clock.settle()
+    await typeOver($, 'and the tests')
+    await clock.advance(500)
+    await first
+    await endTurn($, 't1')
+
+    const second = $.turn.start({ text: 'and the tests', turnId: 't2' })
+    await clock.advance(500)
+    await second
+
+    expect((await youLines($)).map(line => line.text)).toEqual(['and the tests', 'go'])
+  })
+
+// The last 8 messages are kept, and a turn that has the text of any of them has no line: the first of 8 is among the
+// last 8, the first of 9 is not.
+test('a turn has no line for any of the last 8 messages that have one, and has a line for an older one', WITH_READER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await startTurn($, 't1')
+
+    for (const count of [8, 9]) {
+      for (let i = 1; i <= count; i += 1) await typeOver($, `${count}: ${i}`)
+      await $.turn.start({ text: `${count}: 1`, turnId: `t${count}` })
+    }
+
+    const firsts = (await youLines($)).map(line => line.text).filter(text => text.endsWith(': 1'))
+    expect(firsts).toEqual(['8: 1', '9: 1', '9: 1'])
+  })
+
+// A message that waits when the conversation ends (a /clear, a resume) must not hide a line of the next conversation,
+// whose first turn may have the same text.
+for (const reason of ['clear', 'resume'] as const) {
+  test(`a ${reason} drops the messages kept for a turn that drains them: the next conversation has its first line`,
+    SLOW_READER, async ($, on) => {
+      const clock = mock.clock(on, { now: 1_000_000 })
+      bottom(on, clock)
+      await $.session.start(START)
+      await clock.advance(1)
+      await startTurn($, 't1')
+      await typeOver($, 'again')
+
+      await $.session.end({ reason, sessionId: 's1', resume: { id: 's1' } })
+      await $.turn.start({ text: 'again', turnId: 't2' })
+
+      expect((await youLines($)).map(line => line.text)).toEqual(['again'])
+    })
+}
+
 // The count of every line put on the log, which the log's 200 lines do not hold once there are more.
 test('every path that puts a line on the log adds one to its count', SLOW_READER, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
@@ -5651,6 +6079,7 @@ test('every path that puts a line on the log adds one to its count', SLOW_READER
 
   const paths: [name: string, run: () => Promise<unknown>][] = [
     ['a prompt', () => $.turn.start({ text: 'fix it', turnId: 't1' })],
+    ['a message typed over the running turn', () => typeOver($, 'and the tests')],
     ['a call of a tool', () => drive(clock, $.tool.call(readCall()))],
     ['the start of a subagent', () => $.agent.spawn(SPAWN)],
     ['the end of a subagent', () => finish($, 'a1')],

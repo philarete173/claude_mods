@@ -6,7 +6,8 @@
 // reference written in another file.
 import { atom, read, update } from 'claude-code'
 import type {
-  EngineInterface, PluginState, ProcessRunResult, Register, SessionContextUsage, SessionCost, SessionRateLimit,
+  EngineInterface, PluginState, ProcessRunResult, PromptOrigin, Register, SessionContextUsage, SessionCost,
+  SessionRateLimit,
 } from 'claude-code'
 
 import {
@@ -194,6 +195,17 @@ let idleSince: number | null = null
 // How long the main loop must have been idle, in ms, before a notice that comes with no turn running is taken as coming
 // at the end of its task (prompt.submit).
 const IDLE_GAP_MS = 3000
+
+// The origins of a prompt.submit that are the person's own words: the composer, the Remote Control bridge, the SDK host
+// and the owner's ping from Slack. Any other is the engine's, a peer's, a schedule's or a plugin's.
+const PERSON_ORIGINS = new Set<PromptOrigin['kind']>(['composer', 'bridge', 'sdk', 'slack-ping'])
+
+// The messages that the person typed over a running turn, whose line prompt.submit wrote, and that no model request of
+// the main loop has taken in since: the last 8. The engine takes every queued message into the conversation before each
+// such request, so a main turn.step empties the list. A message that the turn never took in is drained by the terminal
+// as a turn of its own, with the text of the last queued one, and that message has its line already: turn.start takes
+// the list at its entry and writes no line for a text that is in it.
+let unfolded: string[] = []
 
 // For each root, how many reads in a row had a status, or a diff against HEAD, that threw. A throw is a timeout or a
 // git that cannot be started; a non-zero exit, as outside a repository, is none. The count of a root rises by one for
@@ -788,6 +800,8 @@ export const register: Register = on => {
     if (e.reason === 'clear' || e.reason === 'resume') {
       lastUsd = null
       handbacks.clear()
+      // A message that waits (unfolded) must not hide the `you` line of the next conversation.
+      unfolded = []
       logEpoch += 1
       resetsRunning += 1
       try {
@@ -842,6 +856,10 @@ export const register: Register = on => {
     // the turn (turn.complete), and a notice that arrives from now on must find the loop busy (prompt.submit).
     mainTurns += 1
     idleSince = null
+    // The turn takes in the messages that wait (unfolded), and the list starts over. Taken here, before the chain runs:
+    // a message that comes while the chain holds the start is for the next request, not for this start.
+    const queued = unfolded
+    unfolded = []
     const started = await next(e)
     // The first turn of the main agent opens the tree to the reads (hasMainTurn), and asks for one. The types give this
     // event no agentId (a subagent's run raises no turn.start), so one that had it is not a main turn.
@@ -857,8 +875,9 @@ export const register: Register = on => {
     // A turn the engine started on its own opens with a hyphenated lowercase tag (engineTag: `<task-notification>`);
     // its line is the name of the tag. Any other prompt is the person's, one that opens with a pasted `<token…` or
     // `<div class=…>` too, and its line is its head. Either line is masked: a tag can be a lowercase token. A turn with
-    // no text (a continuation) is no line of the log.
-    if (e.text.trim() !== '') {
+    // no text (a continuation) is no line of the log, and nor is one with the text of a message that has its line
+    // already (queued).
+    if (e.text.trim() !== '' && !queued.includes(e.text)) {
       const tag = engineTag(e.text)
       await addLog(
         $, now, tag === undefined ? 'you' : 'engine', shorten(redact(tag ?? logHead(e.text)), LOG_TEXT_MAX), 'info',
@@ -871,6 +890,10 @@ export const register: Register = on => {
   // One model request, main loop or subagent. The chunks pass on as they are; only the first chunk and the stop are
   // timed, so the stream waits on at most three clock reads.
   on('turn.step', async function* ($, e, next) {
+    // The engine takes every queued message into the conversation before each request of the main loop, so none of
+    // those that have their line (unfolded) waits any more. At the entry, before any wait: a message that comes later
+    // is for the next request.
+    if (e.agentId === undefined) unfolded = []
     const tStart = await $.clock.now()
     let tFirst: number | null = null
     let tEnd: number | null = null
@@ -1040,11 +1063,25 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     // How long the loop has been idle, and the time of the arrival, are read here, before the chain runs: the `next(e)`
     // of a notice taken in while idle resolves only after its own turn has started, and the turn.start of that turn
-    // sets idleSince to null. The read has a catch of its own, so that one that nothing uses (a prompt that is no
-    // notice) never rejects unhandled.
+    // sets idleSince to null. The read has a catch of its own, so that one that nothing uses (a prompt that is neither
+    // a notice nor a message typed over a turn) never rejects unhandled.
     const idleAt = idleSince
     const arrival = $.clock.now().catch(() => null)
     const submitted = await next(e)
+    // A message that the person types over a running turn (`turnId` set) waits in the queue for the next model request,
+    // and no turn.start comes for it yet, so its line is written here, at its arrival; one typed while the loop is idle
+    // starts a turn of its own, and that turn.start writes it. What entered counts: a prompt that a hook beneath
+    // dropped (a `drop` that is not undefined) has no line. The origin decides the label, not the text. The message is
+    // kept (unfolded) as soon as the chain has answered, before any wait: the turn.start and the turn.step that may
+    // come while its line is written read the list at their entries.
+    if (e.turnId !== undefined && PERSON_ORIGINS.has(e.origin?.kind) && submitted.drop === undefined) {
+      const { text } = submitted
+      if (text.trim() !== '') {
+        unfolded = [...unfolded, text].slice(-8)
+        const at = (await arrival) ?? (await $.clock.now())
+        await addLog($, at, 'you', shorten(redact(logHead(text)), LOG_TEXT_MAX), 'info')
+      }
+    }
     // The notice of a background task is the engine's word that the task is over, and how it ended. Only a prompt that
     // the engine raised for a task counts (the origin), not the same text typed or sent by a plugin; one that names no
     // row of tasks, an earlier session's or a subagent's, closes nothing (closeTask).
