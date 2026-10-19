@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.5.1 — 2026-10-20
+
+- A text is cleaned of whole escape sequences. A control string (DCS, SOS, PM, APC), an 8-bit CSI, an `ESC ( B` (which
+  `tput sgr0` ends in) and a two-byte escape left a tail that stuck to the next word and hid a token from the mask; they
+  go whole now, as colour and title sequences did. The default-ignorable code points that are no format characters, and
+  a few other invisible ones (U+2800, U+20E3, …), go too where they could split a secret, and stay in an emoji or a
+  keycap. The short commit of a detached HEAD and the kind of a rate limit are cleaned as well.
+- The mask catches more: the value of a key with a quote after its name (`"password": "…"`), the credential of an
+  Authorization header with a scheme other than Bearer and Basic (`Token …`), a quoted Authorization value, and a GitHub
+  or Slack token or a `Bearer …` that a removed escape sequence glued to a word. The Subagents rows (a subagent's type
+  and description) are masked now, as the Log lines are. The README names the kinds the mask does not catch, and the
+  design spec lists them.
+- A turn that the engine starts with a tag of its own (`<task-notification>`, `<teammate-message teammate_id="lead">`)
+  is logged `engine` with the tag's name, masked. Any other text, one that starts with `<` too (`<div class="x">`), is
+  yours: `you`, masked. 0.5.0 took every text that starts with `<` for the engine's, and a pasted `<ghp_…` showed in the
+  Log.
+- A message you type while a turn runs has its `you` line. The engine takes it into the running turn, so no turn starts
+  for it, and the Log showed nothing. The desktop writes the line when the model takes the message in, a terminal when
+  you press Enter; a message still queued when the turn ends keeps one line.
+- A task's time that ran to a late notice is a bound. The engine takes a task's notice in at the next model request of a
+  running turn, or when the session is idle, so a shell task's time could run far past the task's end (`echo hi` showed
+  12.2s). When the notice came into a running turn, less than 3 s after the main agent's last turn ended, or before the
+  pane has seen a turn end, the time reads `≤12.2s` in Tasks and `✓ ≤12.2s` on the Log's end line (`✗ ≤…` for a failure,
+  `≤…` for a stop). After the session has been idle for 3 s or more it is exact. A notice with neither `<summary>` nor
+  `<result>` closes no row.
+- In a terminal an ASCII capital letter in an MCP chip counts one cell, as it is drawn: the cells are even. The desktop
+  draws a capital wider and still counts 1.5. 0.5.0 counted 1.5 on both, so in a terminal names in capitals could cost a
+  spare row.
+- The docs follow the desktop 2.1.288: a Bash command that runs past its timeout is killed (exit 143) and gets no row in
+  Tasks, a message you type while a command runs waits until it ends, and the desktop's own task list shows foreground
+  calls and agents too. 0.5.0 said that the timeout or a message moved the command to the background. The mod still
+  handles a command that a host sends there by its timeout, or that is moved there (Ctrl+B in a terminal).
+- The Log keeps 200 lines, so a pane with room for more than 201 Log rows shows blank rows above `+N more`: a known
+  limit. The 0.4.2 entry's "no blank rows above `+N more`" holds up to that height.
+
 ## 0.5.0 — 2026-10-16
 
 - A Tasks section, after Subagents, lists the background tasks of the main agent: a Bash command that runs in the

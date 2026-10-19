@@ -10,7 +10,7 @@
 > the background tasks after the Subagents, in rows built as theirs are (§6.7). The HTML preview
 > `docs/design/session-panel-preview.html` stays the approved v2 mock-up and predates these changes.
 
-Date: 2026-10-07. Status: implemented and shipped (0.5.0). The user approved the look in
+Date: 2026-10-07. Status: implemented and shipped (0.5.1). The user approved the look in
 `docs/design/session-panel-preview.html` before implementation.
 
 Scope: presentation only. The sections, their content, the formats and every formula of `2026-10-07-session-panel-design.md` §3–§4 stay as they are. Where the two specs differ on looks, this one replaces §3.1 of the main spec. Engine 2.1.288. "d.ts" below means `plugin-authoring/types/claude-code.d.ts` of that engine, cited by line.
@@ -187,6 +187,8 @@ const LIMIT_PCT_CELLS = 5 // `100%`
 const COST_CELLS = 7 // `$148.59`, `<$0.001`
 // A time from 100 hours on takes 8 cells (`100h 00m`), the widest this cell holds. A time of 1000 hours or more
 // (`1000h 00m`) would overflow it, and taskTime draws it as not known; a cost of $1000 or more overflows COST_CELLS.
+// The `≤` of a bound takes a cell of its own, so `≤99h 59m` is the widest bound the cell holds, and `≤100h 00m` is
+// drawn as not known.
 const TASK_TIME_CELLS = 8
 const TIME_CELLS = 8 // `22:09:07`
 // The desktop widths of an agent type are measured on the live pane, in the app's own font. In the log,
@@ -224,6 +226,8 @@ const HEADER_ROWS = 1
 // free.
 const CHIP_GAP_CELLS = 2
 const CHIP_MARGIN_CELLS = 2
+// The cells of an ASCII capital in a chip name where the font is proportional: the desktop's 9 to 11 px against CELL_PX
+const WIDE_CAPITAL_CELLS = 1.5
 const MIN_LOG_TEXT_CELLS = 8 // the least text a log line keeps: below it `who` gives way, then the outcome column
 // In a narrow pane the identity column gives way first, as in the log: a subagent row or a task row leaves out its `@…`
 // tag (the `@type` of a subagent, the `@kind` of a task), on every row of its list, when the description would keep
@@ -715,6 +719,7 @@ const rows = rateLimits.map(limit => {
     </Box>
   )
 })
+
 return section(d, 'usage', 'Usage', `${label(lead.kind)} ${fmtPct(lead.percentUsed, 0)}`, rows)
 ```
 
@@ -843,11 +848,12 @@ function agentsSection(d: Draw): Block {
 // back since it began), and how long a finished one ran. Null where it is not known: a running task whose start the mod
 // did not see, a finished one that has no duration, and one whose time is wider than its cell (1000 hours or more: no
 // task runs that long, but a notice can carry any safe integer as its duration). A value is drawn whole, never cut, so
-// such a time is drawn as not known, and the row stays one line.
+// such a time is drawn as not known, and the row stays one line. A finished task whose time is a bound (durationAtMost)
+// has `≤` before it, and the width counts it.
 function taskTime(task: TaskRow, now: number): string | null {
   const ran = task.startedAt === null ? null : Math.max(0, now - task.startedAt)
   const ms = task.status === 'running' ? ran : task.durationMs
-  const text = ms === null ? null : fmtDuration(ms)
+  const text = ms === null ? null : `${task.durationAtMost === true ? '\u{2264}' : ''}${fmtDuration(ms)}`
 
   return text === null || text.length > TASK_TIME_CELLS ? null : text
 }
@@ -887,11 +893,20 @@ The row has four columns. The description and the tag column sit in one group, b
      same x.
    - Tasks: the time, `TASK_TIME_CELLS`, 8 cells (`taskTime`). A running task shows how long it has run, never under 0
      (the wall clock may have been put back since it began); the pane redraws at least every 30 s, so the time moves
-     with it. An ended task shows how long it ran. The time is unknown for a running task whose start the mod did not
-     see, for an ended one with no duration, and for one whose time is wider than the cell. A time from 100 hours on
-     takes 8 cells (`100h 00m`), the widest this cell holds, so `999h 59m` still fits; a time of 1000 hours or more does
-     not: no task runs that long, but a notice can carry any safe integer as its duration. A value is never cut, so such
-     a time is drawn as not known, a dim `—`, and the row stays one line.
+     with it. An ended task shows how long it ran, and a time that is a bound has `≤` before it (below). The time is
+     unknown for a running task whose start the mod did not see, for an ended one with no duration, and for one whose
+     time is wider than the cell. A time from 100 hours on takes 8 cells (`100h 00m`), the widest this cell holds, so
+     `999h 59m` still fits; a bound takes a cell more for its `≤`, so `≤99h 59m` is the widest one shown and `≤100h 00m`
+     does not fit; a time of 1000 hours or more does not either: no task runs that long, but a notice can carry any safe
+     integer as its duration. A value is never cut, so such a time is drawn as not known, a dim `—`, and the row stays
+     one line.
+   - **A bound.** A shell notice carries no time, so the time runs from the start to the notice. The engine takes a
+     notice in at the next model request of a running turn, or when the session is idle, so it may come later than the
+     task's end. When it came into a running turn, less than 3 s after the main agent's last turn ended, or before the
+     pane has seen a turn end (just after it loaded), the task ran at most that long, and the time is a bound: `≤12.2s`.
+     A notice that comes after the session has been idle for 3 s or more is taken at the task's end, and the time is
+     exact. A notice that carries its own `<duration_ms>` (a Workflow's) and a `TaskStop`, which ends the row at once,
+     give exact times too. The end line of the Log has the same `≤` (§6.10).
 
 **In a narrow pane the tag gives way first**, as `who` does in the log (§6.10). `statusSection` works out what a
 description would keep beside the tag: the body less the mark (`markCellsOf(d)`: `ICON_CELLS` on the desktop,
@@ -972,16 +987,17 @@ drawn. On the desktop that is 3 cells = the 2-cell icon slot + the 1-cell gap. O
 // The cells that the name of a chip takes, counted high, because the estimate of chipRows must err on the side of more
 // rows (the 0.4.0 spec, §3.2): `.length` counts a CJK character as one cell, and it is drawn two wide. Every code point
 // above U+007F counts as 2 cells (the wide ones, CJK and emoji, and some that are not, an accented letter), a capital
-// ASCII letter (A to Z) as 1.5, every other as 1, and the total of a name is rounded up. A capital is more than a cell
-// because the desktop's font is proportional: the live check of 2026-10-13 (docs/live-check-2026-10-13-0.4.0.md)
-// measured capitals at about 9 to 11 px against the 8 px of a cell (CELL_PX), so two long names in capitals at the edge
-// of a line made the estimate a row short. It goes by code point, not by UTF-16 unit: an astral emoji is one code point
-// and 2 cells, where its two units would make 4.
-const nameCells = (name: string): number => {
+// ASCII letter (A to Z) as `capital` cells, every other as 1, and the total of a name is rounded up. On the desktop a
+// capital is more than a cell, because its font is proportional: the live check of 2026-10-13
+// (docs/live-check-2026-10-13-0.4.0.md) measured capitals at about 9 to 11 px against the 8 px of a cell (CELL_PX), so
+// two long names in capitals at the edge of a line made the estimate a row short, and `capital` is 1.5 there. The
+// terminal's cells are even: a capital is one cell, and `capital` is 1. It goes by code point, not by UTF-16 unit: an
+// astral emoji is one code point and 2 cells, where its two units would make 4.
+const nameCells = (name: string, capital: number): number => {
   let cells = 0
   for (const char of name) {
     const code = char.codePointAt(0) ?? 0
-    cells += code > 0x7f ? 2 : char >= 'A' && char <= 'Z' ? 1.5 : 1
+    cells += code > 0x7f ? 2 : char >= 'A' && char <= 'Z' ? capital : 1
   }
 
   return Math.ceil(cells)
@@ -993,13 +1009,14 @@ const nameCells = (name: string): number => {
 // must not err on. The chips go in the order they come, whole, onto a line while the next one fits it with the gap that
 // parts them, and a chip wider than the line (it is cut) is a line of its own. A line is the body less
 // CHIP_MARGIN_CELLS, so the estimate errs on the side of a row too many: the Log then draws a line fewer than would
-// fit, where a row too few would cut its last line (logLinesFit).
-export function chipRows(names: string[], columns: number): number {
+// fit, where a row too few would cut its last line (logLinesFit). `capital` is the cells of an ASCII capital in a name:
+// 1.5, the desktop's, unless the caller says that the cells are even (nameCells).
+export function chipRows(names: string[], columns: number, capital = WIDE_CAPITAL_CELLS): number {
   const lineCells = columns - CHIP_MARGIN_CELLS
   let rows = 0
   let used = 0
   for (const name of names) {
-    const chipCells = DOT.length + nameCells(name)
+    const chipCells = DOT.length + nameCells(name, capital)
     if (rows > 0 && used + CHIP_GAP_CELLS + chipCells <= lineCells) {
       used += CHIP_GAP_CELLS + chipCells
     } else {
@@ -1014,7 +1031,9 @@ export function chipRows(names: string[], columns: number): number {
 // The MCP servers, a green dot and the name each, wrapped whole; the summary is their count. The mod only learns which
 // servers have tools in the context (WaitForMcpServers is not there for a module), so it cannot tell a failed one
 // from a connected one: every dot is green. A name wider than the pane goes on its own line and is cut. The chips are
-// the one body of a section that is more than one line high, as many as chipRows says.
+// the one body of a section that is more than one line high, as many as chipRows says. A capital in a name weighs 1
+// cell where the pane draws no Svg, on the terminal, whose cells are even, and 1.5 where it does: the desktop draws
+// capitals wider, about 9 to 11 px against the 8 px of a cell (CELL_PX).
 function mcpSection(d: Draw): Block {
   const { Box, Text } = d.ui
   const { mcp } = d.data
@@ -1036,7 +1055,7 @@ function mcpSection(d: Draw): Block {
         {chips}
       </Box>,
     ],
-    chipRows(names, d.cols),
+    chipRows(names, d.cols, d.ui.Svg === undefined ? 1 : WIDE_CAPITAL_CELLS),
   )
 }
 ```
@@ -1044,6 +1063,13 @@ function mcpSection(d: Draw): Block {
 - **Dot and name.** Only the dot is green; the name is primary text. This is less noise than v1's all-green names, and the dot still says "connected".
 - **No-break space.** `DOT` is the dot and a no-break space (`'●\u00a0'`), so one space stays between the dot and the name. A plain space at the end of a flex item may be dropped by the desktop's whitespace rules.
 - **Wrapping.** Chips wrap whole. A single name wider than the pane goes on its own line and is cut.
+- **Capitals.** `nameCells` counts a capital ASCII letter as 1.5 cells on the desktop, whose font is proportional (a
+  capital is about 9 to 11 px against the 8 px of a cell), and as 1 in a terminal, whose cells are even: `mcpSection`
+  passes the weight by the surface (no `Svg` is a terminal), and `chipRows` defaults to the desktop's. So in a terminal
+  a capital adds no spare row. The wrap stays an estimate on both surfaces, made on the high side: `chipRows` keeps
+  `CHIP_MARGIN_CELLS` (2) cells of every line free and counts a character above ASCII as 2 cells (an accented letter is
+  drawn as 1), so it can give a row too many anywhere. 0.5.0 counted 1.5 on both, so in a terminal names in capitals
+  could cost a spare row.
 
 ### 6.9 Context sources
 
@@ -1191,8 +1217,9 @@ function logParts(d: Draw, above: number): RenderElement[] {
   edge of the row. A subagent's result has one too: `✓ 1m 12s`, `✗ 1m 12s`, or the time alone for a stop, which is no
   fault. The end of a background task has one by the same rule: its line reads `done · shell: …`, `failed · …` or
   `stopped · …`, its `who` and outcome are red for `failed` only, and an end that came between turns has the engine's
-  `task-notification` line beside it. A call that started a background task has `→ background` instead of `✓` and its
-  time, whichever agent made the call: its time would be the call's, not the task's.
+  `task-notification` line beside it. A time that is a bound has `≤` before it: `✓ ≤12.2s`, `✗ ≤…` for a failure, `≤…`
+  for a stop (§6.7). A call that started a background task has `→ background` instead of `✓` and its time, whichever
+  agent made the call: its time would be the call's, not the task's.
   - The column is FIXED and right-aligned (`justifyContent="flex-end"`). It holds one `Text wrap="truncate"`, styled like the `who` of the same line: red for an error line, dim otherwise.
   - A line without an outcome (a prompt, `spawned`, `resumed`, a compaction) gets the same cell, empty, so every text is cut at the same x.
 - **Outcome width per surface.** Worked out once per section, from the lines drawn.
@@ -1211,12 +1238,13 @@ function logParts(d: Draw, above: number): RenderElement[] {
   user's decision, 2026-10-16).
 - **Red text.** The last layout has neither a `who` nor an outcome cell to carry the red of an error, so the text of an error line is red there. In the other layouts the text stays primary.
 - **Labels.** Where the layout has no `who` cell (layouts 2 and 3), a line of the person (`you`) reads `you › …`, and a
-  line of the engine (`engine`: a tagged message such as `agent-message`) reads `engine › …`: its text alone does not
-  say whose it is. The other lines have no label. In [time, text] a line's outcome still comes first, and the label
-  follows it. The layout does not count the label: `MIN_LOG_TEXT_CELLS` counts the text alone, so at the edge of a
-  layout an engine line shows its label and none of its text. Where `who` has given way, a subagent's type has no
-  column and no label, so it is visible nowhere in the Log but in its `spawned · type: …` line, if the cut does not
-  take it: a known limit (finding 11 of the 0.3.0 live check).
+  line of the engine (`engine`: a turn that the engine starts with a tag of its own, a lowercase name with a hyphen or
+  an underscore, such as `agent-message`; any other text, a pasted `<div class="x">` too, is the person's) reads
+  `engine › …`: its text alone does not say whose it is. The other lines have no label. In [time, text] a line's outcome
+  still comes first, and the label follows it. The layout does not count the label: `MIN_LOG_TEXT_CELLS` counts the text
+  alone, so at the edge of a layout an engine line shows its label and none of its text. Where `who` has given way, a
+  subagent's type has no column and no label, so it is visible nowhere in the Log but in its `spawned · type: …` line,
+  if the cut does not take it: a known limit (finding 11 of the 0.3.0 live check).
 - **Columns.** The `who` and outcome columns are worked out from the longest `who` and the longest outcome among the
   lines drawn. The lines drawn are the lines that fit (§6.12); only a row count that is too low draws one more, which
   the tail clips. A long outcome lower down can make `who` give way for every row. The rule stays: one layout for the
@@ -1266,6 +1294,8 @@ scrolls, and the engine does that. Where the body's height is not known (`bodyRo
     `+N more` line;
   - N is the total less the lines drawn. The line shows exactly when N is above 0, and never for a folded Log, which
     keeps its count in the header.
+  - With room for more than 201 rows (the 200 lines the Log holds, and the `+N more` line), the rows that are left stay
+    blank above `+N more`: a known limit.
 - **The rows above.**
   - Every builder returns a `Block = { tree, rows }` (§5.4) and counts the rows from the very rows it puts in the tree,
     so that the two cannot part.
@@ -1276,13 +1306,15 @@ scrolls, and the engine does that. Where the body's height is not known (`bodyRo
     there is no task.
   - The one estimate is the chips of MCP (`chipRows`, §6.8), because the layout engine wraps them: whole chips, greedy,
     over `bodyColumns − 2` (`CHIP_MARGIN_CELLS`), 2 cells apart (`CHIP_GAP_CELLS`). A chip is the dot's 2 cells and the
-    name's, counted by code point: every code point above U+007F as 2 cells, a capital ASCII letter as 1.5, any other as
-    1, and the name's total rounded up (`nameCells`).
+    name's, counted by code point: every code point above U+007F as 2 cells, a capital ASCII letter as 1.5 on the
+    desktop, where the font is proportional, and as 1 in a terminal, whose cells are even (so a capital adds no spare
+    row there), any other as 1, and the name's total rounded up (`nameCells`).
 - **Errors go one way.**
   - A count that is too high leaves a spare row. It sits between the last Log line and `+N more`, since the tail's
     `flexGrow` takes the spare rows. When the Log has no tail or no `+N more` line, it is at the bottom of the pane.
   - A count that is too low draws a line past the rows there are. The tail clips it, and N is one short.
   - So the estimate errs high, and the tail stays as insurance.
+  - Beyond 201 rows of room the spare rows are blank whatever the count says, since the Log holds 200 lines (above).
 - **Structure** (the root is in §4, `logParts` in §6.10):
   - the root has `minHeight={bodyRows}`, and none when the height is not known;
   - the Log's rule, header, head and tail are direct children of the root, with no Box around them;
@@ -1460,7 +1492,9 @@ Butt caps keep the arc honest: round caps would add a stroke-width to its visibl
 
 The ellipsis is the surface's own, from `wrap="truncate"`. No string is shortened by hand for layout: `shorten()` in the
 log formulas keeps up to 512 characters of a text (`LOG_TEXT_MAX`, from 0.4.3; before, 64 to 80), more than a line of a
-pane maximized on a 21:9 monitor shows (about 400), and the surface cuts the line to its room.
+pane maximized on a 21:9 monitor shows (about 400), and the surface cuts the line to its room. The texts that an agent
+wrote (every Log line, the Subagents rows, the Tasks rows) are cleaned and masked before that (`stripFormat`, `redact`;
+§12 item 9, and §4.7 of the main spec).
 
 ## 10. Terminal surface
 
@@ -1555,19 +1589,18 @@ three checks of 0.4.3 that were left for it, and four that the final review of 0
     row in Tasks, after Subagents, with `@shell`, `@monitor` or `@workflow`, the blue running icon and a time that
     counts up (the pane redraws at least every 30 s). The header reads `running/total`, and the Log line of each call
     ends in `→ background`. When a task ends, its row shows the green check (done) or the red cross (failed) and its
-    whole duration, and the Log has `done · shell: …` (or `failed ·`) with the same time.
+    whole duration (a bound, `≤…`, when its notice came late: check 31), and the Log has `done · shell: …` (or
+    `failed ·`) with the same time.
 15. **TaskStop.** One running task stopped with TaskStop: its row turns to the grey stop square with the time it ran,
     and the Log has `stopped · …` with the time alone, not red. No notification comes for it (§8.5 of the 0.4–0.6 spec).
 16. **Ctrl+B in a terminal.** A command moved to the background with Ctrl+B while it runs gets a row. Its time counts
     from the start of its call, not from the key press, and the wait for a permission prompt is in it. (On the desktop,
-    Ctrl+B did not move a command to the background; a message should, check 29.)
-17. **The desktop's own task list.** The statuses and the times in Tasks agree with the desktop's list of background
-    tasks: the same tasks, the same outcomes, and times within a few seconds. A shell task's time may run past the end
-    of its command: its notification has no duration, so the pane counts until the notification arrives (a known
-    limit).
-18. **A timeout.** A Bash command that runs past its timeout and is sent to the background by it gets a row whose time
-    counts from the start of the command (`timedOutAfterMs` earlier), so it is longer than the time since the row
-    appeared.
+    Ctrl+B did not move a command to the background, and neither does a message: check 29.)
+17. **The desktop's own task list.** Compare the background tasks only, since the desktop's list holds foreground calls
+    and agents too. The outcomes agree. A shell task's time is exact when its notice came after the session had been
+    idle for 3 s or more, and otherwise a bound (`≤`) that is not under the desktop's time.
+18. **A timeout (the desktop).** A Bash command that runs past its timeout is killed (exit 143), and Tasks gets no row
+    for it.
 19. **A notice between turns.** A task that ends while no turn runs: its row closes, the Log has its end line, and the
     notice, which starts a turn of its own, shows as an `engine` line, `task-notification`, beside it.
 20. **A Monitor notice.** The notification of a Monitor was never seen, and the pane reads it by the common format (§8.5
@@ -1591,11 +1624,25 @@ three checks of 0.4.3 that were left for it, and four that the final review of 0
 28. **Two commands that end while the session is idle.** Two background commands that end while no turn runs: each
     notice comes as a prompt of its own and closes its own row (the parser reads one notification per text). Both rows
     close, and each has its end line in the Log.
-29. **A message while a command runs (the desktop).** A message sent while a long foreground command runs: the engine
-    moves the command to the background so that the message reaches the model. The command gets a row, and its time
-    counts from the start of its call, as the desktop's own task list counts it.
+29. **A message while a command runs (the desktop).** A message sent while a long foreground command runs waits until
+    the command ends. Then the model takes it in, and its `you` line is written then. The command gets no row.
 30. **A Workflow with a syntax error.** A Workflow whose script fails the syntax check (its result has a non-empty
     `error`) starts no task: there is no row, and its Log line ends in its time, not in `→ background`.
+
+Checks for the 0.5.1 release (17, 18 and 29 above are written for the desktop 2.1.288, after the 0.5.0 live check):
+
+31. **A late notice.** A background shell task that ends while a turn runs shows `≤…` in Tasks and `✓ ≤…` in the Log;
+    one that ends with the session idle for 3 s or more shows an exact time.
+32. **A message mid-turn.** A message typed while a turn runs gets one `you` line, when the model takes it in (the
+    desktop) or at Enter (the terminal); a message still queued when the turn ends gets one line, not two.
+33. **The mask (0.5.1).** In a prompt or a command, `"password": "hunter2secret"`,
+    `Authorization: Token abcdefgh12345678` and `"Authorization": "Bearer abcdefgh12345678"` show masked in the Log, and
+    a subagent's description with a token shows masked in Subagents. The escape cases (a token after a colour sequence,
+    for one) are covered by the unit tests (`stats.test.ts`), as a prompt cannot carry a raw ESC from the composer.
+34. **An engine tag.** A task's notice logs `engine` with `task-notification`; a prompt that starts with `<div>` logs
+    `you`.
+35. **Capitals in the terminal.** MCP servers with ASCII names in capitals leave no spare row in the terminal, where a
+    capital counts one cell, as it is drawn (0.5.0 counted 1.5 and could leave one).
 
 Results of the live renders (2026-10-07, 2026-10-08, 2026-10-09, 2026-10-12 and 2026-10-13):
 
@@ -1680,9 +1727,13 @@ Not checked in the 0.3.0 live check, or pending a look:
      control or U+10EEEE (a placeholder of its own), and draws its own pane in place of the mod's.
    - So `stripFormat` removes them with the format characters (0.4.3): before, a prompt with an ANSI escape from
      pasted terminal output blanked the pane until its line left the Log. The vertical tab and the form feed are
-     whitespace, so they become spaces; a lone surrogate goes too, so that no removal can join two halves into
-     U+10EEEE. An ANSI escape sequence (a CSI, or an OSC with its terminator) goes whole, so a coloured log reads as its
-     text.
+     whitespace, so they become spaces; a lone surrogate goes too, so that no removal can join two halves into U+10EEEE.
+     An escape sequence goes whole, so a coloured log reads as its text and no tail of it sticks to a word that the mask
+     looks for (until 0.5.1 only a CSI and an OSC with its terminator went whole): a control string (OSC, DCS, SOS, PM,
+     APC; 7-bit with ESC or 8-bit with one C1 character) up to its BEL, `ESC \` or U+009C on the same line; a CSI
+     (7-bit, or 8-bit with a parameter or an intermediate byte); an nF escape (`ESC ( B`, which `tput sgr0` ends in); a
+     two-byte escape (ESC and one of `7 8 = > [ \ ] ^ _`). A stray ESC or U+009B goes alone, and a control string that
+     nothing ends on its line loses its introducer only (the ESC alone, for `ESC P` and `ESC X`: the letter stays).
 
 ## 13. Test impact (view.test.tsx)
 

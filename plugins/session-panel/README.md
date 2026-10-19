@@ -58,27 +58,34 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   failed and `■` stopped in a terminal, and status icons on the desktop (a half-filled ring, a check, a cross, a stop
   square). Subagents use the same marks: a stopped subagent is `■` and a failed one `✗`, so the two differ by shape, not
   by colour alone. A row comes from a call of the main agent that started a task: a Bash command that runs in the
-  background, however it got there (it asked for it, its timeout sent it there, or it was moved there while it ran), a
-  Monitor, or a local Workflow. A running command is moved to the background by Ctrl+B in a terminal, by a message you
-  send meanwhile (the engine moves it so that the message reaches the model), by a plugin's abort of the turn, or in any
-  other way. A remote Workflow is no task, since its end never reaches this session, and neither is a Workflow whose
-  syntax check failed (its result has a non-empty `error`); a subagent's background call makes no row: its task is its
-  own and may end with it. The description is the Bash description or else its command, the Monitor's description or the
-  workflow's name, cleaned as a Log text is (secrets masked, format and control characters taken out, up to 512
-  characters), and the name of its kind when nothing is left. A task counts from the moment its call came back, so the
-  wait for a permission prompt is not in its time. Two kinds of command count from earlier: one that its timeout sent to
-  the background counts from when it began, and one that was moved there while it ran counts from when its call began,
-  the wait for a permission prompt included. A task ends with the engine's task notification (`completed` is done,
-  `failed` is failed, `killed` and `stopped` are stopped) or with a successful `TaskStop` that names it (stopped). The
-  status is read from the notification's header only, so one that a summary or a result quotes closes nothing, and a
-  notification of a task with no row changes nothing. An ended task's time is the duration that the notification gives,
-  where it has one (a Workflow's), and otherwise the time from the start to the moment the pane learns of the end, when
-  the notification reaches it or the `TaskStop` returns: a shell notification has no duration, so a shell task's time
-  can run past the end of its command, a known limit. `/clear` and a resume empty the list. The engine gives a mod no
-  list of its background tasks, so the pane has none to reconcile with: a task that began before the panel loaded
-  (Claude Code was restarted, or the desktop reopened the session) does not show, and a task whose notification never
-  comes stays running until `/clear` or a resume. A Monitor's notification has not been seen live: it is read by the
-  common format.
+  background, however it got there (it asked for it, a host sent it there by its timeout, or it was moved there while it
+  ran: Ctrl+B in a terminal, a plugin's abort of the turn, or any other way), a Monitor, or a local Workflow. The
+  desktop (2.1.288) moves no command to the background: one that runs past its timeout is killed, with exit code 143,
+  and gets no row, and a message you type while a command runs waits until it ends. Its own task list shows foreground
+  calls and agents too, so it holds more than Tasks does. A remote Workflow is no task, since its end never reaches this
+  session, and neither is a Workflow whose syntax check failed (its result has a non-empty `error`); a subagent's
+  background call makes no row: its task is its own and may end with it. The description is the Bash description or else
+  its command, the Monitor's description or the workflow's name, cleaned as a Log text is (secrets masked, format and
+  control characters taken out, up to 512 characters), and the name of its kind when nothing is left. A task counts from
+  the moment its call came back, so the wait for a permission prompt is not in its time. Two kinds of command count from
+  earlier: one that its timeout sent to the background counts from when it began, and one that was moved there while it
+  ran counts from when its call began, the wait for a permission prompt included. A task ends with the engine's task
+  notification (`completed` is done, `failed` is failed, `killed` and `stopped` are stopped) or with a successful
+  `TaskStop` that names it (stopped). The status is read from the notification's header only, so one that a summary or a
+  result quotes closes nothing, and neither does one with no `<summary>` and no `<result>`; a notification of a task
+  with no row changes nothing, and none can come before its task's row, since the mod writes the row before the call
+  that started the task returns (as long as every hook above the mod's waits for the chain beneath it). An ended task's
+  time is the duration that the notification gives, where it has one (a Workflow's), and for a `TaskStop`, which ends
+  the row at once, it is exact too. A shell notification has no duration: the time runs from the start to the notice,
+  and the engine takes a notice in at the next model request of a running turn, or when the session is idle, so it may
+  come later than the end of the task. When it came into a running turn, less than 3 s after the main agent's last turn
+  ended, or before the pane has seen a turn end (just after it loaded), the task ran at most that long, and the time is
+  a bound, drawn `≤12.2s`. A notice that comes after the session has been idle for 3 s or more is taken at the task's
+  end, and the time is exact. The time takes 8 characters, so `≤99h 59m` is the widest bound shown, and a wider time is
+  a dim `—`. `/clear` and a resume empty the list. The engine gives a mod no list of its background tasks, so the pane
+  has none to reconcile with: a task that began before the panel loaded (Claude Code was restarted, or the desktop
+  reopened the session) does not show, and a task whose notification never comes stays running until `/clear` or a
+  resume. A Monitor's notification has not been seen live: it is read by the common format.
 - **MCP**: the servers that have tools in the context, by name, with their count. The desktop app's own servers
   (`ccd_*`, `Claude_Browser`, `scheduled-tasks`, `terminal`) are hidden and not counted.
 - **Context sources**: how many skills and MCP servers feed the context.
@@ -86,44 +93,75 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   `+N more` line at the bottom counts the events that are not drawn, and the header counts every event it has seen
   (`/clear`, resume and restarting Claude Code start it over). Folding another section gives the Log its room; when not
   even 8 lines fit, the pane scrolls; where the body's height is not known, it draws 15 lines. The panel counts the rows
-  of the blocks above the Log itself; only the wrap of the MCP chips is an estimate, made on the high side, so a wrong
-  guess leaves a blank row rather than cutting the last line. The events are prompts, tool calls, subagent spawns,
-  resumes and results (a successful Agent call, a SendMessage to a known subagent or a subagent's `SubagentHandback` is
-  not logged: their lines say it), compactions. A line keeps up to 512 characters of its text, and the pane cuts it to
-  its width. Tool calls and subagent results both carry their outcome (✓/✗ and the time, or denied) in a right-aligned
+  of the blocks above the Log itself; only the wrap of the MCP chips is an estimate, made on the high side (it keeps 2
+  cells of every line free and counts a character above ASCII as 2 cells; an ASCII capital counts 1.5 cells on the
+  desktop, which draws capitals wider, and one cell in a terminal, as it is drawn there), so a wrong guess leaves a
+  blank row rather than cutting the last line. The Log keeps 200 lines, so a pane with room for more than 201 Log rows
+  shows blank rows above `+N more`: a known limit. The events are prompts, tool calls, subagent spawns, resumes and
+  results (a successful Agent call, a SendMessage to a known subagent or a subagent's `SubagentHandback` is not logged:
+  their lines say it), compactions. A prompt that starts a turn is logged `you`, unless the engine started the turn with
+  a tag of its own, a lowercase name with a hyphen or an underscore (`<task-notification>`,
+  `<teammate-message teammate_id="lead">`): that line is `engine`, with the tag's name, and any other text, one that
+  starts with `<` too (`<div class="x">`), is yours. A message you type while a turn runs goes into that turn, with no
+  turn of its own, and has its `you` line when the model takes it in (the desktop) or at Enter (a terminal); one still
+  queued when the turn ends keeps one line. Only a person's message has that line (typed, from a bridge, the SDK or
+  Slack), not a plugin's or the engine's. A line keeps up to 512 characters of its text, and the pane cuts it to its
+  width. Tool calls and subagent results both carry their outcome (✓/✗ and the time, or denied) in a right-aligned
   column. A call that started a background task has `→ background` there in place of ✓ and its time, which would be the
   call's, not the task's, whichever agent made the call. The end of a task has a line of its own, as the end of a
   subagent has: `done · shell: <description>` (or `failed ·`, `stopped ·`), with ✓ and its time, ✗ and its time (an
-  error line) or, for a stop, the time alone; an end that comes between turns also has the engine's `task-notification`
-  line, as a subagent's notice has. While a `→ background` line is drawn, the outcome column is as wide as it (12
-  characters, 13 cells on the desktop; it is kept whole on purpose), so in a narrow pane `who` gives way sooner: below
-  45 body columns on the desktop instead of 39 (with `✓ 0.3s`), and below 35 in a terminal instead of 29 (with `main` as
-  the `who`). A call that comes back as an error because it was abandoned (you interrupted it, or a stop did) is not
-  drawn as an error: it is not red, its `who` and outcome are dim as on every line that is no error, and its outcome is
-  the time alone, with no ✗; this rests on the engine's `next.signal`, and was seen live for a subagent stopped with
-  `TaskStop` and for Esc on the main agent, while a call that fails by itself stays red. A call of an agent that is not
-  in Subagents is labeled `agent`, and its failure is drawn dim, not red: the pane cannot tell a fork's refused try from
-  a real failure. Such an agent is one of the engine's own forks (most of them have every tool refused), or a subagent
-  that was started before the session was reopened (or Claude Code restarted) and is resumed after it, whose row the
-  pane no longer has: a known limit. A subagent's answer loses its markdown marks (a pair of `**`, unless an ASCII
-  letter, digit or `_` touches it on the outside, so `2**10 and 3**4` stays, and a letter of another script does not
-  stop it: `这是**重要**的` gives `这是重要的`; backticks; a heading's `#`). In auto mode a subagent's `done` line shows the
-  report it handed back, even when auto mode withheld or flagged it; the text is masked as any other, and the main agent
-  did not get it, a known limitation. In a narrow pane the `who` column gives way first, and then the outcome moves in
-  front of the text; where there is no `who`, a prompt reads `you › …` and an engine message (a tagged one, such as
-  `agent-message`) reads `engine › …`. A subagent's type then shows in the Log only in its `spawned · type: …` line, if
-  the cut leaves it: a known limit. Unicode format characters (the bidi controls, zero-width spaces, the BOM and the
-  rest) are taken out of the branch, the folder name, the Subagents rows, the MCP server names and every log text, since
-  a U+202E would reorder what the pane shows. A ZWJ or ZWNJ stays only between two characters that are above U+007F and
-  are no spaces, so emoji sequences joined by ZWJ stay whole and Persian and Indic scripts keep their joiners. Tag
-  characters go too, since they can carry invisible ASCII, except in the flags of England, Scotland and Wales, which
-  stay whole; any other run of tags after a black flag goes and leaves the plain black flag. Beside an ASCII character,
-  a space of any kind or an end of the text a joiner would join nothing, and it could hide a character in a branch name
-  or split a secret so that its mask misses it, so it goes. Control characters (C0 but tab, line feed and carriage
-  return; DEL; C1) and U+10EEEE, a placeholder of the engine's, go from the same texts (the vertical tab and the form
-  feed become spaces, and a colour or cursor sequence (CSI) or a title or link sequence (OSC) goes whole, so a coloured
-  log reads as its text): the engine refuses a text that holds one and draws its own pane in place of the panel's, which
-  a pasted ANSI escape used to cause. Common secret patterns (tokens, keys, passwords in URLs and flags) are masked.
+  error line) or, for a stop, the time alone, with `≤` before a time that is a bound (`✓ ≤12.2s`); an end that comes
+  between turns also has the engine's `task-notification` line, as a subagent's notice has. While a `→ background` line
+  is drawn, the outcome column is as wide as it (12 characters, 13 cells on the desktop; it is kept whole on purpose),
+  so in a narrow pane `who` gives way sooner: below 45 body columns on the desktop instead of 39 (with `✓ 0.3s`), and
+  below 35 in a terminal instead of 29 (with `main` as the `who`). A call that comes back as an error because it was
+  abandoned (you interrupted it, or a stop did) is not drawn as an error: it is not red, its `who` and outcome are dim
+  as on every line that is no error, and its outcome is the time alone, with no ✗; this rests on the engine's
+  `next.signal`, and was seen live for a subagent stopped with `TaskStop` and for Esc on the main agent, while a call
+  that fails by itself stays red. A call of an agent that is not in Subagents is labeled `agent`, and its failure is
+  drawn dim, not red: the pane cannot tell a fork's refused try from a real failure. Such an agent is one of the
+  engine's own forks (most of them have every tool refused), or a subagent that was started before the session was
+  reopened (or Claude Code restarted) and is resumed after it, whose row the pane no longer has: a known limit. A
+  subagent's answer loses its markdown marks (a pair of `**`, unless an ASCII letter, digit or `_` touches it on the
+  outside, so `2**10 and 3**4` stays, and a letter of another script does not stop it: `这是**重要**的` gives `这是重要的`;
+  backticks; a heading's `#`). In auto mode a subagent's `done` line shows the report it handed back, even when auto
+  mode withheld or flagged it; the text is masked as any other, and the main agent did not get it, a known limitation.
+  In a narrow pane the `who` column gives way first, and then the outcome moves in front of the text; where there is no
+  `who`, a prompt reads `you › …` and an engine message (a tagged one, such as `agent-message`) reads `engine › …`. A
+  subagent's type then shows in the Log only in its `spawned · type: …` line, if the cut leaves it: a known limit.
+  Unicode format characters (the bidi controls, zero-width spaces, the BOM and the rest) are taken out of the branch (or
+  the short commit of a detached HEAD), the folder name, the Subagents rows, the MCP server names, the kind of a rate
+  limit and every log text, since a U+202E would reorder what the pane shows. A ZWJ or ZWNJ stays only between two
+  characters that are above U+007F and are no spaces, so emoji sequences joined by ZWJ stay whole and Persian and Indic
+  scripts keep their joiners. Tag characters go too, since they can carry invisible ASCII, except in the flags of
+  England, Scotland and Wales, which stay whole; any other run of tags after a black flag goes and leaves the plain
+  black flag. Beside an ASCII character, a space of any kind or an end of the text a joiner would join nothing, and it
+  could hide a character in a branch name or split a secret so that its mask misses it, so it goes. The other
+  default-ignorable code points, such as the variation selectors, and a few more invisible ones (U+2800, U+20E3, …) go
+  too, beside ASCII, where they could split a secret from the mask. They stay where they shape text: after a character
+  above ASCII (an emoji's variation selector) and in a keycap (`1️⃣`, `#️⃣`) that no word or token touches; a keycap
+  glued to a word or a token loses its marks. Control characters (C0 but tab, line feed and carriage return; DEL; C1),
+  U+10EEEE, a placeholder of the engine's, and a lone surrogate go from the same texts (the vertical tab and the form
+  feed become spaces): the engine refuses a text that holds one and draws its own pane in place of the panel's, which a
+  pasted ANSI escape used to cause. An escape sequence goes whole, so a coloured log reads as its text and no tail of it
+  sticks to a word that the mask looks for: a control string (OSC, DCS, SOS, PM, APC; 7-bit or 8-bit) up to its end on
+  the same line, a CSI (7-bit or 8-bit), an `ESC ( B` such as `tput sgr0` ends in, a two-byte escape such as `ESC 7`. A
+  stray ESC or U+009B goes alone, and a control string that nothing ends on its line loses its introducer only (the ESC
+  alone, for `ESC P` and `ESC X`: the letter stays). A mask then hides secrets in every Log line, the Subagents rows (a
+  subagent's type and description) and the Tasks rows. It takes the credential of an Authorization header (Bearer and
+  Basic keep the scheme: `Bearer •••`; any other scheme goes with it: `Authorization: •••`), a quoted Authorization
+  value whole, the value of a key named like a secret (`password`, `token`, `api_key` and the like) after `:` or `=`,
+  also when a quote closes the name, as in JSON, a Python dict and a curl body (`"password": "…"`), tokens with a known
+  prefix (`sk-`, `ghp_`, `github_pat_`, `xoxb-`), a GitHub or Slack token and a `Bearer …` that a removed escape
+  sequence glued to a word, the `--token`, `--password`, `--api-key` and `--secret` flags, the values of `*_KEY=`,
+  `*_TOKEN=`, `*_SECRET=` and `*_PASSWORD=`, and the password in a URL. The mask is no scanner: it has no pattern for
+  `curl -u user:pass`, `mysql -p…`, `.netrc`, a `Cookie:` header, a lowercase `aws_secret_access_key`, `glpat-` tokens,
+  a PEM key or a JWT on its own, and it misses a key written in a form it does not read (an escaped JSON key in a shell
+  string, `d["password"] = …`, an XML element), all but the first part of a Digest or AWS4 credential, and a token whose
+  first letter a crafted escape sequence takes. It over-masks in two known cases: a name that ends in `Bearer`
+  (`JwtBearer`) masks the word after it, and two code spans around `Authorization:` mask the prose between them. Section
+  4.7 of the design spec (in Russian, linked from the
+  [docs](https://github.com/philarete173/claude_mods/blob/main/docs/README.md) page) has the full list.
 
 ## How costs are measured
 

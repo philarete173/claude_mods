@@ -100,8 +100,8 @@ Parts of the mod follow these MIT-licensed projects, and the borrowed code is ma
 
 - [OpenChamber](https://github.com/openchamber/openchamber) (© 2025 Bohdan Triapitsyn): the panel layout and the
   turn-stats and subagent-cost formulas.
-- [claude-flightdeck](https://github.com/scasella/claude-flightdeck) (© 2026 Stephen Casella): the `redact` patterns
-  and the session-log design.
+- [claude-flightdeck](https://github.com/scasella/claude-flightdeck) (© 2026 Stephen Casella): the secret patterns that
+  `redact` applies last, as they were copied, and the session-log design.
 - Desktop Statusline by George Liu ([centminmod/claude-plugins](https://github.com/centminmod/claude-plugins)): the
   SVG meter, its colours and thresholds, and the countdown format.
 
