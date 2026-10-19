@@ -1579,8 +1579,8 @@ test('parseTaskNotification: a result that quotes the tags does not change the i
 })
 
 // A notice of Monitor has not been seen, and what a monitor watches or a result says can hold any tag. The status is
-// the header's: what stands before the first summary or result, whichever comes first, or the whole text when there is
-// neither.
+// the header's: what stands before the first summary or result, whichever comes first. A text with neither has no
+// header to end, and every real notice has a summary, so it closes nothing.
 test('parseTaskNotification reads the status from the header alone: one in the summary or a result is none', () => {
   const header = '<task-notification>\n<task-id>mq8x1</task-id>\n'
   const quoted = '<result>build done <status>completed</status></result>\n'
@@ -1590,10 +1590,8 @@ test('parseTaskNotification reads the status from the header alone: one in the s
   // A result with no summary before it ends the header too, and so does one that comes before the summary.
   expect(parseTaskNotification(`${header}${quoted}</task-notification>`)).toBe(null)
   expect(parseTaskNotification(`${header}${quoted}<summary>s</summary>\n</task-notification>`)).toBe(null)
-  // With neither a summary nor a result the whole text is the header.
-  expect(parseTaskNotification(`${header}<status>failed</status>\n</task-notification>`)).toEqual({
-    id: 'mq8x1', status: 'failed', durationMs: null,
-  })
+  // With neither a summary nor a result there is no header to end: the status is a quoted one, not the engine's.
+  expect(parseTaskNotification(`${header}<status>failed</status>\n</task-notification>`)).toBe(null)
 })
 
 test('parseTaskNotification: a text with no <task-id> is no notification, nor is one whose status is no end', () => {
@@ -1699,6 +1697,24 @@ test('finishTask: a task whose start is not known has no duration of its own, on
     ...unknown, status: 'ended', endedAt: 4500, durationMs: null,
   })
   expect(finishTask(unknown, 'done', 4500, 2000).durationMs).toBe(2000)
+})
+
+// A time from the clock runs to the arrival of the notice, which can come later than the end of the task: with `atMost`
+// set it is a bound, and the row says so. The notice's own time is exact, and so is none at all.
+test('finishTask marks a time from the clock as a bound when atMost is set, and no other time', () => {
+  const running = task('running', 1000)
+  expect(finishTask(running, 'done', 4500, null, true)).toEqual({
+    ...running, status: 'done', endedAt: 4500, durationMs: 3500, durationAtMost: true,
+  })
+  const exact: Array<[name: string, row: TaskRow]> = [
+    ['the notice gives the time', finishTask(running, 'done', 4500, 3000, true)],
+    ['the notice gives 0', finishTask(running, 'done', 4500, 0, true)],
+    ['the start is not known', finishTask(task('running', null), 'ended', 4500, null, true)],
+    ['atMost is false', finishTask(running, 'done', 4500, null, false)],
+    ['atMost is left out', finishTask(running, 'done', 4500, null)],
+  ]
+  // The key is absent, not set to anything: toEqual would not tell it from `undefined`.
+  for (const [name, row] of exact) expect('durationAtMost' in row, name).toBe(false)
 })
 
 test('orderTasks puts the running tasks first, then the newest start first, and a start not known last', () => {

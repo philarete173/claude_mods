@@ -3162,6 +3162,8 @@ test('the time of a task: how long a running one has run, how long a finished on
     ['done, no duration', task(1, 'done', { durationMs: null }), null],
     ['done, no start and no duration', task(1, 'done', { startedAt: null, durationMs: null }), null],
     ['ended, no duration', task(1, 'ended', { durationMs: null }), null],
+    // A time that ran to a late notice is a bound: `≤` (U+2264) stands before it.
+    ['done, at most 12.2 s', task(1, 'done', { durationMs: 12_200, durationAtMost: true }), '\u{2264}12.2s'],
   ]
 
   for (const surface of SURFACES) {
@@ -3189,7 +3191,8 @@ test('the time of a running task follows the time of the drawing, and the time o
 
 // A value is drawn whole or not at all, and the row stays one line, which the Log's count of rows relies on. No task
 // runs 1000 hours, but a notice can carry any safe integer as the time the task ran, which is 15 characters in a cell
-// of 8: a time wider than the cell is drawn as not known. `999h 59m` is the widest that fits.
+// of 8: a time wider than the cell is drawn as not known. `999h 59m` is the widest that fits; with the `≤` of a bound,
+// `≤99h 59m`.
 test('a time wider than the cell of a task is drawn as a dim dash: one row, and the Log counts on it', () => {
   const hours = (h: number, m = 0): number => (h * 60 + m) * 60_000
   const cases: Array<[name: string, row: TaskRow, time: string | null]> = [
@@ -3198,6 +3201,9 @@ test('a time wider than the cell of a task is drawn as a dim dash: one row, and 
     ['done in 999h 59m', task(1, 'done', { durationMs: hours(999, 59) }), '999h 59m'],
     ['running since 1000 hours', task(1, 'running', { startedAt: NOW - hours(1000) }), null],
     ['running since 999h 59m', task(1, 'running', { startedAt: NOW - hours(999, 59) }), '999h 59m'],
+    // The `≤` of a bound takes a cell of its own: `≤99h 59m` fills the 8 cells, `≤100h 00m` is a ninth too wide.
+    ['99h 59m, at most', task(1, 'done', { durationMs: hours(99, 59), durationAtMost: true }), '\u{2264}99h 59m'],
+    ['100 hours, at most', task(1, 'done', { durationMs: hours(100), durationAtMost: true }), null],
   ]
   const log = logLines(60)
 

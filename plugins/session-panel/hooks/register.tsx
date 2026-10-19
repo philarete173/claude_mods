@@ -183,6 +183,18 @@ let lastReadMs = 0
 // not read again until the next turn.
 let hasMainTurn = false
 
+// How many turns of the main agent this module has seen start. A turn.complete notes it before it reads the clock, and
+// sets idleSince only if no turn has started by the time the read lands.
+let mainTurns = 0
+
+// When the main loop last went idle: the time of the last turn.complete of the main agent, by `$.clock.now()`. It is
+// null while a main turn runs, and before this module has seen one end (a reload of the module starts it over).
+let idleSince: number | null = null
+
+// How long the main loop must have been idle, in ms, before a notice that comes with no turn running is taken as coming
+// at the end of its task (prompt.submit).
+const IDLE_GAP_MS = 3000
+
 // For each root, how many reads in a row had a status, or a diff against HEAD, that threw. A throw is a timeout or a
 // git that cannot be started; a non-zero exit, as outside a repository, is none. The count of a root rises by one for
 // each read that had a throw, up to READ_THROWS_MAX, and a read whose status and diff both ended without one starts it
@@ -252,16 +264,18 @@ const agentOutcome = (
 
 // The log line of a task that has ended, drawn as the end of a subagent is (agentOutcome): the text is the status, the
 // kind and what the task was; the outcome is the time it ran behind a mark (✓ for a task that finished, ✗ for one that
-// failed; a stop is no fault, so it has no mark). A task whose time is not known has no outcome.
+// failed; a stop is no fault, so it has no mark). A task whose time is not known has no outcome, and a time that is a
+// bound (durationAtMost) has `≤` before it.
 const taskLine = (
   status: TaskEndStatus, row: TaskRow,
 ): { text: string; kind: LogKind; outcome: string | undefined } => {
   const mark = status === 'done' ? '✓ ' : status === 'failed' ? '✗ ' : ''
+  const bound = row.durationAtMost === true ? '\u{2264}' : ''
 
   return {
     text: shorten(`${status} · ${row.kind}: ${row.description}`, LOG_TEXT_MAX),
     kind: status === 'done' ? 'ok' : status === 'stopped' ? 'info' : 'error',
-    outcome: row.durationMs === null ? undefined : `${mark}${fmtDuration(row.durationMs)}`,
+    outcome: row.durationMs === null ? undefined : `${mark}${bound}${fmtDuration(row.durationMs)}`,
   }
 }
 
@@ -655,12 +669,13 @@ async function reviveAgent($: EngineInterface, agentId: string): Promise<void> {
   }
 }
 
-// Closes the row of a task that runs: its status, its end and the time it ran, and one line on the log. A row that is
+// Closes the row of a task that runs: its status, its end and the time it ran, and one line on the log. `atMost` says
+// that `at` may be later than the end of the task, so a time from the clock is a bound (finishTask). A row that is
 // missing, or that does not run, stays as it is, with no line and no write, apart from a race (a row that another call
 // closes between the check and the write is written over as it stands): a notice may name a task of an earlier
 // session, or come twice for one task, and a TaskStop may name any id.
 async function closeTask(
-  $: EngineInterface, id: string, status: TaskEndStatus, at: number, durationMs: number | null,
+  $: EngineInterface, id: string, status: TaskEndStatus, at: number, durationMs: number | null, atMost: boolean,
 ): Promise<void> {
   const held = (await read($, tasksAtom))[id]
   if (held === undefined || held.status !== 'running') return
@@ -668,7 +683,7 @@ async function closeTask(
   await update($, tasksAtom, rows => {
     const row = rows[id]
     // The update runs again when its write misses, so it sets `closed` on every run.
-    closed = row !== undefined && row.status === 'running' ? finishTask(row, status, at, durationMs) : null
+    closed = row !== undefined && row.status === 'running' ? finishTask(row, status, at, durationMs, atMost) : null
 
     return closed === null ? rows : { ...rows, [id]: closed }
   })
@@ -822,6 +837,11 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
+    // The hook is the main agent's (a subagent's run raises no turn.start, see below): a main turn starts, and the loop
+    // is not idle. Both are noted before the chain runs: the read of a turn.complete that is still on its way must find
+    // the turn (turn.complete), and a notice that arrives from now on must find the loop busy (prompt.submit).
+    mainTurns += 1
+    idleSince = null
     const started = await next(e)
     // The first turn of the main agent opens the tree to the reads (hasMainTurn), and asks for one. The types give this
     // event no agentId (a subagent's run raises no turn.start), so one that had it is not a main turn.
@@ -934,12 +954,23 @@ export const register: Register = on => {
     // A TaskStop that went through ends the task it names, by `task_id` or by the deprecated `shell_id`: it gives no
     // notice of its own (the v2 spec, §8.5), so a task it names that is left running would stay so for good.
     const stopId = e.tool === 'TaskStop' ? (e.task_id ?? e.shell_id) : undefined
-    if (stopId !== undefined && !isFailed) await closeTask($, stopId, 'stopped', t1, null)
+    if (stopId !== undefined && !isFailed) await closeTask($, stopId, 'stopped', t1, null, false)
 
     return ran
   })
 
   on('turn.complete', async ($, e, next) => {
+    // A turn of the main agent ends, and the loop is idle from this time, which is read here, not after the chain
+    // beneath has run, and not waited for. It counts only if no main turn has started by the time the read lands
+    // (mainTurns); a read that fails leaves idleSince as it is.
+    if (e.agentId === undefined) {
+      const turns = mainTurns
+      $.clock.now()
+        .then(now => {
+          if (turns === mainTurns) idleSince = now
+        })
+        .catch(() => undefined)
+    }
     const done = await next(e)
     if (e.agentId === undefined) {
       const acc = await read($, turnAtom)
@@ -1007,12 +1038,26 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    // How long the loop has been idle, and the time of the arrival, are read here, before the chain runs: the `next(e)`
+    // of a notice taken in while idle resolves only after its own turn has started, and the turn.start of that turn
+    // sets idleSince to null. The read has a catch of its own, so that one that nothing uses (a prompt that is no
+    // notice) never rejects unhandled.
+    const idleAt = idleSince
+    const arrival = $.clock.now().catch(() => null)
     const submitted = await next(e)
     // The notice of a background task is the engine's word that the task is over, and how it ended. Only a prompt that
     // the engine raised for a task counts (the origin), not the same text typed or sent by a plugin; one that names no
     // row of tasks, an earlier session's or a subagent's, closes nothing (closeTask).
     const end = e.origin?.kind === 'task-notification' ? parseTaskNotification(e.text) : null
-    if (end !== null) await closeTask($, end.id, TASK_END[end.status], await $.clock.now(), end.durationMs)
+    if (end !== null) {
+      // The end is taken at the arrival of the notice (a read after the chain if the early one failed), but the task
+      // may have ended before. A notice delivered into a running turn (`turnId` set) waits for the next model request
+      // of the turn; one taken in when the session goes idle may have waited for the turn to end; only one that comes
+      // after the loop has been idle a while comes at the task's end. For any other the time is a bound.
+      const at = (await arrival) ?? (await $.clock.now())
+      const atMost = e.turnId !== undefined || idleAt === null || at - idleAt < IDLE_GAP_MS
+      await closeTask($, end.id, TASK_END[end.status], at, end.durationMs, atMost)
+    }
 
     return submitted
   })

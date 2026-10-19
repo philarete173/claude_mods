@@ -64,6 +64,9 @@ export type TaskRow = {
   startedAt: number | null
   endedAt: number | null
   durationMs: number | null
+  // True when `durationMs` is a bound: it ran from the start to the arrival of the task's notice, which can come later
+  // than the end of the task, so the task ran at most that long. Absent when the time is exact.
+  durationAtMost?: true
 }
 // What the notification of a task says: its id, how it ended in the engine's words, and how long it ran, if it says.
 export type TaskEnd = { id: string; status: 'completed' | 'failed' | 'killed' | 'stopped'; durationMs: number | null }
@@ -665,15 +668,17 @@ function tagText(text: string, tag: string, fromEnd = false): string | undefined
 
 // How a task ended, from its notification: the text of a `prompt.submit` whose origin is `task-notification` (the v2
 // spec, §8.5). The `<task-id>`, the `<status>` of the header (what stands before the first `<summary>` or `<result>`,
-// whichever comes first, or the whole text when there is neither: a result, or a line that a monitor watched, can quote
-// the tag) and the `<duration_ms>` of the usage block, which a shell command has none of; a duration that is no safe
-// integer is none either. Null for a text with no id, and for a status that is no end of a task: `completed`, `failed`,
-// `killed` and `stopped` are the four that end one. The notice of a task that an earlier session left running has a
-// `<note>` and says `failed` or `stopped`: it parses, and names an id that this session has no row for.
+// whichever comes first: a result, or a line that a monitor watched, can quote the tag) and the `<duration_ms>` of the
+// usage block, which a shell command has none of; a duration that is no safe integer is none either. Null for a text
+// with no id, for a status that is no end of a task (`completed`, `failed`, `killed` and `stopped` are the four that
+// end one), and for a text with neither a `<summary>` nor a `<result>`: every real notice has a `<summary>`, and a
+// `<status>` quoted inside an unobserved notice (a Monitor's event) must not close a row. The notice of a task that
+// an earlier session left running has a `<note>` and says `failed` or `stopped`: it parses, and names an id that this
+// session has no row for.
 export function parseTaskNotification(text: string): TaskEnd | null {
   const id = tagText(text, 'task-id')
   const headerEnd = text.search(/<summary>|<result>/) // two literals, no quantifier: it cannot backtrack
-  const status = tagText(headerEnd < 0 ? text : text.slice(0, headerEnd), 'status')
+  const status = headerEnd < 0 ? undefined : tagText(text.slice(0, headerEnd), 'status')
   const duration = tagText(text, 'duration_ms', true)
   if (id === undefined || id === '') return null
   if (status !== 'completed' && status !== 'failed' && status !== 'killed' && status !== 'stopped') return null
@@ -696,11 +701,15 @@ export function engineTag(text: string): string | undefined {
 
 // The row of a task that has ended: its status, the end time and the time it ran. The notification's duration stands
 // when it gives one; otherwise it is the time from the start to `at`, never under 0 (the wall clock can be put back),
-// and a task whose start is not known has none.
-export function finishTask(row: TaskRow, status: TaskStatus, at: number, durationMs: number | null): TaskRow {
+// and a task whose start is not known has none. With `atMost` set, a time from the clock is a bound (durationAtMost):
+// `at` is when the notice arrived, which may be later than the end of the task.
+export function finishTask(
+  row: TaskRow, status: TaskStatus, at: number, durationMs: number | null, atMost = false,
+): TaskRow {
   const ran = row.startedAt === null ? null : Math.max(0, at - row.startedAt)
+  const isBound = atMost && durationMs === null && ran !== null
 
-  return { ...row, status, endedAt: at, durationMs: durationMs ?? ran }
+  return { ...row, status, endedAt: at, durationMs: durationMs ?? ran, ...(isBound ? { durationAtMost: true } : {}) }
 }
 
 // Running tasks first, then the newest start first; a task of no known start goes last of its group. The input is left

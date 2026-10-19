@@ -63,6 +63,9 @@ export type TaskRow = {
   startedAt: number | null
   endedAt: number | null
   durationMs: number | null
+  // True when `durationMs` is a bound: it ran from the start to the arrival of the task's notice, which can come later
+  // than the end of the task, so the task ran at most that long. Absent when the time is exact.
+  durationAtMost?: true
 }
 export type LogKind = 'info' | 'ok' | 'error'
 export type LogEntry = { at: number; who: string; text: string; kind: LogKind; outcome?: string }

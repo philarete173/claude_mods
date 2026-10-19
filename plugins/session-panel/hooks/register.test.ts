@@ -310,6 +310,79 @@ const PROMPT_PROBE: Plugin = {
     on('command.run', { command: 'read-prompt-probe' }, async () => ({ text: JSON.stringify(seen) }))
   },
 }
+// A plugin beneath the mod's that holds every prompt for 500 ms before it passes it on, as the engine does with the
+// notice of a task that it takes in while idle: its `next(e)` resolves only once the turn of the notice has started.
+// Like any plugin of a test it closes over nothing of this file.
+const PROMPT_HOLDER: Plugin = {
+  name: 'prompt-holder',
+  tier: 'append',
+  register(on) {
+    on('prompt.submit', async ($, e, next) => {
+      await $.clock.sleep(500)
+
+      return next(e)
+    })
+  },
+}
+// A plugin beneath the mod's that holds every turn end for 500 ms before it passes it on, as a slow plugin beneath may.
+// Like any plugin of a test it closes over nothing of this file.
+const TURN_HOLDER: Plugin = {
+  name: 'turn-holder',
+  tier: 'append',
+  register(on) {
+    on('turn.complete', async ($, e, next) => {
+      await $.clock.sleep(500)
+
+      return next(e)
+    })
+  },
+}
+// A plugin beneath the mod's that holds every turn start for 500 ms before it passes it on, as a slow plugin beneath
+// may. Like any plugin of a test it closes over nothing of this file.
+const START_HOLDER: Plugin = {
+  name: 'start-holder',
+  tier: 'append',
+  register(on) {
+    on('turn.start', async ($, e, next) => {
+      await $.clock.sleep(500)
+
+      return next(e)
+    })
+  },
+}
+// A plugin above the mod's that spoils one read of the clock, as a host that is slow or refuses may: `hold-clock` takes
+// the delay in ms, and the first read of the clock after that is answered that much later; `refuse-clock` makes the
+// first read after it fail. Like any plugin of a test it closes over nothing of this file.
+const CLOCK_SPOILER: Plugin = {
+  name: 'clock-spoiler',
+  tier: 'prepend',
+  register(on) {
+    let holdMs = 0
+    let isRefusing = false
+    on('command.run', { command: 'hold-clock' }, async (_$, e) => {
+      holdMs = Number(e.args)
+
+      return { text: 'armed' }
+    })
+    on('command.run', { command: 'refuse-clock' }, async () => {
+      isRefusing = true
+
+      return { text: 'armed' }
+    })
+    on('clock.now', async ($, e, next) => {
+      const held = holdMs
+      holdMs = 0
+      if (isRefusing) {
+        isRefusing = false
+
+        return { deny: 'refused' }
+      }
+      if (held > 0) await $.clock.sleep(held)
+
+      return next(e)
+    })
+  },
+}
 const WITH_ABANDONER = { plugins: [READER, ABANDONER], timeoutMs: 30_000 }
 const WITH_INTERRUPTER = { plugins: [READER, INTERRUPTER], timeoutMs: 30_000 }
 const WITH_FRACTIONAL_CLOCK = { plugins: [READER, FRACTIONAL_CLOCK], timeoutMs: 30_000 }
@@ -318,6 +391,10 @@ const WITH_WRITE_HOLDER = { plugins: [READER, WRITE_HOLDER], timeoutMs: 30_000 }
 const WITH_CLOCK_SKEW = { plugins: [READER, CLOCK_SKEW], timeoutMs: 30_000 }
 const WITH_UNSTARTED = { plugins: [READER, UNSTARTED], timeoutMs: 30_000 }
 const WITH_PROMPT_PROBE = { plugins: [READER, PROMPT_PROBE], timeoutMs: 30_000 }
+const WITH_PROMPT_HOLDER = { plugins: [READER, PROMPT_HOLDER], timeoutMs: 30_000 }
+const WITH_TURN_HOLDER = { plugins: [READER, TURN_HOLDER], timeoutMs: 30_000 }
+const WITH_START_HOLDER = { plugins: [READER, START_HOLDER], timeoutMs: 30_000 }
+const WITH_CLOCK_SPOILER = { plugins: [READER, CLOCK_SPOILER], timeoutMs: 30_000 }
 const WITH_SUSPENDER = { plugins: [SUSPENDER] }
 const PANE_PROPS: RenderPropsOf['Pane'] = {
   title: 'Session', isFocused: false, bodyColumns: 40, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {},
@@ -4594,8 +4671,17 @@ const notice = (id: string, status: string, tail = ''): string =>
   `<task-notification>\n<task-id>${id}</task-id>\n<status>${status}</status>\n<summary>s</summary>\n${tail}` +
   '</task-notification>'
 const usageBlock = (ms: number): string => `<usage><duration_ms>${ms}</duration_ms></usage>\n`
-const submitNotice = ($: Engine, text: string, origin: PromptOrigin = { kind: 'task-notification' }) =>
-  $.prompt.submit({ text, wait: false, origin })
+// `turnId` is set for a notice that the engine delivers into a running turn, and left out for one taken in while idle.
+const submitNotice = (
+  $: Engine, text: string, origin: PromptOrigin = { kind: 'task-notification' }, turnId?: string,
+) => $.prompt.submit({ text, wait: false, origin, ...(turnId === undefined ? {} : { turnId }) })
+
+// How long the main loop must have been idle for a notice that comes with no turn running to be taken as coming at the
+// end of its task, in ms (register.tsx).
+const IDLE_GAP_MS = 3000
+// A turn of the main agent ends, and the loop is idle from then on.
+const endTurn = ($: Engine, turnId = 't0') =>
+  $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, turnId, reason: 'answer' })
 
 // The call `call` starts the task `id`, and the clock runs until the call is over.
 const startTask = ($: Engine, clock: MockClock, w: World, id: string, call: object = background()) => {
@@ -4812,13 +4898,15 @@ test('a TaskStop that a subagent made stops the task it names, though the main a
   })
 
 // `killed` and `stopped` are both a stop; the engine has said both. A shell command's notice has no time, so the row
-// has the time from its start to the notice.
+// has the time from its start to the notice. The main loop has been idle for IDLE_GAP_MS by the time each notice comes,
+// so the notice is at the end of its task and the time is exact.
 test('the notice of a task closes its row: completed is done, failed is failed, killed and stopped are stopped',
   SLOW_READER, async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })
     const w = bottom(on, clock)
     await $.session.start(START)
     await clock.advance(1)
+    await endTurn($)
     const ends: Array<[notified: string, shown: string, kind: string, outcome: string]> = [
       ['completed', 'done', 'ok', '✓ 5.0s'],
       ['failed', 'failed', 'error', '✗ 5.0s'],
@@ -4851,6 +4939,274 @@ test('a notice that gives the time the task ran gives it to the row, whatever th
     await submitNotice($, notice('w1', 'completed', usageBlock(72_000)))
 
     expect((await taskRows($)).w1).toMatchObject({ status: 'done', endedAt: startedAt + 5000, durationMs: 72_000 })
+    expect((await logRows($))[0]).toEqual(['main', 'done · workflow: review', 'ok', '✓ 1m 12s'])
+  })
+
+// A notice delivered into a running turn (`turnId` set) waits for the next model request of that turn, so the task may
+// have ended long before it came: the time that runs to it is a bound. The row says so, and the end line has `≤`
+// (U+2264) behind the mark. The loop has been idle for IDLE_GAP_MS, so that `turnId` alone can make the time a bound.
+test('a notice delivered into a running turn gives a time that is at most: the row marks it, and so does the end line',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await endTurn($)
+    const ends: Array<[notified: string, shown: string, kind: string, outcome: string]> = [
+      ['completed', 'done', 'ok', '✓ \u{2264}5.0s'],
+      ['failed', 'failed', 'error', '✗ \u{2264}5.0s'],
+      ['killed', 'stopped', 'info', '\u{2264}5.0s'],
+    ]
+
+    for (const [i, [notified, shown, kind, outcome]] of ends.entries()) {
+      const id = `b${i + 1}`
+      const startedAt = await runFor($, clock, w, id, 5000)
+      await submitNotice($, notice(id, notified), undefined, 't1')
+
+      expect((await taskRows($))[id], notified).toEqual({
+        id, kind: 'shell', description: 'run tests', status: shown, startedAt, endedAt: startedAt + 5000,
+        durationMs: 5000, durationAtMost: true,
+      })
+      expect((await logRows($))[0], notified).toEqual(['main', `${shown} · shell: run tests`, kind, outcome])
+    }
+  })
+
+// A notice that comes with no turn running was taken in when the session went idle, or later. One taken in as it goes
+// idle comes at once, and may have waited for the turn to end; only one that comes after the loop has been idle a while
+// is at the end of its task. IDLE_GAP_MS is 3000 ms: 2999 ms after the turn ended is a bound, 3000 ms after is exact.
+test('a notice with no turn running is a bound 2999 ms after the main turn ended, and exact 3000 ms after',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await runFor($, clock, w, 'b1', 1000)
+    await runFor($, clock, w, 'b2', 1000)
+    const idleAt = clock.now()
+    await endTurn($)
+
+    await clock.advance(IDLE_GAP_MS - 1)
+    await submitNotice($, notice('b1', 'completed'))
+    await clock.advance(1)
+    await submitNotice($, notice('b2', 'completed'))
+
+    const rows = await taskRows($)
+    expect(rows.b1).toMatchObject({ status: 'done', endedAt: idleAt + 2999, durationAtMost: true })
+    expect(rows.b2).toMatchObject({ status: 'done', endedAt: idleAt + 3000 })
+    expect(rows.b2).not.toHaveProperty('durationAtMost')
+  })
+
+// A module that has seen no turn end does not know whether the loop was idle, and a turn that started after the last
+// end has the loop busy again: a notice may have waited in either case, though it carries no `turnId`.
+test('a notice is a bound before the module has seen a turn end, and after a turn started again', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await runFor($, clock, w, 'b1', 5000)
+    await runFor($, clock, w, 'b2', 1000)
+
+    await submitNotice($, notice('b1', 'completed'))
+    expect((await taskRows($)).b1, 'no turn has ended yet').toMatchObject({ durationAtMost: true })
+
+    await endTurn($)
+    await startTurn($, 't1')
+    await clock.advance(2 * IDLE_GAP_MS)
+    await submitNotice($, notice('b2', 'completed'))
+    expect((await taskRows($)).b2, 'a turn started after the end').toMatchObject({ durationAtMost: true })
+  })
+
+// A notice taken in while the loop is idle has its `next(e)` resolve only after its own turn has started, and the
+// turn.start of that turn is raised while the chain beneath the hook still holds the prompt. The hook has looked at how
+// long the loop has been idle, and at the clock, before that: the notice is exact, and ended when it arrived.
+test('an idle notice whose own turn starts while the chain beneath holds it is exact, and ended at its arrival',
+  WITH_PROMPT_HOLDER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    const startedAt = await runFor($, clock, w, 'b1', 1000)
+    await endTurn($)
+    await clock.advance(4000)
+    const arrivedAt = clock.now()
+
+    const notified = submitNotice($, notice('b1', 'completed')) // the chain beneath holds it for 500 ms
+    await clock.settle()
+    await $.turn.start({ text: '<task-notification>done</task-notification>', turnId: 't1' })
+    await clock.advance(500)
+    await notified
+
+    expect((await taskRows($)).b1).toEqual({
+      id: 'b1', kind: 'shell', description: 'run tests', status: 'done', startedAt, endedAt: arrivedAt,
+      durationMs: arrivedAt - startedAt,
+    })
+  })
+
+// The clock read of a turn.complete may land after the next turn started: the loop is busy then, not idle from the time
+// the read brings. The hook does not wait for its read: the turn end is over while the read is still held.
+test('a turn.complete whose clock read lands after a new turn started leaves the loop not idle', WITH_CLOCK_SPOILER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await runFor($, clock, w, 'b1', 1000)
+    await $.command.run({ ...RUN, command: 'hold-clock', args: '500' })
+
+    let isEnded = false
+    // Its read of the clock is the held one.
+    const ended = endTurn($).then(() => {
+      isEnded = true
+    })
+    await clock.settle()
+    expect(isEnded, 'the turn end is over while its read is held').toBe(true)
+    await ended
+    await startTurn($, 't1')
+    await clock.advance(500) // the read lands
+    await clock.advance(4000)
+    await submitNotice($, notice('b1', 'completed'))
+
+    expect((await taskRows($)).b1).toMatchObject({ status: 'done', durationAtMost: true })
+  })
+
+// The loop is idle from the time the turn ended as the hook saw it, at its entry, not from the time the chain beneath
+// answered: the notice that comes IDLE_GAP_MS after the entry is exact though the chain held the turn end for 500 ms.
+test('a turn end that the chain beneath holds makes the loop idle from its entry', WITH_TURN_HOLDER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  await runFor($, clock, w, 'b1', 1000)
+
+  const ended = endTurn($) // the chain beneath holds it for 500 ms
+  await clock.settle()
+  await clock.advance(IDLE_GAP_MS)
+  await ended
+  await submitNotice($, notice('b1', 'completed'))
+
+  expect((await taskRows($)).b1).toMatchObject({ status: 'done' })
+  expect((await taskRows($)).b1).not.toHaveProperty('durationAtMost')
+})
+
+// The turn.start of a new turn is noted at its entry: a notice that comes while the chain beneath still holds the start
+// finds the loop busy, though it was idle for long before.
+test('a notice that comes while the chain beneath holds a turn start is a bound', WITH_START_HOLDER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  await runFor($, clock, w, 'b1', 1000)
+  const first = startTurn($, 't0')
+  await clock.advance(500)
+  await first
+  await endTurn($)
+  await clock.advance(2 * IDLE_GAP_MS)
+
+  const started = startTurn($, 't1') // the chain beneath holds it for 500 ms
+  await clock.settle()
+  await submitNotice($, notice('b1', 'completed'))
+  await clock.advance(500)
+  await started
+
+  expect((await taskRows($)).b1).toMatchObject({ status: 'done', durationAtMost: true })
+})
+
+// mainTurns counts: a turn end whose read lands after the third turn started is told from the turns before it, not only
+// from the first.
+test('a turn end whose clock read lands after the third turn started leaves the loop not idle', WITH_CLOCK_SPOILER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await runFor($, clock, w, 'b1', 1000)
+    await startTurn($, 't0')
+    await endTurn($, 't0')
+    await startTurn($, 't1')
+    await $.command.run({ ...RUN, command: 'hold-clock', args: '500' })
+
+    await endTurn($, 't1') // its read of the clock is the held one
+    await startTurn($, 't2')
+    await clock.advance(500) // the read lands
+    await clock.advance(4000)
+    await submitNotice($, notice('b1', 'completed'))
+
+    expect((await taskRows($)).b1).toMatchObject({ status: 'done', durationAtMost: true })
+  })
+
+// A subagent's turn ends while the main agent's runs: that does not make the main loop idle.
+test('the end of a subagent\'s turn does not make the main loop idle', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  await $.agent.spawn(SPAWN) // a1: an engineer
+  await runFor($, clock, w, 'b1', 1000)
+  await startTurn($)
+
+  await finish($, 'a1')
+  await clock.advance(2 * IDLE_GAP_MS)
+  await submitNotice($, notice('b1', 'completed'))
+
+  expect((await taskRows($)).b1).toMatchObject({ status: 'done', durationAtMost: true })
+})
+
+// The read of the clock at the entry of prompt.submit starts before the hook knows whether the prompt is a notice, so a
+// read that fails is handled whether it is used or not: one that was never used and rejected would be an unhandled
+// rejection, which fails the whole file. A notice whose read failed ends at a read after the chain.
+test('a prompt whose clock read at the entry fails goes through, and a notice ends at a read after the chain',
+  WITH_CLOCK_SPOILER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await runFor($, clock, w, 'b1', 1000)
+
+    await $.command.run({ ...RUN, command: 'refuse-clock' })
+    expect(await submitNotice($, 'hi', { kind: 'composer' })).toEqual({ text: 'hi', origin: { kind: 'composer' } })
+    await clock.advance(10)
+    await $.command.run({ ...RUN, command: 'refuse-clock' })
+    await submitNotice($, notice('b1', 'completed'))
+
+    expect((await taskRows($)).b1).toMatchObject({ status: 'done', endedAt: clock.now() })
+  })
+
+// The read of a turn.complete is not waited for, so a read that fails is handled too: the loop is idle from the time
+// that the last turn end gave, as before.
+test('a turn.complete whose clock read fails leaves the idle time as it is', WITH_CLOCK_SPOILER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  await runFor($, clock, w, 'b1', 1000)
+  await endTurn($)
+  await clock.advance(4000)
+
+  await $.command.run({ ...RUN, command: 'refuse-clock' })
+  await endTurn($, 't1')
+  await clock.advance(10)
+  await submitNotice($, notice('b1', 'completed'))
+
+  expect((await taskRows($)).b1).toMatchObject({ status: 'done' })
+  expect((await taskRows($)).b1).not.toHaveProperty('durationAtMost')
+})
+
+// An agent's notice, and a workflow's, has the time the task ran: it is exact however the notice came.
+test('a notice that gives the time the task ran is exact when it is delivered into a running turn too', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    const startedAt = await runFor($, clock, w, 'w1', 5000, workflow())
+
+    await submitNotice($, notice('w1', 'completed', usageBlock(72_000)), undefined, 't1')
+
+    expect((await taskRows($)).w1).toEqual({
+      id: 'w1', kind: 'workflow', description: 'review', status: 'done', startedAt, endedAt: startedAt + 5000,
+      durationMs: 72_000,
+    })
     expect((await logRows($))[0]).toEqual(['main', 'done · workflow: review', 'ok', '✓ 1m 12s'])
   })
 
@@ -5062,6 +5418,7 @@ for (const surface of ['desktop', 'terminal'] as const) {
       expect(await ui.find({ type: 'Text', text: /^@shell$/ }), 'its kind').toBeDefined()
       expect(await marks(), 'its mark').toEqual([isDesktop ? 'running' : '◐'])
 
+      await endTurn($) // the loop is idle for the 5 s, so the notice is at the end of its task and the time is exact
       await clock.advance(startedAt + 5000 - clock.now()) // the notice comes 5 s after the start
       await submitNotice($, notice('b1', 'completed'))
 
