@@ -397,6 +397,7 @@ type World = {
   statusAll: GitAnswer | undefined // the status with `-uall`, brought by a first one that lists a folder; else `status`
   diff: GitAnswer // `git diff --numstat HEAD`
   toplevel: GitAnswer // `git rev-parse --show-toplevel`
+  shortCommit: GitAnswer // `git rev-parse --short HEAD`: what a detached HEAD shows in place of the branch
   noIndex: (path: string) => GitAnswer // `git diff --no-index` of a new file: exit 1, as git does when the files differ
   gitLag: number // how long each git call takes, in mock ms
   lags: Record<string, number> // how long a kind of git call takes besides: `status`, `diff`, `rev-parse`, `no-index`
@@ -447,7 +448,7 @@ const gitAnswer = (w: World, argv: readonly string[]): GitAnswer => {
   if (command === 'status') return argv.includes('-uall') ? (w.statusAll ?? w.status) : w.status
   if (command === 'diff') return argv.includes('--no-index') ? w.noIndex(argv.at(-1) ?? '') : w.diff
 
-  return argv.includes('--show-toplevel') ? w.toplevel : ok('abc1234\n')
+  return argv.includes('--show-toplevel') ? w.toplevel : w.shortCommit
 }
 
 // Whether a git call cannot be run to its end, as the flags of the world say: its call rejects.
@@ -482,6 +483,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     statusAll: undefined,
     diff: ok(''),
     toplevel: ok('/repo\n'),
+    shortCommit: ok('abc1234\n'),
     noIndex: path => ({ exitCode: 1, stdout: `1\t0\t/dev/null => ${path}\n` }),
     gitLag: 0,
     lags: {},
@@ -3177,6 +3179,34 @@ test('turn.start logs a prompt as you, redacted and cut to 512, and an engine tu
     expect(state.turn?.turnId).toBe('t5')
   })
 
+// A turn is the engine's only when its text opens with a tag of the engine's kind (engineTag): a name of lowercase
+// words joined by hyphens, closed by `>` after its attributes, if it has any. What else starts with `<` is the
+// person's, a token or a secret in brackets and markup among it, and its line is the head of the prompt, masked as any
+// prompt's is. A tag that is a lowercase token is a tag all the same, and its name is masked.
+test('turn.start logs a prompt that opens with `<` as you, masked, unless it opens with a tag of the engine\'s kind',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+
+    await $.turn.start({ text: '<ghp_a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8 please', turnId: 't1' })
+    await $.turn.start({ text: '<ghp_abcdefghijklmnopqrstuvwxyz0123456789>', turnId: 't2' })
+    await $.turn.start({ text: '<password=abcdefgh12345678> x', turnId: 't3' })
+    await $.turn.start({ text: '<div class="x">hi</div>', turnId: 't4' })
+    await $.turn.start({ text: '<teammate-message teammate_id="lead">\nhi', turnId: 't5' })
+
+    const { log } = await readState($)
+    expect(log.map(entry => [entry.who, entry.text, entry.kind])).toEqual([
+      ['engine', 'teammate-message', 'info'],
+      ['you', '<div class="x">hi</div>', 'info'],
+      ['you', '<password=••• x', 'info'],
+      ['engine', '•••', 'info'],
+      ['you', '<••• please', 'info'],
+    ])
+    for (const secret of ['a1B2c3D4', 'abcdefghijkl', 'abcdefgh12345678']) {
+      expect(JSON.stringify(log), secret).not.toContain(secret)
+    }
+  })
+
 // U+202E, the right-to-left override, reorders what follows it; U+200B is a zero-width space; U+200D is the zero-width
 // joiner. They are spelled as escapes, so that this file shows what it says.
 const BIDI = '\u202E'
@@ -3320,6 +3350,48 @@ test('the format characters are taken out of the description and the type of a s
     expect([agents.a2?.description, agents.a2?.type]).toEqual(['review it', 'reviewer'])
     await isClean()
     expect((await readState($)).log.map(entry => entry.text)).toContain('resumed · engineer: check fdp.exe')
+  })
+
+// The row's description and type are drawn as the row keeps them, and the type is also the `who` of every line of the
+// agent, cut to 14 characters: a secret in either is masked and cut as the spawn line is, or the cut would show its
+// head.
+test('a secret in the description or the type of a spawned agent is masked in its row and in the Log', WITH_READER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await $.agent.spawn({ ...SPAWN, description: 'fix token=abcdefgh12345678 now' })
+    await $.agent.spawn({ ...SPAWN, subagentType: 'sk-abcdefgh12345678' })
+    for (const agentId of ['a1', 'a2']) {
+      await $.turn.complete({ answer: 'ok', durationMs: 5, isAborted: false, turnId: 't1', agentId, reason: 'answer' })
+    }
+
+    const { agents, log } = await readState($)
+    expect([agents.a1?.description, agents.a1?.type]).toEqual(['fix token=••• now', 'engineer'])
+    expect([agents.a2?.description, agents.a2?.type]).toEqual(['Fix cart total qty', '•••'])
+    // Newest first: the end of a2 and of a1, then their spawns. The `who` of the end of a2 is its type.
+    expect(log.map(entry => [entry.who, entry.text])).toEqual([
+      ['•••', 'done — ok'],
+      ['engineer', 'done — ok'],
+      ['main', 'spawned · •••: Fix cart total qty'],
+      ['main', 'spawned · engineer: fix token=••• now'],
+    ])
+    expect(JSON.stringify([agents, log])).not.toContain('abcdefgh')
+  })
+
+// The row keeps the description and the type as the spawn line shows them: on one line and cut to 512 characters, so a
+// long one, or one of many lines, is no taller or wider in the Subagents list than that.
+test('a spawned agent keeps its description and its type on one line, cut to 512 characters', WITH_READER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await $.agent.spawn({ ...SPAWN, description: 'x'.repeat(600) })
+    await $.agent.spawn({ ...SPAWN, description: 'Fix the\n  cart\ttotal ' })
+    await $.agent.spawn({ ...SPAWN, subagentType: `${'y'.repeat(300)}\n${'y'.repeat(300)}` })
+
+    const { agents } = await readState($)
+    expect(agents.a1?.description).toBe(`${'x'.repeat(511)}…`)
+    expect(agents.a2?.description).toBe('Fix the cart total')
+    expect(agents.a3?.type).toBe(`${'y'.repeat(300)} ${'y'.repeat(210)}…`)
   })
 
 test('a secret that has a format character in it is masked: the character does not keep its pattern from matching',
@@ -3836,6 +3908,21 @@ test('a subagent description of 128 KB is cut to its head: the hook returns at o
   expect((await readState($)).log.map(entry => entry.text)).toEqual([`spawned · engineer: ${'a.'.repeat(245)}a…`])
 })
 
+// The type of the agent goes the same way: its row keeps it cut to 512 characters, and the spawn line cuts it again.
+test('a subagent type of 128 KB is cut to its head: the hook returns at once', SLOW_READER, async ($, on) => {
+  bottom(on, mock.clock(on))
+  await $.session.start(START)
+
+  const started = performance.now()
+  await $.agent.spawn({ ...SPAWN, subagentType: 'a.'.repeat(65_536) }) // 131,072 units, 128 KB
+  const took = performance.now() - started
+
+  expect(took).toBeLessThan(300) // generous: the URL pattern took seconds on it
+  const { agents, log } = await readState($)
+  expect(agents.a1?.type).toBe(`${'a.'.repeat(255)}a…`)
+  expect(log.map(entry => entry.text)).toEqual([`spawned · ${'a.'.repeat(250)}a…`])
+})
+
 test('the answer of a subagent loses its markdown marks, whether the engine gave it or the agent handed it back',
   SLOW_READER, async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })
@@ -3970,6 +4057,39 @@ test('a subagent description that a removal would turn into U+10EEEE leaves the 
 
     await $.agent.spawn({ ...SPAWN, description: 'fix \uDBFB\u001b\uDEEE it' })
 
+    await expectPaneWithoutControl($)
+  })
+
+// Two more texts from outside that the pane draws: what git prints for the short commit of a detached HEAD (the pane
+// shows it as the branch), and the kind of a rate-limit window that the engine reports.
+test('a short commit with an escape sequence in it leaves the pane drawn, on the desktop and on the terminal',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    const w = bottom(on, clock)
+    w.branch = ''
+    w.shortCommit = ok('abc\x1b[31m1234\n')
+
+    await $.session.start(START)
+    await clock.advance(1)
+
+    expect((await readState($)).project.branch).toBe('abc1234')
+    await expectPaneWithoutControl($)
+  })
+
+test('a rate limit with an escape sequence in its kind leaves the pane drawn, on the desktop and on the terminal',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on)
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+
+    await $.session.measure({
+      context: { window: 1_000_000, tokens: 128_000, percent: 12.8 },
+      rateLimits: [{ kind: 'five_hour\x1b[31m', percentUsed: 3 }],
+      changed: ['context'],
+    })
+
+    expect((await readState($)).usage.rateLimits).toEqual([{ kind: 'five_hour', percentUsed: 3 }])
     await expectPaneWithoutControl($)
   })
 

@@ -366,11 +366,103 @@ export function stripFormat(s: string): string {
   return parts.join('')
 }
 
+// A quoted value, whole: in straight quotes (a backslash escapes a quote inside them), in backticks, or in the curly
+// quotes that a chat or a document makes of them. One that nothing closes runs to the end of the line, as a text that
+// the Log cut leaves it, and is masked all the same, but for a backtick one (see below). The two patterns below take
+// their value from it.
+const QUOTED_VALUE = [
+  String.raw`"(?:\\.|[^"\\\r\n])*"?`,
+  String.raw`'(?:\\.|[^'\\\r\n])*'?`,
+  // A markdown code span that ends in `Authorization:` is no value (its closing backtick would open one).
+  String.raw`\x60[^\x60\r\n]*\x60`,
+  String.raw`\u{201C}[^\u{201D}\r\n]*\u{201D}?`,
+  String.raw`\u{2018}[^\u{2019}\r\n]*\u{2019}?`,
+].join('|')
+
+// A quote that can stand after the name of a key, or after `authorization`: a straight one, a backtick, or any of the
+// four curly ones. A name in curly quotes ends in the right quote of its pair or, in German, in the left one.
+const KEY_QUOTE = String.raw`["'\x60\u{201C}\u{201D}\u{2018}\u{2019}]`
+
+// Whitespace that stays on its line: any but CR, LF, U+2028 and U+2029.
+const INLINE_SPACE = String.raw`[^\S\r\n\u{2028}\u{2029}]`
+
+// An Authorization header whose value is in quotes (`"Authorization": "Bearer …"`, `'Authorization' => 'Basic …'`,
+// `authorization="…"`). SECRETS takes `"Bearer` for the value there and masks that word alone, so the token behind the
+// space stays. The whole quoted value goes, the scheme in it too. The arrow is read before `=`, as in QUOTED_KEY.
+const QUOTED_AUTHORIZATION = new RegExp(
+  String.raw`(authorization${KEY_QUOTE}?\s*(?:=>|:|=(?!>))\s*)(?:${QUOTED_VALUE})`, 'giu',
+)
+
+// The value of a key that has a quote after its name, as in JSON, a Python dict and a curl body
+// (`{"password":"hunter2"}`, `{'api_key': 'abc'}`, `'token' => 'abc'`). SECRETS masks a value only when the `:` or `=`
+// comes right after the name, so the value of such a key shows. The arrow is read before `=`: `=` would take the first
+// character of `=>`, and a bare value the `>`. The value is a quoted one (QUOTED_VALUE), which may begin on a later
+// line, or a bare one on the line of its key, up to a space, a comma, a semicolon or a closing bracket. A bare one may
+// begin with `Bearer` or `Basic` and the credential after it (SECRETS reads those by their scheme, and the key must not
+// eat that anchor); it does not begin with a bracket, which opens a nested value for the patterns that read inside it,
+// and it does not sit on a later line, where a block that the key opens belongs to SECRETS. The quote after the name is
+// required: `the token count` and `"tokens"` are no key. The `access` and `auth` token names and the `client` secret
+// name are covered by `token` and `secret` already (no `\b` keeps them out), so they widen nothing. Left as they are: a
+// nested value (`{"password": {"value": …}}`), the later items of a list, a bare value cut at `, ; ) ] }`, and a quoted
+// value across a line end.
+const QUOTED_KEY = new RegExp(
+  // The name, its quote and its separator, then the gap: any whitespace before a quoted value, and before a bare one
+  // any but a line end (CR, LF, and the line and paragraph separators U+2028 and U+2029), so a tab, a no-break space
+  // and an ideographic space are crossed and a new line is not. Group 1 is all of that and stays; the value after it
+  // becomes the mask. An `=` that starts an arrow is no separator, so a dangling `=>` is not read as `=` and a value
+  // `>`.
+  String.raw`((?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|token|secret|password|passwd|pwd)` +
+    String.raw`${KEY_QUOTE}\s*(?:=>|:|=(?!>))(?:\s*(?=["'\x60\u{201C}\u{2018}])|${INLINE_SPACE}*))` +
+    // The prefix and the value stay on the key's line; a value never starts with `=`. The prefix may open with a
+    // backtick that nothing closes (QUOTED_VALUE takes a closed one), as in AUTH_SCHEME: the bare value would otherwise
+    // take the backtick and `Bearer` for one word, and the token after it would show.
+    String.raw`(?:${QUOTED_VALUE}|(?:\x60?(?:bearer|basic)${INLINE_SPACE}+)?[^\s,;}\])\[{(=][^\s,;}\])]*)`,
+  'giu',
+)
+
+// An Authorization header with a scheme other than Bearer and Basic (`Token …`, `Bot …`, `ApiKey …`). SECRETS skips
+// those two schemes alone, so for any other it takes the scheme for the value and masks that word, and the credential
+// behind the space stays. A word that only starts with one of the two (`Bearerx`) is another scheme. A credential does
+// not begin with `--`: that is a flag, which SECRETS reads (`Foo --token x`). Digest and AWS SigV4 credentials, which
+// are several parts with commas between them, are masked in their first part only. The credential stays on the
+// header's line, so the first word of the next line (a key whose own pattern masks it) is left to SECRETS. A scheme
+// after a backtick that nothing closes on its line (QUOTED_VALUE takes a closed one) is taken whatever it is, Bearer
+// and Basic too: SECRETS would read the backtick and the scheme as one word, and the credential would show.
+const AUTH_SCHEME = new RegExp(
+  String.raw`(authorization${KEY_QUOTE}?\s*[:=]\s*)(?:\x60|(?!(?:bearer|basic)\b))[A-Za-z][\w.-]*` +
+    String.raw`${INLINE_SPACE}+(?!--)\S+`,
+  'giu',
+)
+
+// GitHub and Slack tokens with no word boundary before them, in the shape that real ones have. SECRETS starts a token
+// at `\b`, so one that a word touches shows: a whole escape sequence goes out of a text and leaves what was beside it
+// glued to the next word (`x`, U+009B, `31m` and `ghp_…` read `xghp_…`). A GitHub token holds 36 letters and digits
+// after `ghp_` (or `gho_`, `ghu_`, `ghs_`, `ghr_`; SECRETS has no prefix for `ghu_` and `ghr_`), a fine-grained one 22
+// letters, digits and underscores or more after `github_pat_`, a Slack token 10 letters, digits and dashes or more
+// after `xoxb-` (or `xoxa-`, `xoxp-`, `xoxr-`, `xoxs-`); neither takes the other's separator. The shapes are narrow
+// because the pattern has no `\b`: a looser one would mask the tail of an ordinary word (`laughs-at-everything` holds
+// `ghs-at-everything`). `sk-`, `pk-` and `rk-` are left to SECRETS: a word may hold them (`task-management`).
+const GLUED_TOKEN = /(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[abprs]-[A-Za-z0-9-]{10,})/g
+
+// A Bearer token with no word boundary before `Bearer`, for the same reason (`xBearer …`, once the sequence between has
+// gone). It is case-sensitive: a header writes `Bearer`, and a word that ends in `bearer` (pallbearer, torchbearer) is
+// prose; the Bearer pattern of SECRETS, with its `\b`, keeps every case. The mask follows one space, as SECRETS writes
+// it.
+const GLUED_BEARER = /(Bearer)\s+[A-Za-z0-9._~+/-]{8,}=*/g
+
 // The format and control characters go first, as shorten takes them out too: one inside a secret would keep a pattern
-// from matching, and the secret would show once shorten had closed the gap. A caller cuts a text to its head first
-// (wordHead): the URL pattern takes quadratic time on a long crafted text such as `a.a.a…`.
+// from matching, and the secret would show once shorten had closed the gap. The patterns above come next, in that
+// order and each over what the one before has left, and SECRETS last, as it was copied. A caller cuts a text to its
+// head first (wordHead): the URL pattern takes quadratic time on a long crafted text such as `a.a.a…`.
 export function redact(s: string): string {
-  return SECRETS.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), stripFormat(s))
+  const clean = stripFormat(s)
+    .replace(QUOTED_AUTHORIZATION, '$1•••')
+    .replace(QUOTED_KEY, '$1•••')
+    .replace(AUTH_SCHEME, '$1•••')
+    .replace(GLUED_TOKEN, '•••')
+    .replace(GLUED_BEARER, '$1 •••')
+
+  return SECRETS.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), clean)
 }
 
 // Takes the markdown marks out of a text that the pane shows as it is: a pair of `**` around text on one line, which is
@@ -589,6 +681,17 @@ export function parseTaskNotification(text: string): TaskEnd | null {
   const ms = duration !== undefined && /^\d+$/.test(duration) ? Number(duration) : null
 
   return { id, status, durationMs: Number.isSafeInteger(ms) ? ms : null }
+}
+
+// The name of the tag that opens a turn the engine started on its own, or undefined for a person's prompt. The engine
+// opens such a turn with a hyphenated lowercase tag (`task-notification`, `system-reminder`, `command-name`), and its
+// tags may carry attributes after a space (`<teammate-message teammate_id="lead">`). An HTML tag has no hyphen, so a
+// pasted `<div class=…>` or `<p>` is the person's prompt, and so is a `<token…` that no `>` closes. Only the first 256
+// characters are read, once the format and control characters are out of them. The name is two to nine words of
+// lowercase letters and digits, joined by `-` or `_`; the attributes hold no `<` or `>`. A lowercase token in brackets
+// (`<ghp_…>`) has that shape, so the caller masks the name.
+export function engineTag(text: string): string | undefined {
+  return /^<([a-z][a-z0-9]*(?:[-_][a-z0-9]+){1,8})(?:\s[^<>]*)?>/.exec(stripFormat(text.slice(0, 256)))?.[1]
 }
 
 // The row of a task that has ended: its status, the end time and the time it ran. The notification's duration stands

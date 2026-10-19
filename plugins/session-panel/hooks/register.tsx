@@ -10,8 +10,8 @@ import type {
 } from 'claude-code'
 
 import {
-  addAgentCost, attributeCost, computeTurnStats, finishTask, fmtDuration, fmtTokens, fmtUsd, LOG_TEXT_MAX, logHead,
-  parseStatus, parseTaskNotification, plainText, pushLog, redact, shortType, shorten, stripFormat, sumNumstat,
+  addAgentCost, attributeCost, computeTurnStats, engineTag, finishTask, fmtDuration, fmtTokens, fmtUsd, LOG_TEXT_MAX,
+  logHead, parseStatus, parseTaskNotification, plainText, pushLog, redact, shortType, shorten, stripFormat, sumNumstat,
   taskFromCall, toolLabel,
 } from './stats'
 import type { AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, TaskEnd, TaskRow, Usage } from './stats'
@@ -217,7 +217,8 @@ const percentOf = (tokens: number | undefined, window: number): number | undefin
 }
 
 // The figures of session.measure and of usage(), as the `usage` value keeps them. The percent is worked out here, of
-// `window`: the engine's own is of the model's window, not of a smaller compaction window.
+// `window`: the engine's own is of the model's window, not of a smaller compaction window. The kind of a window is the
+// engine's text, and the pane draws it, so its format and control characters go (stripFormat).
 const usageFields = (
   from: { context: SessionContextUsage; rateLimits: SessionRateLimit[]; cost?: SessionCost },
   window: number,
@@ -226,7 +227,9 @@ const usageFields = (
   contextWindow: window,
   contextPct: percentOf(from.context.tokens, window),
   costUsd: from.cost?.usd,
-  rateLimits: from.rateLimits.map(r => ({ kind: r.kind, percentUsed: r.percentUsed, resetsAt: toMs(r.resetsAt) })),
+  rateLimits: from.rateLimits.map(r => ({
+    kind: stripFormat(r.kind), percentUsed: r.percentUsed, resetsAt: toMs(r.resetsAt),
+  })),
 })
 
 // The log line of a subagent that has ended: its text, and its outcome, the time it took behind a mark (✓ for an
@@ -347,7 +350,8 @@ async function refreshUsage($: EngineInterface): Promise<void> {
 }
 
 // The branch; the short commit on a detached HEAD; null outside a git repository or when git fails. The format and
-// control characters of the name are taken out (stripFormat): a U+202E in it would reorder what the pane shows.
+// control characters of the name, or of the commit, are taken out (stripFormat): a U+202E in either would reorder what
+// the pane shows.
 async function gitBranch($: EngineInterface, root: string): Promise<string | null> {
   const init = { cwd: root, timeoutMs: 5000 }
   try {
@@ -357,7 +361,7 @@ async function gitBranch($: EngineInterface, root: string): Promise<string | nul
     if (branch !== '') return branch
     const head = await $.process.run(['git', 'rev-parse', '--short', 'HEAD'], init)
 
-    return head.exitCode === 0 ? head.stdout.trim() : null
+    return head.exitCode === 0 ? stripFormat(head.stdout).trim() : null
   } catch {
     return null
   }
@@ -830,13 +834,14 @@ export const register: Register = on => {
     await update($, turnAtom, () => ({
       turnId: e.turnId, startedAt: now, costAtStart: cost?.usd ?? null, steps: [], toolIntervals: [],
     }))
-    // A turn the engine started on its own opens with a tag (<task-notification>), a person's prompt does not. A turn
-    // with no text (a continuation) is no line of the log.
+    // A turn the engine started on its own opens with a hyphenated lowercase tag (engineTag: `<task-notification>`);
+    // its line is the name of the tag. Any other prompt is the person's, one that opens with a pasted `<token…` or
+    // `<div class=…>` too, and its line is its head. Either line is masked: a tag can be a lowercase token. A turn with
+    // no text (a continuation) is no line of the log.
     if (e.text.trim() !== '') {
-      const tag = /^<([^\s>/]+)/.exec(e.text)?.[1]
+      const tag = engineTag(e.text)
       await addLog(
-        $, now, tag === undefined ? 'you' : 'engine', shorten(tag ?? redact(logHead(e.text)), LOG_TEXT_MAX),
-        'info',
+        $, now, tag === undefined ? 'you' : 'engine', shorten(redact(tag ?? logHead(e.text)), LOG_TEXT_MAX), 'info',
       )
     }
 
@@ -981,12 +986,13 @@ export const register: Register = on => {
     if (spawned.agentId !== undefined) {
       const { agentId } = spawned
       const now = await $.clock.now()
-      // The Subagents list draws the description and the type as the row keeps them, so their format and control
-      // characters go here (a U+202E would reorder what the list shows, and the engine refuses a text that holds a
-      // control character and draws its own pane in place of the mod's). No other step writes a row from what the
-      // engine gave: a sync, a resume and the end of a run only change a row that is there.
-      const type = stripFormat(e.subagentType ?? e.name ?? 'agent')
-      const description = stripFormat(e.description)
+      // The Subagents list draws the description and the type as the row keeps them, and the Log draws the type as the
+      // `who` of the agent's lines, so both go through the pipeline of the spawn line here: the format and control
+      // characters (a U+202E would reorder what the list shows, and the engine refuses a text that holds a control
+      // character and draws its own pane in place of the mod's), then the secrets, then the cut. No other step writes a
+      // row from what the engine gave: a sync, a resume and the end of a run only change a row that is there.
+      const type = shorten(redact(logHead(e.subagentType ?? e.name ?? 'agent')), LOG_TEXT_MAX)
+      const description = shorten(redact(logHead(e.description)), LOG_TEXT_MAX)
       const row: AgentRow = {
         id: agentId, description, type, model: spawned.model, status: 'running', startedAt: now, endedAt: null,
         costUsd: null,

@@ -5,6 +5,7 @@ import {
   cacheHitPct,
   computeTurnStats,
   CUT_WORD_MAX,
+  engineTag,
   finishTask,
   fmtClock,
   fmtCountdown,
@@ -460,6 +461,20 @@ test('stripFormat reads 128 KB of unfinished sequences and of invisibles once: m
   }
   cases.forEach(([name, , want], index) => expect(results[index], name).toBe(want))
   expect(best).toBeLessThan(300) // generous: a body that ran on to the end took seconds
+})
+
+// A quoted value that nothing closes runs to the end of the line, and a key may be followed by 128 KB of spaces before
+// its value: each is read in one pass; so are a backtick before a long scheme and 128 KB of no-break spaces after a
+// scheme.
+test('redact reads 128 KB of an unclosed quoted value and of a gap after a key once: milliseconds, not seconds', () => {
+  const gap = ' '.repeat(131_072)
+  const started = performance.now()
+  expect(redact(`authorization="${'a'.repeat(131_072)}`)).toBe('authorization=•••')
+  expect(redact(`"token":${gap}x`)).toBe(`"token":${gap}•••`)
+  expect(redact(`Authorization: \`${'a'.repeat(131_072)}`)).toBe('Authorization: •••')
+  expect(redact(`"token": \`Bearer${'\u{A0}'.repeat(131_072)}x`)).toBe('"token": •••')
+  expect(redact(`Authorization: Foo${'\u{A0}'.repeat(131_072)}x`)).toBe('Authorization: •••')
+  expect(performance.now() - started).toBeLessThan(300)
 })
 
 // U+10EEEE, a private-use code point, is the placeholder that the engine keeps for itself. It refuses a text child that
@@ -964,6 +979,355 @@ test('redact', () => {
   for (const [input, want] of cases) expect(redact(input), `redact(${input})`).toBe(want)
 })
 
+// An Authorization header whose value is in quotes, as a header is in JSON, a Ruby hash, a shell word or a log. SECRETS
+// takes `"Bearer` for the value there and masks that word alone, so the token behind the space stays. A quoted value is
+// one value, spaces and all, whatever its quotes (straight, backtick or curly), with a backslash escaping a quote
+// inside the straight ones; one that nothing closes runs to the end of the line, as a cut text leaves it.
+test('redact masks a quoted Authorization value whole: any quotes, any scheme inside it, a hash rocket', () => {
+  const cases: Array<[input: string, want: string]> = [
+    ['Authorization: "Bearer abcdefgh12345678"', 'Authorization: •••'],
+    ['"Authorization": "Basic dXNlcjpwYXNzd29yZA=="', '"Authorization": •••'],
+    ["authorization='abcdefgh12345678'", 'authorization=•••'],
+    ['Authorization: `Bearer abcdefgh12345678`', 'Authorization: •••'],
+    ['Authorization: \u{201C}Bearer abcdefgh12345678\u{201D}', 'Authorization: •••'],
+    ['Authorization: \u{2018}Bearer abcdefgh12345678\u{2019}', 'Authorization: •••'],
+    ["'Authorization' => 'Basic dXNlcjpwYXNzd29yZA=='", "'Authorization' => •••"],
+    // The key may have a quote of its own, a space before the separator and none after it, and any case.
+    ['`authorization` = `Bearer abcdefgh12345678`', '`authorization` = •••'],
+    ['AUTHORIZATION:"Bearer abcdefgh12345678"', 'AUTHORIZATION:•••'],
+    // The value ends at its closing quote, and what follows stays; a quote that a backslash escapes does not close it.
+    ['{"Authorization": "Bearer abcdefgh12345678", "Accept": "x"}', '{"Authorization": •••, "Accept": "x"}'],
+    ['Authorization: "Bearer abcd\\"efgh 12345678" end', 'Authorization: ••• end'],
+    ["Authorization: 'Bearer abcd\\'efgh 12345678' end", 'Authorization: ••• end'],
+    // Every occurrence goes, not the first alone.
+    ['Authorization: "a b" and authorization="c d"', 'Authorization: ••• and authorization=•••'],
+  ]
+  for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
+  // Each kind of quote ends its value at its own closing quote; one that nothing closes ends with its line, whichever
+  // line end that is (a backtick one is no quoted value, and AUTH_SCHEME takes it with its scheme and credential).
+  const quotes: Array<[open: string, close: string]> = [
+    ['"', '"'], ["'", "'"], ['`', '`'], ['\u{201C}', '\u{201D}'], ['\u{2018}', '\u{2019}'],
+  ]
+  for (const [open, close] of quotes) {
+    expect(redact(`Authorization: ${open}Bearer abcd efgh 12345678${close} end`), open).toBe('Authorization: ••• end')
+    for (const eol of ['\n', '\r', '\r\n']) {
+      const unclosed = redact(`Authorization: ${open}Bearer abcdefgh12345678${eol}next line`)
+      expect(unclosed, `${open} ${JSON.stringify(eol)}`).toBe(`Authorization: •••${eol}next line`)
+    }
+  }
+})
+
+// SECRETS masks the value of a key only when the `:` or `=` comes right after the key. In JSON, a Python dict and a
+// curl body a quote stands between them (`"password":"…"`), and the value showed. That quote is what makes a word a key
+// here: `the token count` and `"tokens"` are none. The value is a quoted one, as above, or a bare one up to a space, a
+// comma, a semicolon or a closing bracket.
+test('redact masks the value of a quoted key: JSON, a dict, a curl body, a bare value', () => {
+  const cases: Array<[input: string, want: string]> = [
+    ['{"password":"hunter2secret"}', '{"password":•••}'],
+    ['{"access_token":"abcdefgh12345678","expires":3600}', '{"access_token":•••,"expires":3600}'],
+    ["{'password': 'hunter2secret'}", "{'password': •••}"],
+    ['"password": hunter2secret', '"password": •••'],
+    [`curl -d '{"username":"u","password":"hunter2secret"}'`, `curl -d '{"username":"u","password":•••}'`],
+    ['"password"=hunter2secret', '"password"=•••'],
+    ['{"password" : "hunter2 secret", "user": "u"}', '{"password" : •••, "user": "u"}'],
+    ['{"Password": "hunter2secret"}', '{"Password": •••}'],
+    ['`token`: `abcdefgh12345678`', '`token`: •••'],
+    // The name may have a prefix: `refresh_token` ends in `token`.
+    ['{"refresh_token": "abcdefgh12345678"}', '{"refresh_token": •••}'],
+    // Every occurrence goes, not the first alone.
+    ['{"password":"a b","token":"c d"}', '{"password":•••,"token":•••}'],
+  ]
+  for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
+  // Every name of the pattern, with its separator and without, holding a value that has a space in it.
+  const names = [
+    'api_key', 'api-key', 'apikey', 'access_token', 'access-token', 'accesstoken', 'auth_token', 'auth-token',
+    'authtoken', 'client_secret', 'client-secret', 'clientsecret', 'token', 'secret', 'password', 'passwd', 'pwd',
+  ]
+  for (const name of names) expect(redact(`{"${name}": "two words"}`), name).toBe(`{"${name}": •••}`)
+  // A bare value ends at a space, a comma, a semicolon, a closing bracket or a brace.
+  for (const end of [' ', ',', ';', '}', ']', ')']) {
+    expect(redact(`"password": hunter2secret${end}rest`), JSON.stringify(end)).toBe(`"password": •••${end}rest`)
+  }
+})
+
+// A hash rocket after a quoted key: the arrow is read before `=`. Read the other way, `=` takes the first character of
+// `=>` and a bare value takes the `>`, so the quoted value behind it stays in view.
+test('redact masks the value after a hash rocket whole: the arrow is read before `=`', () => {
+  const cases: Array<[input: string, want: string]> = [
+    ["{'password' => 'hunter2 secret'}", "{'password' => •••}"],
+    ['"password" => "hunter2secret"', '"password" => •••'],
+    ["'api_key' => 'abcdefgh12345678'", "'api_key' => •••"],
+    ['"password"=>x', '"password"=>•••'],
+  ]
+  for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
+})
+
+// A pattern must not eat the anchor of one that comes after it. A bare value can be a Bearer or a Basic credential,
+// which SECRETS reads by its scheme: the key takes the scheme with the credential, not the scheme alone. A bare value
+// does not begin with a bracket (a nested value is left to the patterns that read inside it), and it stands on the line
+// of its key: the lines behind a key whose value is a block belong to SECRETS. The credential of a scheme does not
+// begin with `--`, a flag that SECRETS reads (`--token x`).
+test('redact leaves the anchor of a later pattern to it: Bearer, a nested value, the next line, a flag', () => {
+  const cases: Array<[input: string, want: string]> = [
+    ['"token": Bearer abcdefgh12345678', '"token": •••'],
+    ["'secret': Bearer abcdefgh12345678", "'secret': •••"],
+    ['"password": Basic dXNlcjpwYXNz==', '"password": •••'],
+    ['"token": BEARER   abcdefgh12345678', '"token": •••'],
+    [`{"secret": {password: 'hunter2secret'}}`, '{"secret": {password: •••}}'],
+    ['"secret":\n  password: hunter2secret', '"secret":\n  password: •••'],
+    ['"secret":\r\n  password: hunter2secret', '"secret":\r\n  password: •••'],
+    ['"secret":\r  password: hunter2secret', '"secret":\r  password: •••'],
+    // The line separator and the paragraph separator end a line as LF does.
+    ['"secret":\u{2028}password: hunter2secret', '"secret":\u{2028}password: •••'],
+    ['"secret":\u{2029}password: hunter2secret', '"secret":\u{2029}password: •••'],
+    // Any whitespace but a line end is a gap: a tab, a no-break space, an ideographic space.
+    ['"password":\thunter2secret', '"password":\t•••'],
+    ['"password":\u{A0}hunter2secret', '"password":\u{A0}•••'],
+    ['"password":\u{3000}hunter2secret', '"password":\u{3000}•••'],
+    ['Authorization: Foo --token hunter2secret', 'Authorization: ••• --token •••'],
+    // Only a credential that begins with `--` is a flag.
+    ['Authorization: Token abc--def', 'Authorization: •••'],
+    ['Authorization: Token -abcdefgh', 'Authorization: •••'],
+  ]
+  for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
+  // A bracket begins a value that is no bare one: to this pattern there is no value here.
+  for (const open of ['{', '[', '(']) {
+    const text = `"password": ${open}x`
+    expect(redact(text), open).toBe(text)
+  }
+  // A quoted value of any kind may begin on the next line.
+  const quotes: Array<[open: string, close: string]> = [
+    ['"', '"'], ["'", "'"], ['`', '`'], ['\u{201C}', '\u{201D}'], ['\u{2018}', '\u{2019}'],
+  ]
+  for (const [open, close] of quotes) {
+    expect(redact(`"token":\n  ${open}two words${close}`), open).toBe('"token":\n  •••')
+  }
+})
+
+// A key, or the word `Authorization`, in curly quotes (a chat, a document or a word processor makes them). Either quote
+// of a pair may close the name: the German closing quotes are the English opening ones.
+test('redact masks a key and a header written in curly quotes', () => {
+  const [ldq, rdq, lsq, rsq] = ['\u{201C}', '\u{201D}', '\u{2018}', '\u{2019}']
+  const cases: Array<[input: string, want: string]> = [
+    [`${ldq}password${rdq}: ${ldq}hunter2secret${rdq}`, `${ldq}password${rdq}: •••`],
+    [`${ldq}Authorization${rdq}: ${ldq}Token abcdefgh12345678${rdq}`, `${ldq}Authorization${rdq}: •••`],
+    [`${lsq}api_key${rsq}: ${lsq}abcdefgh12345678${rsq}`, `${lsq}api_key${rsq}: •••`],
+    [`${ldq}access_token${rdq}:${ldq}abcdefgh12345678${rdq}`, `${ldq}access_token${rdq}:•••`],
+    // A name closed by the other quote of its pair, with a bare value, and a header with a bare scheme.
+    [`\u{201E}password${ldq}: hunter2secret`, `\u{201E}password${ldq}: •••`],
+    [`\u{201A}api_key${lsq}: abcdefgh12345678`, `\u{201A}api_key${lsq}: •••`],
+    [`${ldq}Authorization${rdq}: Token abcdefgh12345678`, `${ldq}Authorization${rdq}: •••`],
+  ]
+  for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
+})
+
+// A credential runs to the next space and a bare value to a space or a closing bracket, so base64, a JWT and a password
+// keep every character they hold.
+test('redact masks a credential or a value whole when it holds punctuation: base64, a JWT, a password', () => {
+  const cases: Array<[input: string, want: string]> = [
+    ['Authorization: Token dGVzdA==.a-b/c+d', 'Authorization: •••'],
+    ['Authorization: JWT eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig', 'Authorization: •••'],
+    ['"password": p@ss.w0rd-x/y=', '"password": •••'],
+  ]
+  for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
+})
+
+// SECRETS skips a Bearer or a Basic scheme and masks the credential after it, but it takes any other scheme for the
+// value and masks that word alone: `Authorization: Token abc…` shows `abc…`. A scheme is a word (letters, digits, `_`,
+// `.` and `-` after its first letter) and a space before the credential. Bearer and Basic keep the rule they had, and a
+// word that only starts with one of them is another scheme.
+test('redact masks the credential after any Authorization scheme: Token, Bot, ApiKey and the rest', () => {
+  const cases: Array<[input: string, want: string]> = [
+    ['Authorization: Token abcdefgh12345678', 'Authorization: •••'],
+    ['Authorization: token abcdefgh12345678', 'Authorization: •••'],
+    ['Authorization: Bot abcdefgh12345678', 'Authorization: •••'],
+    ['Authorization: ApiKey abcdefgh12345678', 'Authorization: •••'],
+    ['Authorization: Api-Key.v2 abcdefgh12345678', 'Authorization: •••'],
+    ['Authorization:Token abcdefgh12345678', 'Authorization:•••'],
+    ['"Authorization": Token abcdefgh12345678', '"Authorization": •••'],
+    ["'Authorization': Token abcdefgh12345678", "'Authorization': •••"],
+    ['`Authorization`: Token abcdefgh12345678', '`Authorization`: •••'],
+    ['authorization=Token abcdefgh12345678', 'authorization=•••'],
+    ['Authorization: Token \t abcdefgh12345678', 'Authorization: •••'],
+    // Every occurrence goes, not the first alone.
+    [
+      'Authorization: Token abcdefgh12345678 and authorization: Bot abcdefgh12345678',
+      'Authorization: ••• and authorization: •••',
+    ],
+    ['Authorization: Bearerx abcdefgh12345678', 'Authorization: •••'],
+    ['Authorization: Basicx dXNlcjpwYXNz', 'Authorization: •••'],
+    ['Authorization: Bearer abcdefgh12345678', 'Authorization: Bearer •••'],
+    ['Authorization: Basic dXNlcjpwYXNz', 'Authorization: Basic •••'],
+  ]
+  for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
+})
+
+// SECRETS starts a token at a word boundary (`\b`), so one that a word touches shows. A whole escape sequence goes out
+// of a text and leaves what was beside it glued: `x`, U+009B, `31m` and `ghp_…` read `xghp_…` once the sequence is
+// gone, with no boundary between `x` and `g`. GitHub and Slack tokens are masked wherever they stand, in the shape they
+// have: a GitHub token is 36 letters and digits after `ghp_` (or `gho_`, `ghu_`, `ghs_`, `ghr_`), a fine-grained one
+// 22 letters, digits and underscores after `github_pat_`, a Slack token 10 letters, digits and dashes after `xoxb-` (or
+// `xoxa-`, `xoxp-`, `xoxr-`, `xoxs-`). `sk-`, `pk-` and `rk-` are not: `task-management` holds `sk-management`.
+test('redact masks a GitHub or Slack token that a word touches, as the removal of an escape sequence leaves it', () => {
+  const token = 'ghp_a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8' // `ghp_` and 36 letters and digits
+  expect(redact(`x\x9b31m${token}`)).toBe('x•••')
+  expect(redact(`x\x1b(B${token}`)).toBe('x•••')
+  expect(redact(`foo${token}`)).toBe('foo•••')
+  // GitHub: 36 characters make a token and 35 do not; the separator is `_`, and a dash is a Slack one.
+  const github = 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8'
+  for (const prefix of ['ghp', 'gho', 'ghu', 'ghs', 'ghr']) {
+    expect(redact(`${prefix}_${github}`), prefix).toBe('•••')
+    expect(redact(`foo${prefix}_${github}`), prefix).toBe('foo•••')
+    expect(redact(`foo${prefix}_${github.slice(1)}`), prefix).toBe(`foo${prefix}_${github.slice(1)}`)
+    expect(redact(`foo${prefix}-${github}`), prefix).toBe(`foo${prefix}-${github}`)
+  }
+  // Fine-grained: 22 characters and 21, with `_` in the body; `_` ends the prefix, and a dash does not.
+  const fine = '11AbCdEfG0_hIjKlMnOpQr'
+  expect(redact(`github_pat_${fine}`)).toBe('•••')
+  expect(redact(`foogithub_pat_${fine}`)).toBe('foo•••')
+  expect(redact(`foogithub_pat_${fine.slice(1)}`)).toBe(`foogithub_pat_${fine.slice(1)}`)
+  expect(redact(`foogithub_pat-${fine}`)).toBe(`foogithub_pat-${fine}`)
+  // Slack: 10 characters and 9, with `-` in the body; the separator is `-`, and an underscore is a GitHub one.
+  const slack = '1234-AbC-9'
+  for (const prefix of ['xoxa', 'xoxb', 'xoxp', 'xoxr', 'xoxs']) {
+    expect(redact(`${prefix}-${slack}`), prefix).toBe('•••')
+    expect(redact(`foo${prefix}-${slack}`), prefix).toBe('foo•••')
+    expect(redact(`foo${prefix}-${slack.slice(1)}`), prefix).toBe(`foo${prefix}-${slack.slice(1)}`)
+    expect(redact(`foo${prefix}_${slack}`), prefix).toBe(`foo${prefix}_${slack}`)
+  }
+  // No other character joins a run: a GitHub body has no `_` or `-`, a fine-grained one no `-`, a Slack one no `_`.
+  for (const text of [
+    `fooghp_${'a'.repeat(18)}_${'b'.repeat(17)}`,
+    `fooghp_${'a'.repeat(18)}-${'b'.repeat(17)}`,
+    `foogithub_pat_${'a'.repeat(11)}-${'b'.repeat(10)}`,
+    `fooxoxb-${'a'.repeat(5)}_${'b'.repeat(5)}`,
+  ]) expect(redact(text), text).toBe(text)
+  // Every occurrence goes, not the first alone.
+  expect(redact(`foo${token} bar${token}`)).toBe('foo••• bar•••')
+})
+
+// The same for a Bearer token: a word that touches `Bearer` hides the token from SECRETS, which wants a word boundary.
+test('redact masks a Bearer token that a word touches, and keeps one space between the word and the mask', () => {
+  expect(redact('x\x1b[1mBearer abcdefgh12345678')).toBe('xBearer •••')
+  expect(redact('xBearer abcdefgh12345678')).toBe('xBearer •••')
+  expect(redact('fooBearer abcdefgh12345678')).toBe('fooBearer •••')
+  expect(redact('fooBearer \t abcdefgh12345678==')).toBe('fooBearer •••')
+  // The token has eight characters of the Bearer alphabet at least; the alphabet holds `.`, `_`, `~`, `+`, `/` and `-`.
+  expect(redact('fooBearer abcdefgh')).toBe('fooBearer •••')
+  expect(redact('fooBearer abcdefg')).toBe('fooBearer abcdefg')
+  expect(redact('fooBearer a.b_c~d+e/f-g12345')).toBe('fooBearer •••')
+  // Every occurrence goes, not the first alone.
+  expect(redact('fooBearer abcdefgh12345678 barBearer abcdefgh12345678')).toBe('fooBearer ••• barBearer •••')
+})
+
+// The glued patterns have no `\b`, so they match the shape of a token and no looser: a word that holds a prefix with a
+// dash or an underscore after it keeps its tail (`laughs-at-everything` holds `ghs-at-everything`), and a word that
+// ends in `bearer` is prose (`pallbearer carrying` is `bearer` and a word of eight letters).
+test('redact leaves alone the words that hold a token prefix or end in `bearer`', () => {
+  const kept = [
+    'He laughs-at-everything we say', 'the highs-and-lows of it', 'def laughs_loudly_at_x()',
+    '/home/u/projects/weighs-and-measures/README.md', 'the pallbearer carrying it', 'torchbearer Elizabeth',
+  ]
+  for (const text of kept) expect(redact(text), text).toBe(text)
+})
+
+// What only looks like a secret stays as it is: a word with the name of a key in it and no quote after it, a header
+// with no value, and the two forms of a Bearer header that SECRETS masked before (the closing quote of the first goes
+// with the token).
+test('redact leaves alone what only looks like a secret, and masks a Bearer header as before', () => {
+  const kept = [
+    'task-management', 'the token count is 5', '{"tokens": 5}', '{"secret_name": "x"}', '"tokenizer": "bpe"',
+    'authorization is required',
+  ]
+  for (const text of kept) expect(redact(text), text).toBe(text)
+  expect(redact('curl -H "Authorization: Bearer abcdefgh12345678"')).toBe('curl -H "Authorization: Bearer •••')
+  expect(redact('use bearer abcdefgh12345 here')).toBe('use bearer ••• here')
+})
+
+// The gap between a header's scheme and its credential, and the one between the `Bearer` or `Basic` prefix of a bare
+// value and the value, stays on the line (a space, a tab, a no-break space; never CR, LF, U+2028 or U+2029). Across a
+// line end the first word of the next line was taken for the credential, and a key there, which its own pattern masks,
+// was eaten before it could be: its value showed.
+test('redact keeps a scheme and a Bearer prefix on their line: the key on the next line is masked on its own', () => {
+  const cases: Array<[input: string, want: string]> = [
+    ['Authorization: Foo\npassword: hunter2secret', 'Authorization: •••\npassword: •••'],
+    ['Authorization: Foo\r\npassword: hunter2secret', 'Authorization: •••\r\npassword: •••'],
+    ['Authorization: Foo\u{2028}password: hunter2secret', 'Authorization: •••\u{2028}password: •••'],
+    ['Authorization: Foo\nX-Auth-Token: hunter2secret', 'Authorization: •••\nX-Auth-Token: •••'],
+    [
+      'self.authorization = authorization\nself.password = "hunter2secret"',
+      'self.authorization = •••\nself.password = •••',
+    ],
+    ['- Authorization: none\n- Rate limit: 100/min', '- Authorization: •••\n- Rate limit: 100/min'],
+    ['"token": basic\npassword: hunter2secret', '"token": •••\npassword: •••'],
+  ]
+  for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
+})
+
+// An arrow with nothing behind it is no value: an `=` that begins an arrow is no separator, so the pattern does not
+// read `=>` as `=` and the bare value `>`. A bare value never begins with `=` either, which leaves `==` and `===`
+// alone.
+test('redact leaves a dangling hash rocket and a comparison after a key as they are', () => {
+  for (const text of [`"password" => {'a' => 1}`, '"password" =>', '"password" === x.type']) {
+    expect(redact(text), text).toBe(text)
+  }
+})
+
+// A value in backticks has its closing backtick, as a code span does. A code span that ends in `Authorization:` is no
+// value: its closing backtick would open one, and the prose behind it would be masked to the end of the line. SECRETS
+// takes the lone backtick for the value, and the words after it stay.
+test('redact takes no code span that ends in `Authorization:` for a quoted value: the rest of the line stays', () => {
+  expect(redact('Add the `Authorization:` header to every request and retry.')).toBe(
+    'Add the `Authorization:••• header to every request and retry.',
+  )
+})
+
+// A backtick that nothing closes on its line is no quoted value (QUOTED_VALUE takes a closed one), but the scheme after
+// it is a scheme all the same. SECRETS would read the backtick and the scheme as one word, and the credential would
+// show; AUTH_SCHEME takes it whatever the scheme is, Bearer and Basic too, and the credential stays on its line.
+test('redact masks a scheme and a credential after a backtick that nothing closes, Bearer and Basic too', () => {
+  const cases: Array<[input: string, want: string]> = [
+    ['Authorization: `Token abcdefgh12345678', 'Authorization: •••'],
+    ['Authorization: `Basic dXNlcjpwYXNz', 'Authorization: •••'],
+    ['"Authorization": `Token abcdefgh12345678', '"Authorization": •••'],
+    ['Authorization: `Token abcdefgh12345678\nnext line', 'Authorization: •••\nnext line'],
+    // A backtick and a bare credential, with no scheme: SECRETS reads it.
+    ['Authorization: `abcdefgh12345678', 'Authorization: •••'],
+  ]
+  for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
+})
+
+// The same for a bare value after a quoted key: its Bearer or Basic prefix may open with a backtick that nothing closes
+// (QUOTED_VALUE takes a closed one). Otherwise the bare value takes the backtick and the scheme for one word, and
+// SECRETS, which reads a token by its scheme, loses its anchor and leaves the token in view. A bare value may begin
+// with `!`, but never with a closing bracket or a semicolon.
+test('redact masks a Bearer or Basic value after a quoted key when a backtick that nothing closes opens it', () => {
+  const cases: Array<[input: string, want: string]> = [
+    ['"token": `Bearer Zq8xK2mN9pL4vR7t', '"token": •••'],
+    ["'secret': `Basic dXNlcjpwYXNz", "'secret': •••"],
+    ['"password": !hunter2secret', '"password": •••'],
+  ]
+  for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
+  for (const text of ['{"password": }', '["password": ]', '("password": )', '"password": ;']) {
+    expect(redact(text), text).toBe(text)
+  }
+})
+
+// What the narrower gaps and the arrow rule keep: a credential or a value that holds punctuation is masked whole, a
+// Bearer prefix is crossed by a tab and by a no-break space, and a key with no value and a word that only ends in
+// `Bearer` stay as they are.
+test('redact keeps masking a punctuated credential and a Bearer prefix that a tab or a no-break space follows', () => {
+  const cases: Array<[input: string, want: string]> = [
+    ['Authorization: Token a~b:c%d!e12345', 'Authorization: •••'],
+    ['"password": p~a:s%s!word', '"password": •••'],
+    ['"token": Bearer\tabcdefgh12345678', '"token": •••'],
+    ['"token": Bearer\u{A0}abcdefgh12345678', '"token": •••'],
+    ['"password": ,', '"password": ,'],
+    ['fooBearerabcdefgh12345678', 'fooBearerabcdefgh12345678'],
+  ]
+  for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
+})
+
 test('toolLabel', () => {
   const cases: Array<[string, Record<string, unknown>, string]> = [
     ['Read', { file_path: '/r/src/a.ts' }, 'Read src/a.ts'],
@@ -1268,6 +1632,50 @@ test('parseTaskNotification reads 128 KB once: a long result, and tags that open
     expect(parseTaskNotification(opens(tag)), tag).toBe(null) // and a text of nothing else
   }
   expect(performance.now() - started).toBeLessThan(300)
+})
+
+// The engine opens a turn of its own with a tag in angle brackets: a name of lowercase words joined by hyphens
+// (`task-notification`, `system-reminder`, `command-name`), closed by `>`, after attributes if it has any
+// (`<teammate-message teammate_id="lead">`). What a person pastes (`<token…`, `<div class=…>`, `<p>`) is the person's
+// prompt: an HTML tag has no hyphen.
+test('engineTag names the tag that opens a turn of the engine: hyphenated lowercase words, attributes allowed', () => {
+  const named: Array<[text: string, name: string]> = [
+    ['<task-notification>\n<task-id>a1</task-id>', 'task-notification'],
+    ['<system-reminder>\nx', 'system-reminder'],
+    ['<command-name>/clear</command-name>', 'command-name'],
+    ['<local-command-stdout>', 'local-command-stdout'],
+    ['<user-prompt-submit-hook>', 'user-prompt-submit-hook'],
+    ['<bash-input>', 'bash-input'],
+    ['<\u{202E}task-notification>', 'task-notification'], // a format character goes before the name is read
+    ['\x1b[0m<system-reminder>', 'system-reminder'], // and so does an escape sequence
+    ['<my_tag>', 'my_tag'], // an underscore joins words too
+    ['<h1-x>', 'h1-x'], // a digit may follow the first letter
+    ['<a-b-c-d-e-f-g-h-i>', 'a-b-c-d-e-f-g-h-i'], // nine words, the most
+    ['<teammate-message teammate_id="lead">\nhi', 'teammate-message'], // attributes follow a space
+    ['<task-notification id="1"\n  kind="x">', 'task-notification'],
+    ['<x-y z>', 'x-y'],
+    ['<x-y\nz>', 'x-y'],
+    // A lowercase token in brackets is a tag by this rule; the caller masks the name.
+    ['<ghp_abcdefghijklmnopqrstuvwxyz0123456789>', 'ghp_abcdefghijklmnopqrstuvwxyz0123456789'],
+  ]
+  for (const [text, name] of named) expect(engineTag(text), JSON.stringify(text)).toBe(name)
+  // Only the first 256 characters count: a name that closes inside them is a tag, one that closes after them is none.
+  expect(engineTag(`<${'a'.repeat(252)}-b>`)).toBe(`${'a'.repeat(252)}-b`) // 256 characters with the brackets
+  expect(engineTag(`<${'a'.repeat(253)}-b>`)).toBeUndefined() // 257: the `>` is past them
+})
+
+test('engineTag is undefined for a text that is the person\'s: markup, a pasted token, no tag at the start', () => {
+  const given = [
+    '<div class="x">', '<html>', '<p>x</p>', '<script>', '<Task-notification>', '< x>', '</x>', '<x-y', ' <x-y>',
+    'no tag in this text', '<ghp_a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8 please', '',
+    // A name starts with a lowercase letter, goes on with lowercase letters and digits, and has one to eight more
+    // words, each after a hyphen or an underscore and none of them empty.
+    '<1-x>', '<-x>', '<x->', '<x--y>', '<task-Notification>', '<taSk-x>', '<a-b-c-d-e-f-g-h-i-j>',
+    // Attributes follow a space, and `>` closes the tag after them: a tag with no `>`, one whose attributes hold `<`,
+    // and a name that something other than a space follows are no tag.
+    '<my-tag x="1"', '<my-tag x="1" <b>', '<x-y=z>', '<teammate-message teammate_id="lead"',
+  ]
+  for (const text of given) expect(engineTag(text), JSON.stringify(text)).toBeUndefined()
 })
 
 test('finishTask ends the row: the status, the end time, and a duration from the notification or the clock', () => {
