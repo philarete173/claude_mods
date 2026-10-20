@@ -464,8 +464,8 @@ test('stripFormat reads 128 KB of unfinished sequences and of invisibles once: m
 })
 
 // A quoted value that nothing closes runs to the end of the line, and a key may be followed by 128 KB of spaces before
-// its value: each is read in one pass; so are a backtick before a long scheme and 128 KB of no-break spaces after a
-// scheme.
+// its value: each is read in one pass; so are a backtick before a long scheme, 128 KB of no-break spaces after a
+// scheme, a long second word after a scheme and a long token after a Bearer.
 test('redact reads 128 KB of an unclosed quoted value and of a gap after a key once: milliseconds, not seconds', () => {
   const gap = ' '.repeat(131_072)
   const started = performance.now()
@@ -474,6 +474,8 @@ test('redact reads 128 KB of an unclosed quoted value and of a gap after a key o
   expect(redact(`Authorization: \`${'a'.repeat(131_072)}`)).toBe('Authorization: •••')
   expect(redact(`"token": \`Bearer${'\u{A0}'.repeat(131_072)}x`)).toBe('"token": •••')
   expect(redact(`Authorization: Foo${'\u{A0}'.repeat(131_072)}x`)).toBe('Authorization: •••')
+  expect(redact(`Authorization: a ${'x'.repeat(131_072)}password`)).toBe('Authorization: •••')
+  expect(redact(`Bearer ${'a-'.repeat(65_536)}Authorizatio`)).toBe('Bearer •••')
   expect(performance.now() - started).toBeLessThan(300)
 })
 
@@ -1226,7 +1228,7 @@ test('redact masks a Bearer token that a word touches, and keeps one space betwe
 test('redact leaves alone the words that hold a token prefix or end in `bearer`', () => {
   const kept = [
     'He laughs-at-everything we say', 'the highs-and-lows of it', 'def laughs_loudly_at_x()',
-    '/home/u/projects/weighs-and-measures/README.md', 'the pallbearer carrying it', 'torchbearer Elizabeth',
+    '/work/projects/weighs-and-measures/README.md', 'the pallbearer carrying it', 'torchbearer Elizabeth',
   ]
   for (const text of kept) expect(redact(text), text).toBe(text)
 })
@@ -1324,6 +1326,71 @@ test('redact keeps masking a punctuated credential and a Bearer prefix that a ta
     ['"token": Bearer\u{A0}abcdefgh12345678', '"token": •••'],
     ['"password": ,', '"password": ,'],
     ['fooBearerabcdefgh12345678', 'fooBearerabcdefgh12345678'],
+  ]
+  for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
+})
+
+// A value with no scheme (`Authorization: abc123def456`) is read by SECRETS, which masks its first word. AUTH_SCHEME
+// took that word for a scheme and the next word for the credential, so a key right behind it lost its anchor and its
+// value showed. The second word is no credential when it starts what another pattern reads: a flag, `Bearer` or
+// `Basic`, or a key name with its `:` or `=` (a second `Authorization:` too). Each keeps its own mask. A credential
+// that only holds a key name (`password123`) is still a credential.
+test('redact leaves the key, the Bearer or the Authorization behind a schemeless credential to its own pattern', () => {
+  const cases: Array<[input: string, want: string]> = [
+    ['Authorization: abc123def456 password: hunter2secret', 'Authorization: ••• password: •••'],
+    ['Authorization: abc123def456 X-API-Key: k3y1234567890', 'Authorization: ••• X-API-Key: •••'],
+    ['Authorization: abc123def456 token: t0k3n1234567', 'Authorization: ••• token: •••'],
+    ['Authorization: abc123def456 secret: s3cr3t12345', 'Authorization: ••• secret: •••'],
+    ['Authorization: abc123def456 passwd: hunter2secret', 'Authorization: ••• passwd: •••'],
+    ['Authorization: abc123def456 pwd: hunter2secret', 'Authorization: ••• pwd: •••'],
+    ['Authorization: abc123def456 password = "hunter2secret"', 'Authorization: ••• password = •••'],
+    // A quote may stand between the key name and its `:`.
+    ['Authorization: abc123def456 password": hunter2secret', 'Authorization: ••• password": •••'],
+    ['Authorization: abc123def456 Bearer abcdefgh12345678', 'Authorization: ••• Bearer •••'],
+    [
+      'Authorization: abc123def456 Authorization: Basic dXNlcjpwYXNz',
+      'Authorization: ••• Authorization: Basic •••',
+    ],
+    // A key name may hold dots; the second word is optional, so a refused one leaves the first word masked alone.
+    ['Authorization: abc123def456 db.password: hunter2secret', 'Authorization: ••• db.password: •••'],
+    ['"Authorization": abc123def456 password: hunter2secret', '"Authorization": ••• password: •••'],
+    ['"Authorization": abcdefgh12345678', '"Authorization": •••'],
+    ['Authorization: HTTPBearer API_TOKEN=hunter2secret', 'Authorization: ••• API_TOKEN=•••'],
+    // `Bearer` and `Basic` are refused only as words of their own.
+    ['Authorization: Token basic-abc123secret', 'Authorization: •••'],
+    ['Authorization: abc123 Bearer:x', 'Authorization: •••'],
+    // An over-mask that is accepted, and the limit of a quoted name with a value that holds more than a word.
+    ['{"authorization": false}', '{"authorization": •••}'],
+    ['"Authorization": AKIA/abc+def==', '"Authorization": •••/abc+def=='],
+    ['Authorization: Token abcdefgh12345678', 'Authorization: •••'],
+    ['Authorization: Bot abc.def.ghi:', 'Authorization: •••'],
+    ['Authorization: Token password123', 'Authorization: •••'],
+  ]
+  for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
+})
+
+// GLUED_BEARER runs before SECRETS, whose Authorization pattern needs the word `Authorization` for its anchor. A
+// `Bearer` that ends a line (`WWW-Authenticate: Bearer`) took the name of the next header for its token, and the
+// credential of that header showed. A token is never the name of the next header: the anchor stays, SECRETS masks the
+// credential, and its own Bearer pattern then masks the name, as it did in 0.5.0.
+test('redact keeps the name of the next header when a Bearer ends a line: SECRETS masks its credential', () => {
+  const cases: Array<[input: string, want: string]> = [
+    [
+      'WWW-Authenticate: Bearer\nAuthorization: Basic dXNlcjpwYXNzd29yZA==',
+      'WWW-Authenticate: Bearer •••: Basic •••',
+    ],
+    ['type: Bearer\n  Authorization: Basic dXNlcjpwYXNz', 'type: Bearer •••: Basic •••'],
+    [
+      'WWW-Authenticate: Bearer\nProxy-Authorization: Basic dXNlcjpwYXNz',
+      'WWW-Authenticate: Bearer •••: Basic •••',
+    ],
+    ['WWW-Authenticate: Bearer\nAuthorization: abc123secret', 'WWW-Authenticate: Bearer •••: •••'],
+    // The pattern is case-sensitive, so the name in lowercase and in capitals are alternatives of their own.
+    ['www-authenticate: Bearer\nauthorization: Basic dXNlcjpwYXNz', 'www-authenticate: Bearer •••: Basic •••'],
+    ['WWW-AUTHENTICATE: Bearer\nAUTHORIZATION: Basic dXNlcjpwYXNz', 'WWW-AUTHENTICATE: Bearer •••: Basic •••'],
+    // A header name may hold dots.
+    ['Uses Bearer\nreq.headers.authorization: Basic dXNlcjpwYXNz', 'Uses Bearer •••: Basic •••'],
+    ['xBearer abcdefgh12345678', 'xBearer •••'],
   ]
   for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
 })

@@ -425,15 +425,22 @@ const QUOTED_KEY = new RegExp(
 
 // An Authorization header with a scheme other than Bearer and Basic (`Token …`, `Bot …`, `ApiKey …`). SECRETS skips
 // those two schemes alone, so for any other it takes the scheme for the value and masks that word, and the credential
-// behind the space stays. A word that only starts with one of the two (`Bearerx`) is another scheme. A credential does
-// not begin with `--`: that is a flag, which SECRETS reads (`Foo --token x`). Digest and AWS SigV4 credentials, which
-// are several parts with commas between them, are masked in their first part only. The credential stays on the
-// header's line, so the first word of the next line (a key whose own pattern masks it) is left to SECRETS. A scheme
-// after a backtick that nothing closes on its line (QUOTED_VALUE takes a closed one) is taken whatever it is, Bearer
-// and Basic too: SECRETS would read the backtick and the scheme as one word, and the credential would show.
+// behind the space stays. A word that only starts with one of the two (`Bearerx`) is another scheme. The second word is
+// no credential when it starts what another pattern reads: a flag (`--token x`), `Bearer` or `Basic`, or a key name
+// with its `:` or `=` (`password:`, `X-API-Key:`, `token =`, a second `Authorization:`). The value then has no scheme:
+// its first word is the credential, which SECRETS masks, and the key keeps its own mask. Digest and AWS SigV4
+// credentials, which are several parts with commas between them, are masked in their first part only. The credential
+// stays on the header's line, so the first word of the next line (a key whose own pattern masks it) is left to SECRETS.
+// A scheme after a backtick that nothing closes on its line (QUOTED_VALUE takes a closed one) is taken whatever it is,
+// Bearer and Basic too: SECRETS would read the backtick and the scheme as one word, and the credential would show. The
+// second word is optional: when it is absent or is no credential, the first word goes alone: a value with no scheme,
+// which SECRETS masks too when no quote follows the name, and which nothing else masks after a quoted name
+// (`"Authorization": abc…`). `Bearer` or `Basic` is refused only as a word of its own (`basic-abc…` is a credential); a
+// key name may hold dots (`db.password:`).
 const AUTH_SCHEME = new RegExp(
   String.raw`(authorization${KEY_QUOTE}?\s*[:=]\s*)(?:\x60|(?!(?:bearer|basic)\b))[A-Za-z][\w.-]*` +
-    String.raw`${INLINE_SPACE}+(?!--)\S+`,
+    String.raw`(?:${INLINE_SPACE}+(?!--|(?:bearer|basic)(?!\S)|` +
+    String.raw`[\w.-]*(?:api[_-]?key|token|secret|password|passwd|pwd|authorization)${KEY_QUOTE}?\s*[:=])\S+)?`,
   'giu',
 )
 
@@ -450,8 +457,9 @@ const GLUED_TOKEN = /(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|
 // A Bearer token with no word boundary before `Bearer`, for the same reason (`xBearer …`, once the sequence between has
 // gone). It is case-sensitive: a header writes `Bearer`, and a word that ends in `bearer` (pallbearer, torchbearer) is
 // prose; the Bearer pattern of SECRETS, with its `\b`, keeps every case. The mask follows one space, as SECRETS writes
-// it.
-const GLUED_BEARER = /(Bearer)\s+[A-Za-z0-9._~+/-]{8,}=*/g
+// it. A token is never the name of the next header: this pattern runs before SECRETS, whose Authorization pattern must
+// still find its anchor after a `Bearer` that ends a line (`WWW-Authenticate: Bearer`, then `Authorization: Basic …`).
+const GLUED_BEARER = /(Bearer)\s+(?![\w.-]*(?:[Aa]uthorization|AUTHORIZATION)\s*[:=])[A-Za-z0-9._~+/-]{8,}=*/g
 
 // The format and control characters go first, as shorten takes them out too: one inside a secret would keep a pattern
 // from matching, and the secret would show once shorten had closed the gap. The patterns above come next, in that

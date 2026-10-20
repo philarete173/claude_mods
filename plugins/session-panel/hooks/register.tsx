@@ -851,19 +851,24 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
-    // The hook is the main agent's (a subagent's run raises no turn.start, see below): a main turn starts, and the loop
-    // is not idle. Both are noted before the chain runs: the read of a turn.complete that is still on its way must find
-    // the turn (turn.complete), and a notice that arrives from now on must find the loop busy (prompt.submit).
-    mainTurns += 1
-    idleSince = null
-    // The turn takes in the messages that wait (unfolded), and the list starts over. Taken here, before the chain runs:
-    // a message that comes while the chain holds the start is for the next request, not for this start.
-    const queued = unfolded
-    unfolded = []
+    // The types give this event no agentId (a subagent's run raises no turn.start), so a start that had one is no main
+    // turn: the guard keeps a future engine's subagent start from emptying the main loop's state.
+    const isMain = !('agentId' in e) || e.agentId === undefined
+    let queued: string[] = []
+    if (isMain) {
+      // A main turn starts, and the loop is not idle. Both are noted before the chain runs: the read of a turn.complete
+      // that is still on its way must find the turn (turn.complete), and a notice that arrives from now on must find
+      // the loop busy (prompt.submit).
+      mainTurns += 1
+      idleSince = null
+      // The turn takes in the messages that wait (unfolded), and the list starts over. Taken here, before the chain
+      // runs: a message that comes while the chain holds the start is for the next request, not for this start.
+      queued = unfolded
+      unfolded = []
+    }
     const started = await next(e)
-    // The first turn of the main agent opens the tree to the reads (hasMainTurn), and asks for one. The types give this
-    // event no agentId (a subagent's run raises no turn.start), so one that had it is not a main turn.
-    if (!hasMainTurn && (!('agentId' in e) || e.agentId === undefined)) {
+    // The first turn of the main agent opens the tree to the reads (hasMainTurn), and asks for one.
+    if (!hasMainTurn && isMain) {
       hasMainTurn = true
       inBackground($, () => requestProject($))
     }

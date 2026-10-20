@@ -5186,6 +5186,46 @@ test('the end of a subagent\'s turn does not make the main loop idle', SLOW_READ
   expect((await taskRows($)).b1).toMatchObject({ status: 'done', durationAtMost: true })
 })
 
+// A start that carries an agent id is no main turn: it does not make the loop busy (the input is cast, as above), so a
+// notice that comes long after the main turn ended is still exact.
+test('a turn.start that carries an agent id leaves the idle time alone: a notice long after the turn end is exact',
+  SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await runFor($, clock, w, 'b1', 1000)
+    await endTurn($)
+
+    await $.turn.start({ text: '', turnId: 't9', agentId: 'a1' } as never)
+    await clock.advance(2 * IDLE_GAP_MS)
+    await submitNotice($, notice('b1', 'completed'))
+
+    expect((await taskRows($)).b1).toMatchObject({ status: 'done' })
+    expect((await taskRows($)).b1).not.toHaveProperty('durationAtMost')
+  })
+
+// Nor is it counted as a turn (mainTurns): a turn end whose clock read lands after such a start still makes the loop
+// idle, from the time that the read brings.
+test('a turn end whose clock read lands after a start that carries an agent id leaves the loop idle',
+  WITH_CLOCK_SPOILER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await runFor($, clock, w, 'b1', 1000)
+    await $.command.run({ ...RUN, command: 'hold-clock', args: '500' })
+
+    await endTurn($) // its read of the clock is the held one
+    await $.turn.start({ text: '', turnId: 't9', agentId: 'a1' } as never)
+    await clock.advance(500) // the read lands
+    await clock.advance(4000)
+    await submitNotice($, notice('b1', 'completed'))
+
+    expect((await taskRows($)).b1).toMatchObject({ status: 'done' })
+    expect((await taskRows($)).b1).not.toHaveProperty('durationAtMost')
+  })
+
 // The read of the clock at the entry of prompt.submit starts before the hook knows whether the prompt is a notice, so a
 // read that fails is handled whether it is used or not: one that was never used and rejected would be an unhandled
 // rejection, which fails the whole file. A notice whose read failed ends at a read after the chain.
@@ -5925,6 +5965,22 @@ test('a turn.start empties the list whatever its text: a text kept before it has
     await $.turn.start({ text: 'A', turnId: 't3' })
 
     expect((await youLines($)).map(line => line.text)).toEqual(['A', 'B', 'A'])
+  })
+
+// A start that carries an agent id is no main turn (the engine's types give turn.start none, as a subagent's run raises
+// none, so the input is cast): it takes none of the messages that wait, and the main turn that drains them later still
+// finds them and writes no second line.
+test('a turn.start that carries an agent id leaves a waiting message alone: the main turn that drains it has no line',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await startTurn($, 't1')
+    await typeOver($, 'and the tests')
+
+    await $.turn.start({ text: '', turnId: 't9', agentId: 'a1' } as never)
+    await $.turn.start({ text: 'and the tests', turnId: 't2' })
+
+    expect((await youLines($)).map(line => line.text)).toEqual(['and the tests'])
   })
 
 // The engine takes every queued message into the conversation before a model request of the main loop: one that a
