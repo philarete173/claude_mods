@@ -420,13 +420,17 @@ const KEY_NAMES = String.raw`secret[_-]?key(?:[_-]?base)?|access[_-]?key|private
 const NOT_PLAIN = String.raw`(?!(?:true|false|null|none|[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?:[\s,;}\])]|$))`
 
 // No anchor of a later pattern ahead: a bare value does not begin with a flag that SECRETS or UNQUOTED_KEY reads, and
-// what that pattern reads after it (`--token` and `=` or a space, `--secret-key` and `=` or a gap), or with a key name,
-// a separator and a value (`password: …`, `Authorization: …`). The key is then left as it is, and the later pattern
-// masks its own secret. A value that only begins with `--` is a value, and so is one that ends in a name and `=`
-// (base64 padding: `…pwd=`, `…token==`), which no later pattern would mask.
+// what that pattern reads after it (`--token` and `=` or a space, `--secret-key` and `=` or a gap); or with `Bearer`
+// at a line end and a token alone on the next line, which the Bearer patterns read across the line end; or with a key
+// name, at the start of the value or after a `.`, `_` or `-`, then a separator and a value (`password: …`,
+// `Authorization: …`, `db.password=…`, `X-API-Key: …`). The key is then left as it is, and the later pattern masks
+// its own secret. A value that only begins with `--` is a value, and so is one that holds a name glued to a word
+// (`Secr3tToken=…`, `MyApiKey:…`) or ends in a name and `=` (base64 padding: `…pwd=`, `…token==`): it goes whole.
 const NO_ANCHOR = String.raw`(?!--(?:token|password|api-key|secret)[= ]|` +
   String.raw`--[\w-]*?(?:secret-key(?:-base)?|access-key|private-key)(?:${INLINE_SPACE}+(?![:?+]?=|:)|=)|` +
-  String.raw`[\w.-]*(?:api[_-]?key|token|secret|password|passwd|pwd|` +
+  String.raw`bearer${INLINE_SPACE}*[\r\n\u{2028}\u{2029}]\s*[A-Za-z0-9._~+/-]{8,}=*` +
+  String.raw`(?=${INLINE_SPACE}*(?:[\r\n\u{2028}\u{2029}]|$))|` +
+  String.raw`(?:[\w.-]*[._-])?(?:api[_-]?key|token|secret|password|passwd|pwd|` +
   String.raw`authorization|${KEY_NAMES})${KEY_QUOTE}?${INLINE_SPACE}*(?:=>|[:?+]?=|:)${INLINE_SPACE}*[^\s=>])`
 
 // An Authorization header whose value is in quotes (`"Authorization": "Bearer …"`, `'Authorization' => 'Basic …'`,

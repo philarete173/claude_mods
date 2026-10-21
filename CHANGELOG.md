@@ -21,7 +21,8 @@
   false}`, `{'password': None}`), and a quoted one (`"4096"`) is masked as before. So a number-shaped secret after a
   quoted name shows (a digit PIN, `"token": 01234567`, hex such as `8e54632190`); an unquoted `token: 120` stays
   masked. A value that begins with what a later pattern reads (`--token …`, `Authorization: …`, another key and its
-  separator) is left to that pattern, which masks its secret.
+  separator) is left to that pattern, which masks its secret; a value with a name glued inside (`MyApiKey:…`) is masked
+  whole.
 - A run of invisible characters of any length is cleaned in pieces of up to 4096 code points and judged as one run,
   with the same output as before. In Node a run of about 4.2 million overflowed the stack; the engine's own runtime
   never did, so this guards against a change of runtime.

@@ -28,8 +28,9 @@ Every section below the Session and Project blocks can be folded, and the fold s
 
 ## Install
 
-Requires Claude Code 2.1.287 or later (mods support). Tested on Linux with the desktop app (engines 2.1.288 to 2.1.304)
-and the CLI 2.1.294. The Project section needs git.
+Requires Claude Code 2.1.287 or later (mods support). The mod runs on engines 2.1.288 to 2.1.304 and was checked
+live on Linux with the desktop app (engines 2.1.288, 2.1.299 and 2.1.304) and the CLI 2.1.294. The Project section
+needs git.
 
 ```bash
 claude plugin marketplace add philarete173/claude_mods

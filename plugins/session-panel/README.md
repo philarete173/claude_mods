@@ -171,19 +171,24 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   set aws_secret_access_key …`. A quoted value of an unquoted name that nothing closes on its line masks the rest of the
   text, so a PEM in a `.env` file stays masked. After a quoted name a bare number, `true`, `false`, `null` or `none`
   shows as it is (`{"max_token": 4096, "secret": false}`, `{'password': None}`), and a quoted one (`"4096"`) is masked;
-  an unquoted `token: 120` is masked too. A value that begins with what a later pattern reads (`--token …`,
-  `Authorization: …`, another key and its separator) is left to that pattern. The mask is no scanner: it has no pattern
-  for `curl -u user:pass`, `mysql -p…`, `.netrc`, a `Cookie:` header, `glpat-` tokens, a PEM key or a JWT on its own,
-  and it misses a key written in a form it does not read (an escaped JSON key in a shell string, `d["password"] = …`, an
-  XML element such as `<secretKey>`, Azure's `AccountKey=`), a value on the next line or in a YAML block (`private_key:
-  |`) after an unquoted name, a typed default (`secret_key: str = "…"`), the default in `os.environ.get('SECRET_KEY',
-  '…')`, a number-shaped secret after a quoted name (a digit PIN, `"token": 01234567`, hex such as `8e54632190`: it
-  shows as a number does), all but the first part of a Digest or AWS4 credential, and a token whose first letter a
-  crafted escape sequence takes. It over-masks in known cases: a name that ends in `Bearer` (`JwtBearer`) masks the word
-  after it, two code spans around `Authorization:` mask the prose between them, the closing quote after the value of a
-  Bearer header (`"Authorization: Bearer …"`) goes with the token, a quote or a backtick after a `_key` name that
-  nothing closes on its line hides the rest of the text (prose such as ``Set `secret_key:` in config``), and `set
-  aws_secret_access_key in the file` reads `••• the file`. Section 4.7 of the design spec (in Russian, linked from the
+  an unquoted `token: 120` is masked too. A value that begins with a flag, a key and its separator (`--token …`,
+  `password: …`, `Authorization: …`, `db.password=…`, `X-API-Key: …`) or a `Bearer` that ends its line is left to the
+  pattern that reads it, which masks its own secret; a value that has a name glued inside (`MyApiKey:…`) or ends in
+  `…token==` goes whole. The mask is no scanner: it has no pattern for `curl -u user:pass`, `mysql -p…`, `.netrc`, a
+  `Cookie:` header, `glpat-` tokens, a PEM key or a JWT on its own, and it misses a key written in a form it does not
+  read (an escaped JSON key in a shell string, `d["password"] = …`, an XML element such as `<secretKey>`, Azure's
+  `AccountKey=`), a value on the next line or in a YAML block (`private_key: |`) after an unquoted name, a typed default
+  (`secret_key: str = "…"`), the default in `os.environ.get('SECRET_KEY', '…')`, a number-shaped secret after a quoted
+  name (a digit PIN, `"token": 01234567`, hex such as `8e54632190`: it shows as a number does), all but the first part
+  of a Digest or AWS4 credential, and a token whose first letter a crafted escape sequence takes. It over-masks in known
+  cases: a name that ends in `Bearer` (`JwtBearer`) masks the word after it, two code spans around `Authorization:` mask
+  the prose between them, the closing quote after the value of an Authorization header, whatever its scheme (`:
+  'Authorization: Token …'` reads `: 'Authorization: •••`), goes with the token, the `;` after a bare value goes with it
+  (`password=abc; next` reads `password=••• next`), prose that has a key's name in it (`grep -rn "password": src/` masks
+  `src/`, `Authorization: required for all` reads `••• all`, `{"pwd": path}`, a name in backticks such as `` `token`:
+  ``, a name in curly quotes) masks the word after it, a quote or a backtick after a `_key` name that nothing closes on
+  its line hides the rest of the text (prose such as ``Set `secret_key:` in config``), and `set aws_secret_access_key in
+  the file` reads `••• the file`. Section 4.7 of the design spec (in Russian, linked from the
   [docs](https://github.com/philarete173/claude_mods/blob/main/docs/README.md) page) has the full list.
 
 ## How costs are measured

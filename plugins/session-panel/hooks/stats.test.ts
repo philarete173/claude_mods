@@ -488,6 +488,7 @@ test('redact reads 128 KB of an unclosed quoted value and of a gap after a key o
   // The check for an anchor at the start of a bare value reads a long word once.
   expect(redact(`secret_key=--${long}`)).toBe('secret_key=•••')
   expect(redact(`"password": ${'a-'.repeat(65_536)}`)).toBe('"password": •••')
+  expect(redact(`"token": Bearer\n${long}:`)).toBe(`"token": •••\n${long}:`)
   expect(redact(`authorization="${'a'.repeat(131_072)}`)).toBe('authorization=•••')
   expect(redact(`"token":${gap}x`)).toBe(`"token":${gap}•••`)
   expect(redact(`Authorization: \`${'a'.repeat(131_072)}`)).toBe('Authorization: •••')
@@ -1536,6 +1537,19 @@ test('redact leaves a flag or a key that begins the value of a key to its own pa
     // (the word after the tab shows, as in 0.5.1), and UNQUOTED_KEY reads `--secret-key` before a tab too.
     ['secret_key: --token\tabc12345', 'secret_key: •••\tabc12345'],
     ['secret_key: --secret-key\tabc12345', 'secret_key: --secret-key\t•••'],
+    // A key name is an anchor at the start of the value or after a `.`, `_` or `-` (a header, a dotted or a snake
+    // name); one glued to a word is part of the value, which goes whole. `dbPassword:` is such a value, and the word
+    // after it shows, as in 0.5.1.
+    ['"password": Secr3tToken=abc', '"password": •••'],
+    ['"password": MyApiKey:2024', '"password": •••'],
+    ['secret_key: X-Auth-Token: abc12345', 'secret_key: X-Auth-Token: •••'],
+    ['"secret": dbPassword: hunter2', '"secret": ••• hunter2'],
+    // A Bearer at a line end with a token alone on the next line is left to the Bearer patterns, which read across the
+    // line end; one before a key on the next line goes, and the key keeps its own mask.
+    ['access_key = Bearer\nabcdefgh12345678', 'access_key = Bearer •••'],
+    ['"token": Bearer\nabcdefgh12345678', '"token": Bearer •••'],
+    ['"token": Bearer\npassword: hunter2secret', '"token": •••\npassword: •••'],
+    ['secret_key:=Bearer\naccess_token = hunter2xyz', 'secret_key:=•••\naccess_token = •••'],
   ]
   for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
 })
