@@ -184,12 +184,15 @@ let lastReadMs = 0
 // not read again until the next turn.
 let hasMainTurn = false
 
-// How many turns of the main agent this module has seen start. A turn.complete notes it before it reads the clock, and
-// sets idleSince only if no turn has started by the time the read lands.
+// How many turns of the main agent this module has seen start. A turn.complete notes it at its entry, reads the clock
+// after the chain beneath it has run (the engine takes a queued notice in only after every plugin's turn.complete and
+// session.measure have run, so a slow hook beneath stays out of the idle gap), and sets idleSince only if no turn has
+// started by the time the read lands.
 let mainTurns = 0
 
-// When the main loop last went idle: the time of the last turn.complete of the main agent, by `$.clock.now()`. It is
-// null while a main turn runs, and before this module has seen one end (a reload of the module starts it over).
+// When the main loop last went idle: the time of the last turn.complete of the main agent, by `$.clock.now()` read
+// after the chain beneath the hook has run. It is null while a main turn runs, and before this module has seen one end
+// (a reload of the module starts it over).
 let idleSince: number | null = null
 
 // How long the main loop must have been idle, in ms, before a notice that comes with no turn running is taken as coming
@@ -990,19 +993,19 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
-    // A turn of the main agent ends, and the loop is idle from this time, which is read here, not after the chain
-    // beneath has run, and not waited for. It counts only if no main turn has started by the time the read lands
-    // (mainTurns); a read that fails leaves idleSince as it is.
+    const turns = mainTurns
+    const done = await next(e)
     if (e.agentId === undefined) {
-      const turns = mainTurns
+      // A turn of the main agent ends, and the loop is idle from this time, which is read here, after the chain
+      // beneath has run: the engine takes a queued notice in only after every plugin's turn.complete and
+      // session.measure have run, so a slow hook beneath stays out of the gap (the hooks above the mod and
+      // session.measure stay in it: the 3 s gap is a heuristic). The read is not waited for. It counts only if no
+      // main turn has started by the time it lands (mainTurns); a read that fails leaves idleSince as it is.
       $.clock.now()
         .then(now => {
           if (turns === mainTurns) idleSince = now
         })
         .catch(() => undefined)
-    }
-    const done = await next(e)
-    if (e.agentId === undefined) {
       const acc = await read($, turnAtom)
       if (acc !== null) {
         // A turn stopped before any response leaves the previous one shown: the spec shows the last completed turn.

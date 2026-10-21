@@ -356,14 +356,14 @@ const PROMPT_TRACER: Plugin = {
     on('command.run', { command: 'read-prompt-tracer' }, async () => ({ text: JSON.stringify(seen) }))
   },
 }
-// A plugin beneath the mod's that holds every turn end for 500 ms before it passes it on, as a slow plugin beneath may.
-// Like any plugin of a test it closes over nothing of this file.
+// A plugin beneath the mod's that holds every turn end for 6000 ms (2 * IDLE_GAP_MS) before it passes it on, as a slow
+// plugin beneath may. Like any plugin of a test it closes over nothing of this file.
 const TURN_HOLDER: Plugin = {
   name: 'turn-holder',
   tier: 'append',
   register(on) {
     on('turn.complete', async ($, e, next) => {
-      await $.clock.sleep(500)
+      await $.clock.sleep(6000)
 
       return next(e)
     })
@@ -5146,19 +5146,39 @@ test('a turn.complete whose clock read lands after a new turn started leaves the
     expect((await taskRows($)).b1).toMatchObject({ status: 'done', durationAtMost: true })
   })
 
-// The loop is idle from the time the turn ended as the hook saw it, at its entry, not from the time the chain beneath
-// answered: the notice that comes IDLE_GAP_MS after the entry is exact though the chain held the turn end for 500 ms.
-test('a turn end that the chain beneath holds makes the loop idle from its entry', WITH_TURN_HOLDER, async ($, on) => {
+// The loop is idle from the time the chain beneath the hook is done, not from the hook's entry: the engine takes a
+// queued notice in only after every turn.complete has run, so a notice that comes right after the chain is a bound
+// though the chain held the turn end for 2 * IDLE_GAP_MS.
+test('a turn end that the chain beneath holds makes the loop idle from the end of the chain', WITH_TURN_HOLDER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await runFor($, clock, w, 'b1', 1000)
+
+    const ended = endTurn($) // the chain beneath holds it for 2 * IDLE_GAP_MS
+    await clock.settle()
+    await clock.advance(2 * IDLE_GAP_MS)
+    await ended
+    await submitNotice($, notice('b1', 'completed'))
+
+    expect((await taskRows($)).b1).toMatchObject({ status: 'done', durationAtMost: true })
+  })
+
+// The same, with the notice IDLE_GAP_MS after the chain is done: the loop has been idle long enough, and it is exact.
+test('a notice IDLE_GAP_MS after the chain beneath a turn end is done is exact', WITH_TURN_HOLDER, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = bottom(on, clock)
   await $.session.start(START)
   await clock.advance(1)
   await runFor($, clock, w, 'b1', 1000)
 
-  const ended = endTurn($) // the chain beneath holds it for 500 ms
+  const ended = endTurn($) // the chain beneath holds it for 2 * IDLE_GAP_MS
   await clock.settle()
-  await clock.advance(IDLE_GAP_MS)
+  await clock.advance(2 * IDLE_GAP_MS)
   await ended
+  await clock.advance(IDLE_GAP_MS)
   await submitNotice($, notice('b1', 'completed'))
 
   expect((await taskRows($)).b1).toMatchObject({ status: 'done' })
