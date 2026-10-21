@@ -10,7 +10,7 @@
 > the background tasks after the Subagents, in rows built as theirs are (§6.7). The HTML preview
 > `docs/design/session-panel-preview.html` stays the approved v2 mock-up and predates these changes.
 
-Date: 2026-10-07. Status: implemented and shipped (0.5.1). The user approved the look in
+Date: 2026-10-07. Status: implemented and shipped (0.5.2). The user approved the look in
 `docs/design/session-panel-preview.html` before implementation.
 
 Scope: presentation only. The sections, their content, the formats and every formula of `2026-10-07-session-panel-design.md` §3–§4 stay as they are. Where the two specs differ on looks, this one replaces §3.1 of the main spec. Engine 2.1.288. "d.ts" below means `plugin-authoring/types/claude-code.d.ts` of that engine, cited by line.
@@ -1595,7 +1595,7 @@ three checks of 0.4.3 that were left for it, and four that the final review of 0
     and the Log has `stopped · …` with the time alone, not red. No notification comes for it (§8.5 of the 0.4–0.6 spec).
 16. **Ctrl+B in a terminal.** A command moved to the background with Ctrl+B while it runs gets a row. Its time counts
     from the start of its call, not from the key press, and the wait for a permission prompt is in it. (On the desktop,
-    Ctrl+B did not move a command to the background, and neither does a message: check 29.)
+    Ctrl+B did not move a command to the background. A message does, since engine 2.1.299: check 29.)
 17. **The desktop's own task list.** Compare the background tasks only, since the desktop's list holds foreground calls
     and agents too. The outcomes agree. A shell task's time is exact when its notice came after the session had been
     idle for 3 s or more, and otherwise a bound (`≤`) that is not under the desktop's time.
@@ -1624,12 +1624,16 @@ three checks of 0.4.3 that were left for it, and four that the final review of 0
 28. **Two commands that end while the session is idle.** Two background commands that end while no turn runs: each
     notice comes as a prompt of its own and closes its own row (the parser reads one notification per text). Both rows
     close, and each has its end line in the Log.
-29. **A message while a command runs (the desktop).** A message sent while a long foreground command runs waits until
-    the command ends. Then the model takes it in, and its `you` line is written then. The command gets no row.
+29. **A message while a command runs (the desktop, engine 2.1.299 or later).** A message sent while a long foreground
+    command runs moves the command to the background: its tool result says so and carries a `backgroundTaskId`, Tasks
+    gets a row `@shell` timed from the call's start, and the call's Log line ends in `→ background`. The row closes with
+    the command's notice. On the desktop 2.1.288 the message waited until the command ended, and the command got no
+    row.
 30. **A Workflow with a syntax error.** A Workflow whose script fails the syntax check (its result has a non-empty
     `error`) starts no task: there is no row, and its Log line ends in its time, not in `→ background`.
 
-Checks for the 0.5.1 release (17, 18 and 29 above are written for the desktop 2.1.288, after the 0.5.0 live check):
+Checks for the 0.5.1 release (17 and 18 above are written for the desktop 2.1.288, after the 0.5.0 live check, and 18
+holds on 2.1.299 and 2.1.304 too; 16 and 29 are rewritten for 2.1.299 and later):
 
 31. **A late notice.** A background shell task that ends while a turn runs shows `≤…` in Tasks and `✓ ≤…` in the Log;
     one that ends with the session idle for 3 s or more shows an exact time.
@@ -1643,6 +1647,14 @@ Checks for the 0.5.1 release (17, 18 and 29 above are written for the desktop 2.
     `you`.
 35. **Capitals in the terminal.** MCP servers with ASCII names in capitals leave no spare row in the terminal, where a
     capital counts one cell, as it is drawn (0.5.0 counted 1.5 and could leave one).
+
+Checks for the 0.5.2 release (engine 2.1.299 or later):
+
+36. **An agent's run.** A foreground or a background Agent call, or a Workflow: the agent's prompt has no `you` line,
+    and the Turn stats of the main turn that launched it count all of that turn's steps, its tool time and its cost.
+37. **The mask (0.5.2).** `{"secret_key": "wJalrXUtnFEMI/K7MDENG"}`, `secret_key=wJalrXUtnFEMI` and
+    `aws configure set aws_secret_access_key wJalrXUtnFEMI` show `•••` for the value; `{"max_token": 4096,
+    "secret": false}` shows as typed.
 
 Results of the live renders (2026-10-07, 2026-10-08, 2026-10-09, 2026-10-12 and 2026-10-13):
 

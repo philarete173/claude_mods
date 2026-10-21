@@ -26,18 +26,21 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   changes are read from the first turn of the main agent on; before it only the folder and the branch show. They are
   read again about a second after an agent edits a file or runs a command that is not read-only, and once a minute while
   the pane is placed and shown, so that edits made outside Claude's tools (an editor, a terminal, a background command
-  that ended after its call returned) show without a new turn. A pane counts as shown when it is in front of the
-  session's other plugin panes, so the Session pane, when it is alone, always is: in the usual setup every session whose
-  pane is open and placed keeps its minute read (bounded by the wait after a slow read and the 30 s budget below),
-  whichever tab or session the desktop has in front. Opening the pane reads at once. `/session-panel` never closes the
-  pane, since it cannot tell a pane in front from one that a built-in tab such as Terminal covers: on a pane that is
-  open in any state it asks to bring it forward and reads. The surface grants that only while the prompt has the keys
-  over an empty composer, and the pane then holds the keyboard until Esc. The pane's close mark closes it (ctrl+x x in a
-  terminal). After a slow read the next one waits four times as long as that read took, at most four minutes, and the
-  changes of one read have 30 s in all. A folder whose reads time out twice in a row (a `git status`, or a `git diff`
-  against HEAD, that times out or cannot start), such as a dotfiles repository in `$HOME`, has its changes left unread
-  for 15 minutes, whichever other folder is read, and then one read tries again; meanwhile its branch still shows and
-  the changes row is left out. Outside a repository only the folder shows; a clean tree has no changes row.
+  that ended after its call returned) show without a new turn. While a sandboxed Bash command runs, the project folder
+  holds the sandbox's empty placeholder files (dotfiles, `.claude/…` entries), which git sees as untracked, so a read in
+  that time counts them (`21 files changed`); the next read after the command counts right. A pane counts as shown when
+  it is in front of the session's other plugin panes, so the Session pane, when it is alone, always is: in the usual
+  setup every session whose pane is open and placed keeps its minute read (bounded by the wait after a slow read and the
+  30 s budget below), whichever tab or session the desktop has in front. Opening the pane reads at once.
+  `/session-panel` never closes the pane, since it cannot tell a pane in front from one that a built-in tab such as
+  Terminal covers: on a pane that is open in any state it asks to bring it forward and reads. The surface grants that
+  only while the prompt has the keys over an empty composer, and the pane then holds the keyboard until Esc. The pane's
+  close mark closes it (ctrl+x x in a terminal). After a slow read the next one waits four times as long as that read
+  took, at most four minutes, and the changes of one read have 30 s in all. A folder whose reads time out twice in a row
+  (a `git status`, or a `git diff` against HEAD, that times out or cannot start), such as a dotfiles repository in
+  `$HOME`, has its changes left unread for 15 minutes, whichever other folder is read, and then one read tries again;
+  meanwhile its branch still shows and the changes row is left out. Outside a repository only the folder shows; a clean
+  tree has no changes row.
 - **Usage**: the plan limits (5-hour, Weekly, Spend) as meters with a countdown to each reset. Hidden when the engine
   reports no plan limits, for example with an API key or a third-party provider.
 - **Turn stats**: the last finished turn of the main agent (a turn stopped before any response leaves the previous
@@ -60,29 +63,33 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   by colour alone. A row comes from a call of the main agent that started a task: a Bash command that runs in the
   background, however it got there (it asked for it, a host sent it there by its timeout, or it was moved there while it
   ran: Ctrl+B in a terminal, a plugin's abort of the turn, or any other way), a Monitor, or a local Workflow. The
-  desktop (2.1.288) moves no command to the background: one that runs past its timeout is killed, with exit code 143,
-  and gets no row, and a message you type while a command runs waits until it ends. Its own task list shows foreground
-  calls and agents too, so it holds more than Tasks does. A remote Workflow is no task, since its end never reaches this
-  session, and neither is a Workflow whose syntax check failed (its result has a non-empty `error`); a subagent's
-  background call makes no row: its task is its own and may end with it. The description is the Bash description or else
-  its command, the Monitor's description or the workflow's name, cleaned as a Log text is (secrets masked, format and
-  control characters taken out, up to 512 characters), and the name of its kind when nothing is left. A task counts from
-  the moment its call came back, so the wait for a permission prompt is not in its time. Two kinds of command count from
-  earlier: one that its timeout sent to the background counts from when it began, and one that was moved there while it
-  ran counts from when its call began, the wait for a permission prompt included. A task ends with the engine's task
-  notification (`completed` is done, `failed` is failed, `killed` and `stopped` are stopped) or with a successful
-  `TaskStop` that names it (stopped). The status is read from the notification's header only, so one that a summary or a
-  result quotes closes nothing, and neither does one with no `<summary>` and no `<result>`; a notification of a task
-  with no row changes nothing, and none can come before its task's row, since the mod writes the row before the call
-  that started the task returns (as long as every hook above the mod's waits for the chain beneath it). An ended task's
-  time is the duration that the notification gives, where it has one (a Workflow's), and for a `TaskStop`, which ends
-  the row at once, it is exact too. A shell notification has no duration: the time runs from the start to the notice,
-  and the engine takes a notice in at the next model request of a running turn, or when the session is idle, so it may
-  come later than the end of the task. When it came into a running turn, less than 3 s after the main agent's last turn
-  ended, or before the pane has seen a turn end (just after it loaded), the task ran at most that long, and the time is
-  a bound, drawn `≤12.2s`. A notice that comes after the session has been idle for 3 s or more is taken at the task's
-  end, and the time is exact. The time takes 8 characters, so `≤99h 59m` is the widest bound shown, and a wider time is
-  a dim `—`. `/clear` and a resume empty the list. The engine gives a mod no list of its background tasks, so the pane
+  desktop (2.1.288, 2.1.299 and 2.1.304) moves no command to the background for its timeout: one that runs past it is
+  killed, with exit code 143, and gets no row. A message you type while a foreground command runs waits until it ends on
+  the desktop 2.1.288; since 2.1.299 the engine moves the command to the background so that the message can reach the
+  model, and the command gets a row, timed from its call's start, and `→ background` in the Log. Its own task list shows
+  foreground calls and agents too, so it holds more than Tasks does. A remote Workflow is no task, since its end never
+  reaches this session, and neither is a Workflow whose syntax check failed (its result has a non-empty `error`); a
+  subagent's background call makes no row: its task is its own and may end with it. The description is the Bash
+  description or else its command, the Monitor's description or the workflow's name, cleaned as a Log text is (secrets
+  masked, format and control characters taken out, up to 512 characters), and the name of its kind when nothing is left.
+  A task counts from the moment its call came back, so the wait for a permission prompt is not in its time. Two kinds of
+  command count from earlier: one that its timeout sent to the background counts from when it began, and one that was
+  moved there while it ran counts from when its call began, the wait for a permission prompt included. A task ends with
+  the engine's task notification (`completed` is done, `failed` is failed, `killed` and `stopped` are stopped) or with a
+  successful `TaskStop` that names it (stopped). The status is read from the notification's header only, so one that a
+  summary or a result quotes closes nothing, and neither does one with no `<summary>` and no `<result>`; a notification
+  of a task with no row changes nothing, and none can come before its task's row, since the mod writes the row before
+  the call that started the task returns (as long as every hook above the mod's waits for the chain beneath it). An
+  ended task's time is the duration that the notification gives, where it has one (a Workflow's), and for a `TaskStop`,
+  which ends the row at once, it is exact too. A shell notification has no duration: the time runs from the start to the
+  notice, and the engine takes a notice in at the next model request of a running turn, or when the session is idle, so
+  it may come later than the end of the task. When it came into a running turn, less than 3 s after the main agent's
+  last turn ended, or before the pane has seen a turn end (just after it loaded), the task ran at most that long, and
+  the time is a bound, drawn `≤12.2s`. The 3 s count from when the hooks beneath the mod have run at the turn's end. A
+  notice that comes after the session has been idle for 3 s or more is taken at the task's end, and the time is exact.
+  The time takes 8 characters, so `≤99h 59m` is the widest bound shown, and a wider time is a dim `—`. In a terminal
+  that draws East Asian ambiguous characters two cells wide (CJK locales), `≤` takes two cells and a bound row is one
+  cell wider. `/clear` and a resume empty the list. The engine gives a mod no list of its background tasks, so the pane
   has none to reconcile with: a task that began before the panel loaded (Claude Code was restarted, or the desktop
   reopened the session) does not show, and a task whose notification never comes stays running until `/clear` or a
   resume. A Monitor's notification has not been seen live: it is read by the common format.
@@ -99,12 +106,15 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   blank row rather than cutting the last line. The Log keeps 200 lines, so a pane with room for more than 201 Log rows
   shows blank rows above `+N more`: a known limit. The events are prompts, tool calls, subagent spawns, resumes and
   results (a successful Agent call, a SendMessage to a known subagent or a subagent's `SubagentHandback` is not logged:
-  their lines say it), compactions. A prompt that starts a turn is logged `you`, unless the engine started the turn with
-  a tag of its own, a lowercase name with a hyphen or an underscore (`<task-notification>`,
+  their lines say it), compactions. A prompt that starts a turn of the main agent is logged `you`, unless the engine
+  started the turn with a tag of its own, a lowercase name with a hyphen or an underscore (`<task-notification>`,
   `<teammate-message teammate_id="lead">`): that line is `engine`, with the tag's name, and any other text, one that
-  starts with `<` too (`<div class="x">`), is yours. A message you type while a turn runs goes into that turn, with no
-  turn of its own, and has its `you` line when the model takes it in (the desktop) or at Enter (a terminal); one still
-  queued when the turn ends keeps one line. Only a person's message has that line (typed, from a bridge, the SDK or
+  starts with `<` too (`<div class="x">`), is yours. The line goes by the shape: a tag that you type in that shape
+  (`<my_note>`) is logged `engine`, and an engine tag of one word is logged `you`. An agent's run (a subagent, a
+  Workflow's agent; engine 2.1.299 and later raise a turn of its own for it) gets no line for its prompt and leaves the
+  Turn stats of the main turn alone. A message you type while a turn runs goes into that turn, with no turn of its own,
+  and has its `you` line when the model takes it in (the desktop) or at Enter (a terminal); one still queued when the
+  turn ends keeps one line. Only a person's message has that line (typed, from a bridge, the SDK or
   Slack), not a plugin's or the engine's. A line keeps up to 512 characters of its text, and the pane cuts it to its
   width. Tool calls and subagent results both carry their outcome (✓/✗ and the time, or denied) in a right-aligned
   column. A call that started a background task has `→ background` there in place of ✓ and its time, which would be the
@@ -154,13 +164,26 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   also when a quote closes the name, as in JSON, a Python dict and a curl body (`"password": "…"`), tokens with a known
   prefix (`sk-`, `ghp_`, `github_pat_`, `xoxb-`), a GitHub or Slack token and a `Bearer …` that a removed escape
   sequence glued to a word, the `--token`, `--password`, `--api-key` and `--secret` flags, the values of `*_KEY=`,
-  `*_TOKEN=`, `*_SECRET=` and `*_PASSWORD=`, and the password in a URL. The mask is no scanner: it has no pattern for
-  `curl -u user:pass`, `mysql -p…`, `.netrc`, a `Cookie:` header, a lowercase `aws_secret_access_key`, `glpat-` tokens,
-  a PEM key or a JWT on its own, and it misses a key written in a form it does not read (an escaped JSON key in a shell
-  string, `d["password"] = …`, an XML element), all but the first part of a Digest or AWS4 credential, and a token whose
-  first letter a crafted escape sequence takes. It over-masks in two known cases: a name that ends in `Bearer`
-  (`JwtBearer`) masks the word after it, and two code spans around `Authorization:` mask the prose between them. Section
-  4.7 of the design spec (in Russian, linked from the
+  `*_TOKEN=`, `*_SECRET=` and `*_PASSWORD=`, and the password in a URL. The names `secret_key`, `secret_key_base`,
+  `access_key` and `private_key` are read in any case, with `_`, `-` or nothing between the words (`secretKey`,
+  `SECRET_KEY_BASE`): after a quoted name (`{"secret_key": "…"}`), unquoted with `=`, `:`, `=>`, `:=`, `?=` or `+=`
+  (`secret_key=…`, `secretKey := "…"`), as a flag (`--secret-key …`, `--s3-secret-access-key …`), and as `aws configure
+  set aws_secret_access_key …`. A quoted value of an unquoted name that nothing closes on its line masks the rest of the
+  text, so a PEM in a `.env` file stays masked. After a quoted name a bare number, `true`, `false`, `null` or `none`
+  shows as it is (`{"max_token": 4096, "secret": false}`, `{'password': None}`), and a quoted one (`"4096"`) is masked;
+  an unquoted `token: 120` is masked too. A value that begins with what a later pattern reads (`--token …`,
+  `Authorization: …`, another key and its separator) is left to that pattern. The mask is no scanner: it has no pattern
+  for `curl -u user:pass`, `mysql -p…`, `.netrc`, a `Cookie:` header, `glpat-` tokens, a PEM key or a JWT on its own,
+  and it misses a key written in a form it does not read (an escaped JSON key in a shell string, `d["password"] = …`, an
+  XML element such as `<secretKey>`, Azure's `AccountKey=`), a value on the next line or in a YAML block (`private_key:
+  |`) after an unquoted name, a typed default (`secret_key: str = "…"`), the default in `os.environ.get('SECRET_KEY',
+  '…')`, a number-shaped secret after a quoted name (a digit PIN, `"token": 01234567`, hex such as `8e54632190`: it
+  shows as a number does), all but the first part of a Digest or AWS4 credential, and a token whose first letter a
+  crafted escape sequence takes. It over-masks in known cases: a name that ends in `Bearer` (`JwtBearer`) masks the word
+  after it, two code spans around `Authorization:` mask the prose between them, the closing quote after the value of a
+  Bearer header (`"Authorization: Bearer …"`) goes with the token, a quote or a backtick after a `_key` name that
+  nothing closes on its line hides the rest of the text (prose such as ``Set `secret_key:` in config``), and `set
+  aws_secret_access_key in the file` reads `••• the file`. Section 4.7 of the design spec (in Russian, linked from the
   [docs](https://github.com/philarete173/claude_mods/blob/main/docs/README.md) page) has the full list.
 
 ## How costs are measured
@@ -172,6 +195,9 @@ the top is the engine's Total; Subagents is the sum of what the subagents were c
 With subagents running at once the split is approximate: steps that overlap can charge one agent for another's
 request. The same subagent was measured at $0.100 beside a parallel review and $0.046 alone. The totals stay exact:
 Total = Session + Subagents.
+
+After the app restarts (a reopened session) the pane starts over, and the cost of the subagents that ran before counts
+as Session until 0.6.0 restores the state: Subagents fell from $4.80 to $0.008 in a live check. Total is right.
 
 ## What the mod does not do
 

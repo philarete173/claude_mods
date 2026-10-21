@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.5.2 — 2026-10-21
+
+- An agent's run no longer disturbs the main turn. Since engine 2.1.299 every agent run, foreground or background (a
+  subagent, a Workflow agent), raises a turn start of its own. The pane took it for a main turn: the Turn stats of a
+  turn that launched agents kept only the last step, and the agent's prompt was logged as `you`. It is passed on and
+  left alone now: the Turn stats count all the steps, the tool time and the cost of the main turn, and an agent's prompt
+  has no line.
+- A task's time is exact only if the session had been idle 3 s or more, and the idle time starts now when the turn
+  end's hooks beneath the mod have run, not at the mod's own hook. A slow hook beneath the mod no longer makes a notice
+  that waited read as exact. A slow hook above the mod, or a slow `session.measure`, still can: the 3 s gap is a
+  heuristic.
+- The mask reads more names: `secret_key`, `secret_key_base` (Rails, Phoenix), `access_key` and `private_key`, in any
+  case, with `_`, `-` or nothing between the words (`secretKey`, `SECRET_KEY_BASE`). They are masked after a quoted name
+  (`{"secret_key": "…"}`), unquoted with `=`, `:`, `=>`, `:=`, `?=` or `+=` (`secret_key=…`, `secretKey := "…"`), as a
+  flag (`--secret-key …`, `--s3-secret-access-key …`) and in `aws configure set aws_secret_access_key …`; the lowercase
+  `aws_secret_access_key` of the AWS credentials file is masked now. A quoted value of an unquoted name that nothing
+  closes on its line masks the rest of the text, so a PEM in a `.env` file stays masked.
+- After a quoted name, a bare number, `true`, `false`, `null` or `none` shows as it is (`{"max_token": 4096, "secret":
+  false}`, `{'password': None}`), and a quoted one (`"4096"`) is masked as before. So a number-shaped secret after a
+  quoted name shows (a digit PIN, `"token": 01234567`, hex such as `8e54632190`); an unquoted `token: 120` stays
+  masked. A value that begins with what a later pattern reads (`--token …`, `Authorization: …`, another key and its
+  separator) is left to that pattern, which masks its secret.
+- A run of invisible characters of any length is cleaned in pieces of up to 4096 code points and judged as one run,
+  with the same output as before. In Node a run of about 4.2 million overflowed the stack; the engine's own runtime
+  never did, so this guards against a change of runtime.
+- Docs: the README and the specs record the engines 2.1.299 to 2.1.304: a message sent during a foreground command
+  moves it to the background (2.1.288 made it wait), the sandbox's placeholder files that a Project read counts while a
+  sandboxed command runs, the cost of earlier subagents that counts as Session after the app restarts, and the limits
+  and over-masks of the mask.
+
 ## 0.5.1 — 2026-10-20
 
 - A text is cleaned of whole escape sequences. A control string (DCS, SOS, PM, APC), an 8-bit CSI, an `ESC ( B` (which
