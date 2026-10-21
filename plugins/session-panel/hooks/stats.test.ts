@@ -465,10 +465,29 @@ test('stripFormat reads 128 KB of unfinished sequences and of invisibles once: m
 
 // A quoted value that nothing closes runs to the end of the line, and a key may be followed by 128 KB of spaces before
 // its value: each is read in one pass; so are a backtick before a long scheme, 128 KB of no-break spaces after a
-// scheme, a long second word after a scheme and a long token after a Bearer.
+// scheme, a long second word after a scheme and a long token after a Bearer. The same for a `_key` name: a gap with no
+// separator behind it, an unclosed value in each kind of quote, a run of `-`, a flag with no name in it, the AWS name
+// and a gap, names in a row, a long number after a quoted key, and a long word after a key.
 test('redact reads 128 KB of an unclosed quoted value and of a gap after a key once: milliseconds, not seconds', () => {
   const gap = ' '.repeat(131_072)
+  const long = 'a'.repeat(131_072)
+  const kept = [
+    `secret_key${gap}x`, `--secret-key${gap}`, '-'.repeat(131_072), `--${long}`, '--x '.repeat(32_768),
+    `aws_secret_access_key${gap}`, 'secret_key '.repeat(11_916), `"token": ${'1'.repeat(131_072)}`,
+  ]
   const started = performance.now()
+  for (const text of kept) expect(redact(text) === text, text.slice(0, 24)).toBe(true)
+  for (const quote of ['"', "'", '`', '"""', "'''", '\u{201C}', '\u{2018}']) {
+    expect(redact(`secret_key=${quote}${long}`), quote).toBe('secret_key=•••')
+  }
+  expect(redact(`secret_key="${'a\n'.repeat(65_536)}`)).toBe('secret_key=•••')
+  expect(redact(`secret_key="${'\\a'.repeat(65_536)}`)).toBe('secret_key=•••')
+  // Each name is the value of the one before it, and an anchor of its own: the last, with nothing after it, is masked.
+  expect(redact('secret_key:'.repeat(11_916))).toBe(`${'secret_key:'.repeat(11_915)}•••`)
+  expect(redact(`"token": ${'1'.repeat(131_072)}x`)).toBe('"token": •••')
+  // The check for an anchor at the start of a bare value reads a long word once.
+  expect(redact(`secret_key=--${long}`)).toBe('secret_key=•••')
+  expect(redact(`"password": ${'a-'.repeat(65_536)}`)).toBe('"password": •••')
   expect(redact(`authorization="${'a'.repeat(131_072)}`)).toBe('authorization=•••')
   expect(redact(`"token":${gap}x`)).toBe(`"token":${gap}•••`)
   expect(redact(`Authorization: \`${'a'.repeat(131_072)}`)).toBe('Authorization: •••')
@@ -1391,6 +1410,99 @@ test('redact keeps the name of the next header when a Bearer ends a line: SECRET
     // A header name may hold dots.
     ['Uses Bearer\nreq.headers.authorization: Basic dXNlcjpwYXNz', 'Uses Bearer •••: Basic •••'],
     ['xBearer abcdefgh12345678', 'xBearer •••'],
+  ]
+  for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
+})
+
+// The `_key` names: `secret_key`, `secret_key_base` (the master secret of Rails and Phoenix), `access_key` and
+// `private_key`, with `_`, `-` or nothing between the words, in any case. A quoted one is a key as `"password"` is. An
+// unquoted one takes `=>`, `:=`, `?=`, `+=`, `=` or `:` for its separator, a command-line flag that ends in one takes
+// `=` or a space, and so does `aws_secret_access_key` a space. The value is masked whole, quotes and all, and one that
+// nothing closes runs to the end of the text; the name and the separator stay. A key on the line after a bare
+// `Authorization:` or `Bearer` keeps its value masked, and loses its name too: AUTH_SCHEME and SECRETS, or the Bearer
+// patterns, read across the line end and take the name for the credential.
+test('redact masks the value of a `_key` name: quoted, unquoted, a flag, the AWS name with a space', () => {
+  const cases: Array<[input: string, want: string]> = [
+    ['{"secret_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}', '{"secret_key": •••}'],
+    ["{'access_key': 'abc12345'}", "{'access_key': •••}"],
+    ['{"privateKey": "abc12345"}', '{"privateKey": •••}'],
+    ["'private-key' => 'abc12345'", "'private-key' => •••"],
+    ['secret_key=wJalrXUtnFEMI', 'secret_key=•••'],
+    ['aws_secret_access_key = wJalrXUtnFEMI/K7MDENG', 'aws_secret_access_key = •••'],
+    ['access_key: abc12345', 'access_key: •••'],
+    ['PRIVATE_KEY: abc12345', 'PRIVATE_KEY: •••'],
+    ['private_key = "abc 12345"', 'private_key = •••'],
+    ['secret_key=123456', 'secret_key=•••'],
+    ["secret_key => 'abc12345'", 'secret_key => •••'],
+    [":aws_secret_access_key => 'wJalrXUtnFEMI'", ':aws_secret_access_key => •••'],
+    ['secretKey := "wJalrXUtnFEMI"', 'secretKey := •••'],
+    ['secret_key_base: 3b7c1a9e5f', 'secret_key_base: •••'],
+    ['heroku config:set SECRET_KEY_BASE=3b7c1a9e5f', 'heroku config:set SECRET_KEY_BASE=•••'],
+    ["secret_key = '''wJalrXUtnFEMI'''", 'secret_key = •••'],
+    ['private_key = "abc 12345', 'private_key = •••'],
+    ['access_key: bearer abcdefgh12345678', 'access_key: •••'],
+    ['aws configure set aws_secret_access_key wJalrXUtnFEMI', 'aws configure set aws_secret_access_key •••'],
+    ['rclone --s3-secret-access-key wJalrXUtnFEMI', 'rclone --s3-secret-access-key •••'],
+    ['--secret-key=wJalrXUtnFEMI', '--secret-key=•••'],
+    ['headers:\n  Authorization:\n  secret_key: abc12345', 'headers:\n  Authorization:\n  ••• •••'],
+    ['WWW-Authenticate: Bearer\nsecret_key=abc12345', 'WWW-Authenticate: Bearer ••••••'],
+    ['Authorization: Token secret_key=abc12345', 'Authorization: ••• secret_key=•••'],
+    // Curly quotes, as a chat or a document makes them.
+    ['secret_key: \u{201C}correct horse battery staple\u{201D}', 'secret_key: •••'],
+    ['secret_key = \u{2018}correct horse\u{2019} x', 'secret_key = ••• x'],
+    // A string closes on its own line; one that nothing closes there runs to the end of the text, a PEM and what
+    // follows it too, so its quote never pairs with the opening quote of a later value.
+    ['secret_key: "abc 12345" next\nline', 'secret_key: ••• next\nline'],
+    ['PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n-----END PRIVATE KEY-----"\nNEXT=1', 'PRIVATE_KEY=•••'],
+    ['secret_key: "x\n password: "hunter2" ok', 'secret_key: •••'],
+    ["secret_key: 'x\n password: 'hunter2' ok", 'secret_key: •••'],
+    ['secret_key: `x\n password: `hunter2` ok', 'secret_key: •••'],
+  ]
+  for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
+  // Prose, a longer name, and a value on the line after its key (the known limit of the line rule above).
+  for (const text of ['rotate the secret_key today', '"secret_key_id": "x1"', 'secret_key=\nwJalrXUtnFEMI']) {
+    expect(redact(text), JSON.stringify(text)).toBe(text)
+  }
+})
+
+// A bare value does not begin with what a later pattern reads: a flag (`--token`, `--secret-key`) or a key name and
+// its separator (`password:`, `Authorization:`). The key is left as it is, and the later pattern masks its own secret,
+// which the key would otherwise have hidden from it. A value that only begins with `--` is a value.
+test('redact leaves a flag or a key that begins the value of a key to its own pattern', () => {
+  const cases: Array<[input: string, want: string]> = [
+    ['secret_key: --token tok12345678', 'secret_key: --token •••'],
+    ['secret_key= password: hunter2secret', 'secret_key= password: •••'],
+    ['secret_key: Authorization: Token abcdefgh12345678', 'secret_key: Authorization: •••'],
+    ['private_key: --secret-key abc12345', 'private_key: --secret-key •••'],
+    ['"secretKey": --token tok12345678', '"secretKey": --token •••'],
+    ['"password": --token tok12345678', '"password": --token •••'],
+    ['"password": Authorization: Token abcdefgh12345678', '"password": Authorization: •••'],
+    ['secret_key=--abcdefgh12345678', 'secret_key=•••'],
+    ['"password": --abcdefgh12345678', '"password": •••'],
+    // A flag is an anchor only as its own pattern reads it: SECRETS reads `--token` before `=` or a space, not a tab
+    // (the word after the tab shows, as in 0.5.1), and UNQUOTED_KEY reads `--secret-key` before a tab too.
+    ['secret_key: --token\tabc12345', 'secret_key: •••\tabc12345'],
+    ['secret_key: --secret-key\tabc12345', 'secret_key: --secret-key\t•••'],
+  ]
+  for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
+})
+
+// A bare value after a quoted key that is a literal (`true`, `false`, `null` or `none` in any case, as a Python dict
+// writes `True` and `None`) or a number, and that a space, `,`, `;` or a closing bracket or the end of the text
+// follows, is no secret: it stays. A value that only begins with one (`120abc`, `0x1F`, `falsey`), a quoted one and a
+// Bearer credential are masked as before.
+test('redact leaves a number, true, false, null and none after a quoted key as they are', () => {
+  const kept = [
+    '{"max_token": 4096, "secret": false}', '"token": 120', "{'password': None}", '"token": null,', '"pwd": -1.5e3}',
+    '"token": 120]',
+  ]
+  for (const text of kept) expect(redact(text), text).toBe(text)
+  const cases: Array<[input: string, want: string]> = [
+    ['"token": 120abc', '"token": •••'],
+    ['"password": "123456"', '"password": •••'],
+    ['"token": 0x1F', '"token": •••'],
+    ['"secret": falsey', '"secret": •••'],
+    ['"token": Bearer 12345678', '"token": •••'],
   ]
   for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
 })

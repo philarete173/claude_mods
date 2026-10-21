@@ -372,7 +372,8 @@ export function stripFormat(s: string): string {
 // A quoted value, whole: in straight quotes (a backslash escapes a quote inside them), in backticks, or in the curly
 // quotes that a chat or a document makes of them. One that nothing closes runs to the end of the line, as a text that
 // the Log cut leaves it, and is masked all the same, but for a backtick one (see below). The two patterns below take
-// their value from it.
+// their value from it. Its per-character loops hold: the runtime's regex engine gives up on one past 63,792 units, and
+// redact reads 4096 at most (TEXT_HEAD_MAX).
 const QUOTED_VALUE = [
   String.raw`"(?:\\.|[^"\\\r\n])*"?`,
   String.raw`'(?:\\.|[^'\\\r\n])*'?`,
@@ -388,6 +389,24 @@ const KEY_QUOTE = String.raw`["'\x60\u{201C}\u{201D}\u{2018}\u{2019}]`
 
 // Whitespace that stays on its line: any but CR, LF, U+2028 and U+2029.
 const INLINE_SPACE = String.raw`[^\S\r\n\u{2028}\u{2029}]`
+
+// The `_key` names that SECRETS lacks: `secret_key`, `secret_key_base` (the master secret of Rails and Phoenix),
+// `access_key` and `private_key`, with `_`, `-` or nothing between the words. The patterns that take them ignore case.
+const KEY_NAMES = String.raw`secret[_-]?key(?:[_-]?base)?|access[_-]?key|private[_-]?key`
+
+// No plain value ahead: a bare value that is wholly a literal (`true`, `false`, `null`, `none`: JSON and a Python dict)
+// or a number, with what ends a bare value or the end of the text after it, is no secret.
+const NOT_PLAIN = String.raw`(?!(?:true|false|null|none|[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?:[\s,;}\])]|$))`
+
+// No anchor of a later pattern ahead: a bare value does not begin with a flag that SECRETS or UNQUOTED_KEY reads, and
+// what that pattern reads after it (`--token` and `=` or a space, `--secret-key` and `=` or a gap), or with a key name,
+// a separator and a value (`password: …`, `Authorization: …`). The key is then left as it is, and the later pattern
+// masks its own secret. A value that only begins with `--` is a value, and so is one that ends in a name and `=`
+// (base64 padding: `…pwd=`, `…token==`), which no later pattern would mask.
+const NO_ANCHOR = String.raw`(?!--(?:token|password|api-key|secret)[= ]|` +
+  String.raw`--[\w-]*?(?:secret-key(?:-base)?|access-key|private-key)(?:${INLINE_SPACE}+(?![:?+]?=|:)|=)|` +
+  String.raw`[\w.-]*(?:api[_-]?key|token|secret|password|passwd|pwd|` +
+  String.raw`authorization|${KEY_NAMES})${KEY_QUOTE}?${INLINE_SPACE}*(?:=>|[:?+]?=|:)${INLINE_SPACE}*[^\s=>])`
 
 // An Authorization header whose value is in quotes (`"Authorization": "Bearer …"`, `'Authorization' => 'Basic …'`,
 // `authorization="…"`). SECRETS takes `"Bearer` for the value there and masks that word alone, so the token behind the
@@ -406,20 +425,53 @@ const QUOTED_AUTHORIZATION = new RegExp(
 // and it does not sit on a later line, where a block that the key opens belongs to SECRETS. The quote after the name is
 // required: `the token count` and `"tokens"` are no key. The `access` and `auth` token names and the `client` secret
 // name are covered by `token` and `secret` already (no `\b` keeps them out), so they widen nothing. Left as they are: a
-// nested value (`{"password": {"value": …}}`), the later items of a list, a bare value cut at `, ; ) ] }`, and a quoted
-// value across a line end.
+// nested value (`{"password": {"value": …}}`), the later items of a list, a bare value cut at `, ; ) ] }`, a quoted
+// value across a line end, and a plain value (NOT_PLAIN).
 const QUOTED_KEY = new RegExp(
   // The name, its quote and its separator, then the gap: any whitespace before a quoted value, and before a bare one
   // any but a line end (CR, LF, and the line and paragraph separators U+2028 and U+2029), so a tab, a no-break space
   // and an ideographic space are crossed and a new line is not. Group 1 is all of that and stays; the value after it
   // becomes the mask. An `=` that starts an arrow is no separator, so a dangling `=>` is not read as `=` and a value
   // `>`.
-  String.raw`((?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|token|secret|password|passwd|pwd)` +
-    String.raw`${KEY_QUOTE}\s*(?:=>|:|=(?!>))(?:\s*(?=["'\x60\u{201C}\u{2018}])|${INLINE_SPACE}*))` +
+  String.raw`((?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|token|secret|password|passwd|pwd|` +
+    String.raw`${KEY_NAMES})${KEY_QUOTE}\s*(?:=>|:|=(?!>))(?:\s*(?=["'\x60\u{201C}\u{2018}])|${INLINE_SPACE}*))` +
     // The prefix and the value stay on the key's line; a value never starts with `=`. The prefix may open with a
     // backtick that nothing closes (QUOTED_VALUE takes a closed one), as in AUTH_SCHEME: the bare value would otherwise
-    // take the backtick and `Bearer` for one word, and the token after it would show.
-    String.raw`(?:${QUOTED_VALUE}|(?:\x60?(?:bearer|basic)${INLINE_SPACE}+)?[^\s,;}\])\[{(=][^\s,;}\])]*)`,
+    // take the backtick and `Bearer` for one word, and the token after it would show. An anchor (NO_ANCHOR) and a
+    // plain value are read before the prefix: after it, `Bearer 12345678` would lose `Bearer` alone and show the
+    // number.
+    String.raw`(?:${QUOTED_VALUE}|${NO_ANCHOR}${NOT_PLAIN}(?:\x60?(?:bearer|basic)${INLINE_SPACE}+)?` +
+    String.raw`[^\s,;}\])\[{(=][^\s,;}\])]*)`,
+  'giu',
+)
+
+// The value of a `_key` name with no quote after it, which SECRETS does not read (`secret_key=…`, `access_key: …`,
+// Perl's `secret_key => '…'`, Go's `secretKey := "…"`). There is no `\b` before the name, as in SECRETS, so
+// `aws_secret_access_key = …` is read by its tail. A separator is `=>`, `:=`, `?=`, `+=`, `=` or `:`, each read before
+// the shorter ones, and the gaps round it stay on the line: a value on a later line shows, a known limit. A
+// command-line flag that ends in a name (`--secret-key`, `--s3-secret-access-key`) and `aws_secret_access_key` (`aws
+// configure set`) take `=` or a space; prose with that name over-masks the next word, accepted. A `--` that a word
+// character or a `-` touches starts no flag, so a run of dashes is read once, and a space that a separator follows is
+// left to that separator. The value is a string in triple quotes, double quotes, single quotes or backticks (a
+// backslash escapes the next character) or in curly quotes, one that nothing closes (on its line, for the straight
+// quotes and the backtick) running to the end of the text (a PEM in a `.env` file), or a bare one that begins with no
+// anchor of a later pattern (NO_ANCHOR): an optional `Bearer` or `Basic` with its credential (SECRETS reads those by
+// their scheme), then a run of non-space characters that does not begin with `=` or `>`. The name and the separator
+// stay (group 1).
+// Applied before AUTH_SCHEME and GLUED_BEARER: a bare `Authorization:` or `Bearer` at a line end takes the name on the
+// next line for its own, and the value would show.
+const UNQUOTED_KEY = new RegExp(
+  String.raw`((?:(?<![\w-])--[\w-]*?(?:secret-key(?:-base)?|access-key|private-key)|aws_secret_access_key)` +
+    String.raw`(?:${INLINE_SPACE}+(?![:?+]?=|:)|=)|(?:${KEY_NAMES})${INLINE_SPACE}*(?:=>|[:?+]?=|:)${INLINE_SPACE}*)` +
+    // Each loop takes a run of plain characters at once: with a group repeated for every character, the regex engine
+    // of the mod's runtime gives up on a 128 KB value (no match, no error) and the value shows.
+    // A string in `"`, `'` or a backtick closes on its own line, or runs to the end of the text: across a line end its
+    // quote would pair with the opening quote of a later value, which would then show.
+    String.raw`(?:"""[^"]*(?:"(?!"")[^"]*)*"{0,3}|'''[^']*(?:'(?!'')[^']*)*'{0,3}|` +
+    String.raw`"[^"\\\r\n]*(?:\\[\s\S][^"\\\r\n]*)*(?:"|[\s\S]*)|'[^'\\\r\n]*(?:\\[\s\S][^'\\\r\n]*)*(?:'|[\s\S]*)|` +
+    String.raw`\x60[^\x60\\\r\n]*(?:\\[\s\S][^\x60\\\r\n]*)*(?:\x60|[\s\S]*)|` +
+    String.raw`\u{201C}[^\u{201D}]*\u{201D}?|\u{2018}[^\u{2019}]*\u{2019}?|` +
+    String.raw`${NO_ANCHOR}(?:(?:bearer|basic)${INLINE_SPACE}+)?[^\s=>]\S*)`,
   'giu',
 )
 
@@ -440,7 +492,8 @@ const QUOTED_KEY = new RegExp(
 const AUTH_SCHEME = new RegExp(
   String.raw`(authorization${KEY_QUOTE}?\s*[:=]\s*)(?:\x60|(?!(?:bearer|basic)\b))[A-Za-z][\w.-]*` +
     String.raw`(?:${INLINE_SPACE}+(?!--|(?:bearer|basic)(?!\S)|` +
-    String.raw`[\w.-]*(?:api[_-]?key|token|secret|password|passwd|pwd|authorization)${KEY_QUOTE}?\s*[:=])\S+)?`,
+    String.raw`[\w.-]*(?:api[_-]?key|token|secret|password|passwd|pwd|authorization|${KEY_NAMES})` +
+    String.raw`${KEY_QUOTE}?\s*[:=])\S+)?`,
   'giu',
 )
 
@@ -469,6 +522,7 @@ export function redact(s: string): string {
   const clean = stripFormat(s)
     .replace(QUOTED_AUTHORIZATION, '$1•••')
     .replace(QUOTED_KEY, '$1•••')
+    .replace(UNQUOTED_KEY, '$1•••')
     .replace(AUTH_SCHEME, '$1•••')
     .replace(GLUED_TOKEN, '•••')
     .replace(GLUED_BEARER, '$1 •••')
