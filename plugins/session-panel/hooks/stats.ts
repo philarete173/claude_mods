@@ -270,10 +270,11 @@ const FORMAT_OR_FLAG = new RegExp(
 // A run is the joiners, the default ignorable code points that are no Cf (the first pass has taken the rest of Cf but
 // the tag characters of a kept flag, which remain after it: `(?!\p{Cf})` keeps them out of a run), and four more: the
 // braille blank (U+2800), the Khitan small script filler (U+16FE4), the Tifinagh consonant joiner (U+2D7F) and the
-// enclosing keycap (U+20E3).
+// enclosing keycap (U+20E3). A match takes 4096 code points at most: a `+` over an alternation keeps one backtrack
+// entry per repetition, and a run of millions overflows the stack in Node. stripFormat joins the matches that touch.
 const INVISIBLE_RUN = new RegExp(
   String.raw`(?:[\u{200C}\u{200D}]|(?!\p{Cf})\p{Default_Ignorable_Code_Point}` +
-    String.raw`|[\u{2800}\u{16FE4}\u{2D7F}\u{20E3}])+`,
+    String.raw`|[\u{2800}\u{16FE4}\u{2D7F}\u{20E3}]){1,4096}`,
   'gu',
 )
 // A run with a joiner in it is judged as a joiner is: it stays only between two characters that holdsJoiner accepts.
@@ -347,23 +348,43 @@ export function stripFormat(s: string): string {
   // flatten it at each run, which takes quadratic time.
   let tail = ''
   let from = 0
-  for (const found of rest.matchAll(INVISIBLE_RUN)) {
-    const run = found[0]
-    const at = found.index ?? 0
-    const between = rest.slice(from, at)
-    parts.push(between)
-    tail = between.length >= 2 ? between.slice(-2) : (tail + between).slice(-2)
-    const before = tail[tail.length - 1]
-    const after = rest[at + run.length]
-    const isKept = HAS_JOINER.test(run)
-      ? holdsJoiner(before) && holdsJoiner(after)
-      : holdsJoiner(before) || (isKeycapBase(tail) && KEYCAP_TAIL.has(run) && !BEARER_CHAR.test(after ?? ''))
-    if (isKept) {
-      parts.push(run)
-      tail = (tail + run).slice(-2)
+  // The run pending, rest[runStart, runEnd), and whether it holds a joiner. A match that starts where the pending run
+  // ends goes on with it (INVISIBLE_RUN takes 4096 code points at most), so a run is judged once, as a whole.
+  let runStart = 0
+  let runEnd = 0
+  let hasJoiner = false
+  const settle = (): void => {
+    if (runEnd > runStart) {
+      const between = rest.slice(from, runStart)
+      parts.push(between)
+      tail = between.length >= 2 ? between.slice(-2) : (tail + between).slice(-2)
+      const before = tail[tail.length - 1]
+      const after = rest[runEnd]
+      // Only a run of two units or fewer can be a keycap tail.
+      const isTail = runEnd - runStart <= 2 && KEYCAP_TAIL.has(rest.slice(runStart, runEnd))
+      const isKept = hasJoiner
+        ? holdsJoiner(before) && holdsJoiner(after)
+        : holdsJoiner(before) || (isKeycapBase(tail) && isTail && !BEARER_CHAR.test(after ?? ''))
+      if (isKept) {
+        const run = rest.slice(runStart, runEnd)
+        parts.push(run)
+        tail = (tail + run).slice(-2)
+      }
+      from = runEnd
+      runStart = runEnd
     }
-    from = at + run.length
   }
+  for (const found of rest.matchAll(INVISIBLE_RUN)) {
+    const at = found.index ?? 0
+    if (at !== runEnd || runEnd === runStart) {
+      settle()
+      runStart = at
+      hasJoiner = false
+    }
+    runEnd = at + found[0].length
+    hasJoiner = hasJoiner || HAS_JOINER.test(found[0])
+  }
+  settle()
   parts.push(rest.slice(from))
 
   return parts.join('')

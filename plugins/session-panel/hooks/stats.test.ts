@@ -604,6 +604,59 @@ test('stripFormat reads a long run of joiners once: 40,000 of them take a few mi
   expect(performance.now() - started).toBeLessThan(500) // a lookbehind and lookahead pair takes about two seconds
 })
 
+// A run of invisibles is matched in pieces of 4096 code points at most (a `+` over an alternation keeps one backtrack
+// entry per repetition, and a run of millions overflows the stack in Node), and the pieces are judged as one run. 5 M
+// of them are 5 M units, far past the point where V8 threw (about 4.2 M units).
+test('stripFormat cleans a run of 5,000,000 invisibles without a throw, and in well under a second', () => {
+  const text = `a${'\u{34F}'.repeat(5_000_000)}b`
+  expect(stripFormat(text)).toBe('ab')
+  // The best of three rounds, as above: a burst of load slows one round, not all of them.
+  let best = Infinity
+  for (let round = 0; round < 3; round += 1) {
+    const started = performance.now()
+    stripFormat(text)
+    best = Math.min(best, performance.now() - started)
+  }
+  expect(best).toBeLessThan(1000)
+})
+
+test('stripFormat judges a run past the bound as it judges a short one: a joiner keeps or takes the whole run', () => {
+  const joiners = ZWJ.repeat(5000)
+  expect(stripFormat(`é${joiners}b`)).toBe('éb')
+  expect(stripFormat(`é${joiners}ü`)).toBe(`é${joiners}ü`)
+  expect(stripFormat(`${ROCKET}${'\u{FE0F}'.repeat(5000)}`)).toBe(`${ROCKET}${'\u{FE0F}'.repeat(5000)}`)
+  // A joiner in the second piece decides the whole run, and so does one in the first.
+  expect(stripFormat(`é${'\u{34F}'.repeat(4096)}${ZWJ}b`)).toBe('éb')
+  expect(stripFormat(`é${ZWJ}${'\u{34F}'.repeat(4096)}b`)).toBe('éb')
+  expect(stripFormat(`é${'\u{34F}'.repeat(4096)}${ZWJ}ü`)).toBe(`é${'\u{34F}'.repeat(4096)}${ZWJ}ü`)
+  // The bound counts code points: U+E0100 is two units, so 4097 of them are 8194 units in two pieces.
+  expect(stripFormat(`a${'\u{E0100}'.repeat(4097)}b`)).toBe('ab')
+  expect(stripFormat(`é${'\u{E0100}'.repeat(4097)}b`)).toBe(`é${'\u{E0100}'.repeat(4097)}b`)
+})
+
+// Runs of 4095, 4096, 4097 and 8193 code points of three kinds between each kind of neighbour: what stays is written
+// out per kind. A run of joiners stays between two characters above U+007F that are no spaces; one with no joiner stays
+// after such a character, and so does a run that ends in a keycap tail, which is no tail of a keycap as a whole.
+test('stripFormat gives the same output for a run of 4095 to 8193 code points as for a short one', () => {
+  const kinds: Array<[name: string, run: (n: number) => string, stays: (before: string, after: string) => boolean]> = [
+    ['joiners', n => ZWJ.repeat(n), (before, after) => before === 'é' && after === 'ü'],
+    ['other invisibles', n => '\u{34F}'.repeat(n), before => before === 'é'],
+    ['invisibles and a keycap tail', n => `${'\u{34F}'.repeat(n)}\u{FE0F}\u{20E3}`, before => before === 'é'],
+  ]
+  const befores = ['a', 'é', ' ', '']
+  const afters = ['b', 'ü', ' ', '']
+  for (const [name, run, stays] of kinds) {
+    for (const n of [4095, 4096, 4097, 8193]) {
+      for (const before of befores) {
+        for (const after of afters) {
+          const want = stays(before, after) ? `${before}${run(n)}${after}` : `${before}${after}`
+          expect(stripFormat(`${before}${run(n)}${after}`), `${name} x ${n}, "${before}" and "${after}"`).toBe(want)
+        }
+      }
+    }
+  }
+})
+
 // The flags of England, Scotland and Wales are the black flag (U+1F3F4), the tag characters that spell `gbeng`, `gbsct`
 // or `gbwls` (U+E0000 and the code of each letter) and the cancel tag (U+E007F). Tag characters are Cf, yet these three
 // sequences stay whole. Spelled as escapes, so that this file shows what it says.
