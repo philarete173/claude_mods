@@ -851,8 +851,9 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
-    // The types give this event no agentId (a subagent's run raises no turn.start), so a start that had one is no main
-    // turn: the guard keeps a future engine's subagent start from emptying the main loop's state.
+    // Since engine 2.1.299 each agent run (foreground or background) raises a turn.start of its own: its agentId, its
+    // prompt as the text, a fresh turnId. It is no main turn, so it leaves the main loop's state and the Log alone. The
+    // 2.1.288 types have no agentId on this event, hence the `in` check.
     const isMain = !('agentId' in e) || e.agentId === undefined
     let queued: string[] = []
     if (isMain) {
@@ -867,8 +868,9 @@ export const register: Register = on => {
       unfolded = []
     }
     const started = await next(e)
+    if (!isMain) return started
     // The first turn of the main agent opens the tree to the reads (hasMainTurn), and asks for one.
-    if (!hasMainTurn && isMain) {
+    if (!hasMainTurn) {
       hasMainTurn = true
       inBackground($, () => requestProject($))
     }

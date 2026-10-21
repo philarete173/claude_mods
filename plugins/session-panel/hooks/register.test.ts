@@ -1323,7 +1323,7 @@ test('a turn that carries an agent id is no turn of the main agent: it does not 
     await clock.advance(1)
     w.runs.length = 0
 
-    // The engine's types give turn.start no agentId (a subagent's run raises none), so the input is cast.
+    // The 2.1.288 types give turn.start no agentId (an agent's run raises one since 2.1.299), so the input is cast.
     await $.turn.start({ text: 'sub', turnId: 't1', agentId: 'a1' } as never)
     await clock.advance(1)
     expect(w.runs).toEqual([])
@@ -3239,6 +3239,48 @@ test('a main turn ends as lastTurn: step timing, tool time, cost and log; everyt
       ['main', 'Bash ls -la', 'ok', '✓ 0.3s'],
       ['you', 'fix the stock order qty', 'info', undefined],
     ])
+  })
+
+// Since engine 2.1.299 every agent run raises a turn.start of its own (agentId, the agent's prompt as the text, a fresh
+// turnId); the 2.1.288 types have no agentId on it, so the input is cast. It is no start of the main turn: the turn
+// keeps its stats, and the prompt of the agent is no line of the log.
+test('a turn.start that carries an agent id leaves the main turn alone: its stats cover the whole turn', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+
+    await $.turn.start({ text: 'fix it', turnId: 't1' })
+    const before = (await readState($)).turn
+    expect(before?.turnId).toBe('t1')
+    w.stepCost = 0.25
+    await runStep($, clock, { turnId: 't1', index: 0 })
+    await drive(clock, $.tool.call({ tool: 'Bash', command: 'ls -la' }))
+    await clock.advance(50)
+
+    await $.turn.start({ text: 'agent prompt', turnId: 't9', agentId: 'a1' } as never)
+    const during = (await readState($)).turn
+    expect(during).toMatchObject({ turnId: 't1', startedAt: before?.startedAt, costAtStart: before?.costAtStart })
+    expect(during?.steps).toHaveLength(1)
+
+    w.stepCost = 0.125
+    await runStep($, clock, { turnId: 't1', index: 1 })
+    await clock.advance(10)
+    await $.turn.complete({ answer: 'done', durationMs: 2000, isAborted: false, turnId: 't1', reason: 'answer' })
+
+    expect((await readState($)).lastTurn).toMatchObject({ steps: 2, toolMs: 300, costUsd: 0.375 })
+  })
+
+test('a turn.start that carries an agent id writes no line of the log, an engine tag or not', WITH_READER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+
+    await $.turn.start({ text: 'agent prompt', turnId: 't8', agentId: 'a1' } as never)
+    await $.turn.start({ text: '<task-notification>done</task-notification>', turnId: 't9', agentId: 'a2' } as never)
+
+    expect((await readState($)).log ?? []).toEqual([])
   })
 
 test('a step cut off mid-stream leaves the turn as it was and has passed on what it saw', SLOW_READER,
@@ -5967,9 +6009,9 @@ test('a turn.start empties the list whatever its text: a text kept before it has
     expect((await youLines($)).map(line => line.text)).toEqual(['A', 'B', 'A'])
   })
 
-// A start that carries an agent id is no main turn (the engine's types give turn.start none, as a subagent's run raises
-// none, so the input is cast): it takes none of the messages that wait, and the main turn that drains them later still
-// finds them and writes no second line.
+// A start that carries an agent id is no main turn (the 2.1.288 types give turn.start none, an agent's run raises one
+// since 2.1.299, so the input is cast): it takes none of the messages that wait, and the main turn that drains them
+// later still finds them and writes no second line.
 test('a turn.start that carries an agent id leaves a waiting message alone: the main turn that drains it has no line',
   WITH_READER, async ($, on) => {
     bottom(on, mock.clock(on))
