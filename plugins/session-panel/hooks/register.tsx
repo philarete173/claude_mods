@@ -12,12 +12,13 @@ import type {
 
 import {
   addAgentCost, agentOutcome, attributeCost, computeTurnStats, endKind, finishTask, fmtDuration, fmtTokens,
-  HANDBACK_TOOL, LOG_TEXT_MAX, logText, parseStatus, parseTaskNotification, promptKind, pushLog, redact, shortType,
-  shorten, SPAWN_TOOLS, stripFormat, sumNumstat, TASK_END, taskFromCall, taskLine, toolLabel,
+  HANDBACK_TOOL, LOG_MAX, LOG_TEXT_MAX, logText, parseStatus, parseTaskNotification, promptKind, pushLog, redact,
+  shortType, shorten, SPAWN_TOOLS, stripFormat, sumNumstat, TASK_END, taskFromCall, taskLine, toolLabel,
 } from './stats'
 import type {
   AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, TaskEndStatus, TaskRow, Usage,
 } from './stats'
+import { cutAtTurn, restoreFromMessages } from './restore'
 import { renderPane } from './view'
 import type { PaneData, SectionId } from './view'
 
@@ -132,6 +133,13 @@ let logEpoch = 0
 // does not count: the write of the reset to the log may still come after the line of the call, and empty it. It is a
 // count, not a flag, and not the parity of logEpoch: resets that overlap are each running until their own end.
 let resetsRunning = 0
+
+// A resume has put another conversation in place of this one, and the first main turn.start restores it: session.end
+// sets it with reason `resume`, and reason `clear` clears it.
+let isRestoreDue = false
+
+// The statuses of $.agent.list() under which an agent still runs.
+const ALIVE_STATUS = new Set<string>(['pending', 'running', 'waiting', 'idle'])
 
 // The model's context window that the last session.measure brought. It is null until a measure sets it: the first one
 // after the module loads only stores it, since session.start has read the breakdown already.
@@ -256,6 +264,30 @@ function inBackground($: EngineInterface, job: () => Promise<void>): void {
   $.clock.after(1, () => {
     job().catch(() => undefined)
   })
+}
+
+// Rebuilds the Subagents, Tasks and Log from the rows of the main conversation (restore.ts), under what is live. The
+// reads were asked for in the frame of the hook, with the epoch and whether a reset ran, so nothing raced them: `asked`
+// is the rows (null when the read failed), `isEmpty` whether the pane was empty, `turnText` the text of the turn whose
+// own rows are cut (an in-process resume). A restore that began during a reset is dropped, and each write checks, in
+// its update callback (which runs again when its write misses), that no reset has run or started since.
+async function restorePane(
+  $: EngineInterface, asked: Promise<unknown>, isEmpty: Promise<boolean>, turnText: string | null, epoch: number,
+  wasResetting: boolean,
+): Promise<void> {
+  const rows = await asked
+  if (wasResetting || !Array.isArray(rows) || rows.length === 0 || !(await isEmpty)) return
+  const alive = await $.agent.list()
+    .then(listed => new Set(listed.filter(info => ALIVE_STATUS.has(info.status)).map(info => info.id)))
+    .catch(() => new Set<string>())
+  const root = await $.session.root().catch(() => null)
+  if (root === null) return
+  const restored = restoreFromMessages(turnText === null ? rows : cutAtTurn(rows, turnText), alive, root)
+  const isCurrent = (): boolean => resetsRunning === 0 && epoch === logEpoch
+  await update($, agentsAtom, held => (isCurrent() ? { ...restored.agents, ...held } : held))
+  await update($, tasksAtom, held => (isCurrent() ? { ...restored.tasks, ...held } : held))
+  await update($, logAtom, held => (isCurrent() ? [...held, ...restored.log].slice(0, LOG_MAX) : held))
+  await update($, logCountAtom, held => (isCurrent() ? held + restored.logCount : held))
 }
 
 // Puts a line on top of the log, and counts it: the log keeps the newest 200 lines, the count every line since the log
@@ -688,6 +720,16 @@ async function readAndCharge($: EngineInterface, agentId: string | undefined): P
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    // The restore: the rows and the three atoms are read in this frame, before any other await, so that no event of
+    // the session lands between them. An empty pane is a new process (a reopen, `claude --resume`, the mod enabled
+    // mid-session); a hot reload keeps the atoms, and restores nothing.
+    const epoch = logEpoch
+    const wasResetting = resetsRunning > 0
+    const asked = $.session.messages().catch(() => null)
+    const isEmpty = Promise.all([read($, agentsAtom), read($, tasksAtom), read($, logAtom)])
+      .then(([agents, tasks, log]) => Object.keys(agents).length + Object.keys(tasks).length + log.length === 0)
+      .catch(() => false)
+    inBackground($, () => restorePane($, asked, isEmpty, null, epoch, wasResetting))
     // The command only touches panes, so it may run while a turn is in flight.
     await $.command.register({
       name: 'session-panel', description: 'Open the session stats pane', immediate: true,
@@ -756,6 +798,8 @@ export const register: Register = on => {
       handbacks.clear()
       // A message that waits (unfolded) must not hide the `you` line of the next conversation.
       unfolded = []
+      // No turn that starts while the reset runs finds a restore due; a resume leaves one when its reset is over.
+      isRestoreDue = false
       logEpoch += 1
       resetsRunning += 1
       try {
@@ -769,6 +813,7 @@ export const register: Register = on => {
       } finally {
         resetsRunning -= 1
       }
+      isRestoreDue = e.reason === 'resume'
     }
 
     return next(e)
@@ -823,6 +868,15 @@ export const register: Register = on => {
     }
     const started = await next(e)
     if (!isMain) return started
+    // The first main turn after a resume restores the other conversation, less its own rows (cutAtTurn); the read is
+    // asked for in this frame, before any other await.
+    if (isRestoreDue) {
+      isRestoreDue = false
+      const epoch = logEpoch
+      const wasResetting = resetsRunning > 0
+      const asked = $.session.messages().catch(() => null)
+      inBackground($, () => restorePane($, asked, Promise.resolve(true), e.text, epoch, wasResetting))
+    }
     // The first turn of the main agent opens the tree to the reads (hasMainTurn), and asks for one.
     if (!hasMainTurn) {
       hasMainTurn = true

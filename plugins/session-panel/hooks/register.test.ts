@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock, Plugin } from 'claude-code/testing'
 import type { On, PluginState, PromptOrigin, RenderPropsOf, RenderSurface, SessionMessage, UiPane } from 'claude-code'
 
+import { restoreFromMessages } from './restore'
 import { HANDBACK_TOOL, LOG_MAX } from './stats'
 import type { AgentRow, LogEntry, TaskRow, TurnAcc, TurnStats } from './stats'
 
@@ -546,6 +547,11 @@ type World = {
   root: string // what session.root() answers
   isReadOnly: boolean // core ran the next calls of tools read-only: their results say so
   listed: { id: string; status: string }[] // what $.agent.list() answers
+  listFails: boolean // $.agent.list() rejects
+  lists: number // how many $.agent.list() calls were made
+  messages: unknown // what $.session.messages() answers: the rows of the main conversation
+  messagesFail: boolean // $.session.messages() rejects
+  messageReads: number // how many $.session.messages() calls were made
   compacted: Record<string, unknown>
   spawns: number
   breakdowns: number // how many usage() calls asked for the context breakdown
@@ -632,6 +638,11 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     root: ROOT,
     isReadOnly: false,
     listed: [],
+    listFails: false,
+    lists: 0,
+    messages: [],
+    messagesFail: false,
+    messageReads: 0,
     compacted: { messages: MESSAGES, tokensBefore: 180_000, tokensAfter: 40_000 },
     spawns: 0,
     breakdowns: 0,
@@ -800,7 +811,18 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
       },
     }
   })
-  on('agent.list', () => ({ value: w.listed as never }))
+  on('agent.list', () => {
+    w.lists += 1
+    if (w.listFails) throw new Error('the agents cannot be listed')
+
+    return { value: w.listed as never }
+  })
+  on('session.messages', () => {
+    w.messageReads += 1
+    if (w.messagesFail) throw new Error('the messages cannot be read')
+
+    return { value: w.messages as never }
+  })
   on('ui.open', (_$, e) => {
     w.opened.push(e)
 
@@ -6776,4 +6798,296 @@ test('a restored subagent that is resumed: the resumed line, then `$x+` in its c
     })
     expect(await restoredOf()).toMatchObject({ status: 'done', startedAt: null, restored: true, costUsd: 0.5 })
     expect(await costCell()).toEqual([[['$0.500+', false]]])
+  })
+
+// The restore (0.6.0): the pane is rebuilt from the session's messages at session.start when its state is empty, and
+// after an in-process resume at the first main turn.start. The rows are the main conversation's, as
+// `$.session.messages()` answers them: a prompt, then a call that spawned `a1` (the id a live spawn takes too), one
+// that spawned `a7`, and a Bash that went to the background as `b7`. The restore is merged under what is live.
+const ROWS: unknown[] = [
+  { role: 'user', text: 'fix the cart', toolUses: [] },
+  {
+    role: 'assistant', text: 'On it.', toolUses: [
+      {
+        tool_use_id: 'u1', tool: 'Agent', input: { description: 'Old agent', subagent_type: 'Explore', prompt: 'p' },
+        agentId: 'a1', result: { status: 'async_launched' }, text: 'Async agent launched successfully.',
+      },
+      {
+        tool_use_id: 'u2', tool: 'Agent', input: { description: 'Map the flow', subagent_type: 'Explore', prompt: 'p' },
+        agentId: 'a7', result: { status: 'async_launched' }, text: 'Async agent launched successfully.',
+      },
+      {
+        tool_use_id: 'u3', tool: 'Bash', input: { command: 'npm run dev', description: 'dev', run_in_background: true },
+        result: { stdout: '', backgroundTaskId: 'b7' }, text: 'Command running in background with ID: b7.',
+      },
+    ],
+  },
+]
+
+test('a session that starts with an empty pane rebuilds it from the messages, under what is live', WITH_WRITE_HOLDER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    w.messages = ROWS
+    w.listed = [{ id: 'a7', status: 'running' }, { id: 'a1', status: 'completed' }]
+    await $.session.start(START)
+    // While the restore waits for its turn: a live spawn takes the id `a1`, and a live prompt has its line.
+    await $.agent.spawn(SPAWN)
+    await $.turn.start({ text: 'live', turnId: 't1' })
+    const held = await readState($)
+    expect(held.log.map(line => line.text)).toEqual(['live', 'spawned · engineer: Fix cart total qty'])
+    const restored = restoreFromMessages(ROWS, new Set(['a7']), ROOT)
+    expect(restored.logCount).toBe(4)
+    await armHold($, { keys: ['tasks'], mode: 'before' })
+
+    await clock.advance(1) // the restore runs, and waits before its write of the tasks
+    const first = await readState($)
+    await armHold($, { keys: ['log'] })
+    await clock.advance(100) // the tasks land, then the log, and the restore waits after its write of the log
+    const between = await readState($)
+    await clock.advance(100)
+    // The agents first, then the tasks, then the log, then its count.
+    expect([first.agents, first.tasks]).toEqual([{ ...restored.agents, ...held.agents }, held.tasks])
+    expect([between.agents, between.tasks, between.log, between.logCount]).toEqual([
+      { ...restored.agents, ...held.agents }, { ...restored.tasks, ...held.tasks }, [...held.log, ...restored.log],
+      held.logCount,
+    ])
+    const state = await readState($)
+    expect(state.agents.a1).toEqual(held.agents.a1) // the live row wins on its id
+    expect(state.agents.a7).toMatchObject({ status: 'running', restored: true }) // the engine has it still
+    expect(state.tasks.b7).toMatchObject({ status: 'ended', startedAt: null })
+    // The live line stays on top; the count takes in every restored line.
+    expect(state.log).toEqual([...held.log, ...restored.log])
+    expect(state.logCount).toBe(held.logCount + restored.logCount)
+  })
+
+test('a session that starts with something in the pane restores nothing', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  w.messages = ROWS
+  await $.turn.start({ text: 'hi', turnId: 't1' }) // a hot reload keeps the atoms: a line is there already
+
+  await $.session.start(START)
+  await clock.advance(10)
+
+  expect(w.lists).toBe(0)
+  const state = await readState($)
+  expect([state.agents, state.tasks, state.log.map(line => line.text), state.logCount]).toEqual([
+    undefined, undefined, ['hi'], 1,
+  ])
+})
+
+for (const [what, rows] of [['no rows', []], ['rows that are no list', { deny: 'no' }]] as const) {
+  test(`a session with ${what} makes no other call and no write`, SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    w.messages = rows
+
+    await $.session.start(START)
+    await clock.advance(10)
+
+    expect([w.messageReads, w.lists]).toEqual([1, 0])
+    expect([await agentsVersion($), await tasksVersion($)]).toEqual([0, 0])
+    const state = await readState($)
+    expect([state.log, state.logCount]).toEqual([undefined, undefined])
+  })
+}
+
+test('a read of the messages that fails restores nothing, and the session starts as usual', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    w.messagesFail = true
+
+    expect(await $.session.start(START)).toEqual({ cwd: ROOT })
+    await clock.advance(10)
+
+    expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session' }])
+    expect([w.messageReads, w.lists]).toEqual([1, 0])
+    expect([await agentsVersion($), await tasksVersion($)]).toEqual([0, 0])
+  })
+
+test('after a resume the first main turn restores the other conversation, less its own rows', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(10)
+    await endSession($, 'resume')
+    const rows = [...ROWS, { role: 'user', text: 'go on', toolUses: [] }]
+    w.messages = rows
+
+    // An agent's turn is no main turn: it does not restore.
+    await $.turn.start({ text: 'go on', turnId: 't9', agentId: 'a2' } as never)
+    await clock.advance(10)
+    expect(w.messageReads).toBe(1)
+    await $.turn.start({ text: 'go on', turnId: 't1' })
+    await clock.advance(10)
+
+    expect(w.messageReads).toBe(2)
+    const restored = restoreFromMessages(ROWS, new Set(), ROOT)
+    const state = await readState($)
+    expect(state.log.map(line => line.text)).toEqual(['go on', ...restored.log.map(line => line.text)])
+    expect(state.logCount).toBe(1 + restored.logCount)
+    expect(state.agents).toEqual(restored.agents)
+    expect(state.tasks).toEqual(restored.tasks)
+    // Only the first main turn after the resume restores.
+    await $.turn.start({ text: 'more', turnId: 't2' })
+    await clock.advance(10)
+    expect(w.messageReads).toBe(2)
+  })
+
+for (const resets of [['clear'], ['resume', 'clear']] as const) {
+  test(`no restore at the next turn after ${resets.join(' then ')}`, SLOW_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(10)
+    for (const reason of resets) await endSession($, reason)
+    w.messages = ROWS
+
+    await $.turn.start({ text: 'go on', turnId: 't1' })
+    await clock.advance(10)
+
+    expect(w.messageReads).toBe(1)
+    const state = await readState($)
+    expect([state.agents, state.tasks, state.log.map(line => line.text)]).toEqual([{}, {}, ['go on']])
+  })
+}
+
+test('a reset during the read drops the restore', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  w.messages = ROWS
+  await $.session.start(START) // the read is asked for, and the restore waits for its turn
+
+  await endSession($)
+  await clock.advance(10)
+
+  const state = await readState($)
+  expect([state.agents, state.tasks, state.log, state.logCount]).toEqual([{}, {}, [], 0])
+})
+
+test('a notice for a restored task that has ended leaves it ended, with no line', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  w.messages = ROWS
+  await $.session.start(START)
+  await clock.advance(10)
+  const before = await readState($)
+  expect(before.tasks.b7).toMatchObject({ status: 'ended' })
+  const version = await tasksVersion($)
+
+  await submitNotice($, notice('b7', 'completed'))
+  await clock.advance(10)
+
+  const after = await readState($)
+  expect(after.tasks.b7).toEqual(before.tasks.b7)
+  expect([after.log, after.logCount]).toEqual([before.log, before.logCount])
+  expect(await tasksVersion($)).toBe(version)
+})
+
+test('a root that cannot be read restores nothing, and writes nothing', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  w.messages = ROWS
+  w.rootFailures = 10 // every read of the root fails, the project's too
+
+  await $.session.start(START)
+  await clock.advance(10)
+
+  expect(w.lists).toBe(1) // the restore got as far as the root
+  expect([await agentsVersion($), await tasksVersion($)]).toEqual([0, 0])
+  const state = await readState($)
+  expect([state.log, state.logCount]).toEqual([undefined, undefined])
+})
+
+test('a list of agents that cannot be read restores all the same, with no agent alive', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    w.messages = ROWS
+    w.listed = [{ id: 'a7', status: 'running' }]
+    w.listFails = true
+
+    await $.session.start(START)
+    await clock.advance(10)
+
+    const restored = restoreFromMessages(ROWS, new Set(), ROOT)
+    const state = await readState($)
+    expect(state.agents).toEqual(restored.agents)
+    expect(state.agents.a7).toMatchObject({ status: 'ended', restored: true })
+    expect([state.log, state.logCount]).toEqual([restored.log, restored.logCount])
+  })
+
+// A restore that begins while a reset runs is dropped, whatever it would find when it writes: the read is slowed by
+// the root (`rootLag`), so that its writes come after the reset has ended and would pass their own check.
+test('a session.start during a reset drops its restore', WITH_WRITE_HOLDER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  w.messages = ROWS
+  w.rootLag = 200
+  await armHold($, { keys: ['agents'], ms: 100 })
+  const reset = endSession($) // it has started, and waits after its write of `agents`
+  await clock.settle()
+
+  const starting = $.session.start(START) // its reads are asked for while the reset runs
+  await clock.settle()
+  await clock.advance(400)
+  await reset
+  await starting
+
+  expect(w.messageReads).toBe(1)
+  const state = await readState($)
+  expect([state.agents, state.tasks, state.log, state.logCount]).toEqual([{}, {}, [], 0])
+})
+
+// Two resets overlap: a /clear is held part-way, and a resume runs and ends inside it. The resume leaves a restore due,
+// and the first main turn, which starts while the /clear still runs, takes it: the restore began during a reset, and is
+// dropped.
+test('the first main turn after a resume, during another reset, drops its restore', WITH_WRITE_HOLDER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(10)
+    w.messages = ROWS
+    w.rootLag = 200
+    await armHold($, { keys: ['agents'], ms: 100 })
+    const clear = endSession($) // it has started, and waits after its write of `agents`
+    await clock.settle()
+    await endSession($, 'resume') // a whole resume, inside the /clear: it leaves a restore due
+
+    const turn = $.turn.start({ text: 'go on', turnId: 't1' }) // it starts while the /clear still runs
+    await clock.settle()
+    await clock.advance(400)
+    await clear
+    await turn
+
+    expect(w.messageReads).toBe(2) // the turn took the mark, and read
+    const state = await readState($)
+    expect([state.agents, state.tasks, state.log, state.logCount]).toEqual([{}, {}, [], 0])
+  })
+
+// A reset takes the mark down at its start, so a turn that starts while it runs finds none, and the read is not asked
+// for. The resume that set the mark is over; the /clear that follows is held part-way.
+test('a main turn during the reset of a /clear does not take the mark of the resume before it', WITH_WRITE_HOLDER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(10)
+    await endSession($, 'resume')
+    w.messages = ROWS
+    await armHold($, { keys: ['agents'], ms: 100 })
+    const clear = endSession($) // it has started, and waits after its write of `agents`
+    await clock.settle()
+
+    const turn = $.turn.start({ text: 'go on', turnId: 't1' }) // it starts while the /clear runs
+    await clock.settle()
+    await clock.advance(400)
+    await clear
+    await turn
+
+    expect(w.messageReads).toBe(1) // the read of session.start alone
   })
