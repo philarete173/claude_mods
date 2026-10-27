@@ -63,8 +63,8 @@ const A: TurnAcc = {
   turnId: 't', startedAt: 0, costAtStart: 5, steps: [S1, S2], toolIntervals: [[5000, 5600], [5200, 5900]],
 }
 
-const agent = (status: AgentStatus, startedAt: number): AgentRow => ({
-  id: `${status}@${startedAt}`, description: 'd', type: 't', model: null, status, startedAt,
+const agent = (status: AgentStatus, startedAt: number | null, id = `${status}@${startedAt}`): AgentRow => ({
+  id, description: 'd', type: 't', model: null, status, startedAt,
   endedAt: null, costUsd: null,
 })
 
@@ -225,6 +225,20 @@ test('orderAgents', () => {
   expect(orderAgents(rows).map(r => r.id)).toEqual(['running@50', 'done@300', 'done@100'])
   expect(rows.map(r => r.id)).toEqual(['done@100', 'running@50', 'done@300']) // the source is not reordered
   expect(orderAgents([agent('running', 10), agent('running', 20)]).map(r => r.id)).toEqual(['running@20', 'running@10'])
+})
+
+test('orderAgents puts a start not known last of its group, in the order given, as orderTasks does', () => {
+  const rows = [
+    agent('done', 100), agent('running', null), agent('ended', null), agent('running', 50), agent('done', 300),
+    agent('failed', null),
+  ]
+  expect(orderAgents(rows).map(r => r.id)).toEqual([
+    'running@50', 'running@null', 'done@300', 'done@100', 'ended@null', 'failed@null',
+  ])
+  expect(rows.map(r => r.id)).toEqual([
+    'done@100', 'running@null', 'ended@null', 'running@50', 'done@300', 'failed@null',
+  ]) // the source is not reordered
+  expect(orderAgents([agent('ended', null, 'a'), agent('ended', null, 'b')]).map(r => r.id)).toEqual(['a', 'b'])
 })
 
 test('pushLog', () => {
@@ -2012,6 +2026,26 @@ test('agentOutcome and taskLine word the end of a subagent and of a task', () =>
   expect(taskLine('stopped', { ...ran, durationMs: null }))
     .toEqual({ text: 'stopped · shell: d', kind: 'info', outcome: undefined })
   expect(TASK_END).toEqual({ completed: 'done', failed: 'failed', killed: 'stopped', stopped: 'stopped' })
+})
+
+// A subagent that was restored has no time, and a charged one says the cost is the cost since the restore.
+test('agentOutcome with no time gives a mark or nothing, and a restored charged row says `done · $x+`', () => {
+  const row: AgentRow = { ...agent('done', null), costUsd: 0.5 }
+  expect(agentOutcome('done', row, null, '')).toEqual({ text: 'done · $0.500', outcome: '\u2713' })
+  expect(agentOutcome('done', agent('done', null), null, 'ok')).toEqual({ text: 'done — ok', outcome: '\u2713' })
+  expect(agentOutcome('failed', row, null, 'x')).toEqual({ text: 'failed', outcome: '\u2717' })
+  expect(agentOutcome('stopped', row, null, 'x')).toEqual({ text: 'stopped', outcome: undefined })
+  // A zero duration is a duration.
+  expect(agentOutcome('done', agent('done', 0), 0, '')).toEqual({ text: 'done', outcome: '\u2713 0.0s' })
+
+  const restored: AgentRow = { ...row, restored: true }
+  expect(agentOutcome('done', restored, 2500, 'ok'))
+    .toEqual({ text: 'done · $0.500+ — ok', outcome: '\u2713 2.5s' })
+  expect(agentOutcome('done', restored, null, '')).toEqual({ text: 'done · $0.500+', outcome: '\u2713' })
+  // Restored and not charged: no cost to show, so no `+`.
+  expect(agentOutcome('done', { ...restored, costUsd: null }, 2500, ''))
+    .toEqual({ text: 'done', outcome: '\u2713 2.5s' })
+  expect(agentOutcome('failed', restored, 2500, 'x')).toEqual({ text: 'failed', outcome: '\u2717 2.5s' })
 })
 
 test('finishTask ends the row: the status, the end time, and a duration from the notification or the clock', () => {

@@ -41,16 +41,22 @@ export type TurnStats = {
   cachePct: number | null
   costUsd: number | null
 }
-export type AgentStatus = 'running' | 'done' | 'failed' | 'stopped'
+// `ended`: the subagent is over, and how it ended is not known (a restored row).
+export type AgentStatus = 'running' | 'done' | 'failed' | 'stopped' | 'ended'
 export type AgentRow = {
   id: string
   description: string
   type: string
   model: string | null
   status: AgentStatus
-  startedAt: number
+  // Null for a start that is not known (a restored row). Rows are drawn newest first, a row of no known start last of
+  // its group.
+  startedAt: number | null
   endedAt: number | null
   costUsd: number | null
+  // Marks a row rebuilt from the session's messages: its cost before the restore is not known, so a cost it has is
+  // the cost since.
+  restored?: true
 }
 export type TaskKind = 'shell' | 'monitor' | 'workflow'
 // `ended`: the task is over, and how it ended is not known.
@@ -71,7 +77,8 @@ export type TaskRow = {
 // What the notification of a task says: its id, how it ended in the engine's words, and how long it ran, if it says.
 export type TaskEnd = { id: string; status: 'completed' | 'failed' | 'killed' | 'stopped'; durationMs: number | null }
 export type LogKind = 'info' | 'ok' | 'error'
-export type LogEntry = { at: number; who: string; text: string; kind: LogKind; outcome?: string }
+// `at` is null for a line whose time is not known (a restored line).
+export type LogEntry = { at: number | null; who: string; text: string; kind: LogKind; outcome?: string }
 export type CostSplit = { total: number | null; session: number | null; subagents: number }
 
 const MAX_RATE = 5000 // tok/s; anything above is an artefact, not a measurement
@@ -179,11 +186,14 @@ export function splitCost(totalUsd: number | undefined, subagentsUsd: number): C
   }
 }
 
-// Running agents first, then the newest start first; the input is left as it was.
-export function orderAgents(rows: AgentRow[]): AgentRow[] {
-  const rank = (r: AgentRow): number => (r.status === 'running' ? 0 : 1)
-  return [...rows].sort((a, b) => rank(a) - rank(b) || b.startedAt - a.startedAt)
+// The order of the Subagents and of the Tasks: the rows that run first, then the newest start first; a row of no known
+// start goes last of its group. The input is left as it was.
+function orderByStart<T extends { status: string; startedAt: number | null }>(rows: T[]): T[] {
+  const rank = (r: T): number => (r.status === 'running' ? 0 : 2) + (r.startedAt === null ? 1 : 0)
+  return [...rows].sort((a, b) => rank(a) - rank(b) || (b.startedAt ?? 0) - (a.startedAt ?? 0))
 }
+
+export const orderAgents = (rows: AgentRow[]): AgentRow[] => orderByStart(rows)
 
 export const LOG_MAX = 200 // the most lines the Log keeps: the newest ones
 
@@ -853,21 +863,29 @@ export const TASK_END: Record<TaskEnd['status'], TaskEndStatus> = {
 }
 
 // The log line of a subagent that has ended: its text, and its outcome, the time it took behind a mark (✓ for an
-// answer, ✗ for a failure; a stop is no fault, so it has no mark). One that still runs has no outcome, so its status
-// is not a parameter.
+// answer, ✗ for a failure; a stop is no fault, so it has no mark). A time that is not known (a restored row) leaves
+// the mark alone, and a stop with no time has no outcome. One that still runs has no outcome, so its status is not a
+// parameter. The cost of a restored row is the cost since the restore, so it has a plus.
 export const agentOutcome = (
-  status: TaskEndStatus, row: AgentRow, durationMs: number, answer: string,
-): { text: string; outcome: string } => {
-  const took = fmtDuration(durationMs)
-  if (status === 'stopped') return { text: status, outcome: took }
-  if (status !== 'done') return { text: status, outcome: `✗ ${took}` }
+  status: TaskEndStatus, row: AgentRow, durationMs: number | null, answer: string,
+): { text: string; outcome: string | undefined } => {
+  const took = durationMs === null ? '' : fmtDuration(durationMs)
+  // The mark and the time, whichever there are; none of either (a stop of no known time) is no outcome.
+  const outcomeOf = (mark: string): string | undefined => {
+    const parts = [mark, took].filter(part => part !== '')
+
+    return parts.length === 0 ? undefined : parts.join(' ')
+  }
+  if (status === 'stopped') return { text: status, outcome: outcomeOf('') }
+  if (status !== 'done') return { text: status, outcome: outcomeOf('✗') }
   // The format and control characters go first and the head is cut (logHead), then the marks, then the secrets: no pass
   // that takes quadratic time reads more than the head. The answer is markdown, which the pane shows as it is: its
   // marks go after its format and control characters, as one beside a mark (a BOM after `**`) hides it from plainText.
   const said = shorten(redact(plainText(logHead(answer))), LOG_TEXT_MAX)
-  const head = row.costUsd === null ? 'done' : `done · ${fmtUsd(row.costUsd)}`
+  const plus = row.restored === true ? '+' : ''
+  const head = row.costUsd === null ? 'done' : `done · ${fmtUsd(row.costUsd)}${plus}`
 
-  return { text: said === '' ? head : `${head} — ${said}`, outcome: `✓ ${took}` }
+  return { text: said === '' ? head : `${head} — ${said}`, outcome: outcomeOf('✓') }
 }
 
 // The log line of a task that has ended, drawn as the end of a subagent is (agentOutcome): the text is the status, the
@@ -900,12 +918,7 @@ export function finishTask(
   return { ...row, status, endedAt: at, durationMs: durationMs ?? ran, ...(isBound ? { durationAtMost: true } : {}) }
 }
 
-// Running tasks first, then the newest start first; a task of no known start goes last of its group. The input is left
-// as it was.
-export function orderTasks(rows: TaskRow[]): TaskRow[] {
-  const rank = (r: TaskRow): number => (r.status === 'running' ? 0 : 2) + (r.startedAt === null ? 1 : 0)
-  return [...rows].sort((a, b) => rank(a) - rank(b) || (b.startedAt ?? 0) - (a.startedAt ?? 0))
-}
+export const orderTasks = (rows: TaskRow[]): TaskRow[] => orderByStart(rows)
 
 // The entries of `git status --porcelain -z`: `XY path`, the two status letters, a space and the path, each ended by a
 // NUL. A rename or a copy (an R or a C in either letter) is followed by a field that is not an entry: the path it came

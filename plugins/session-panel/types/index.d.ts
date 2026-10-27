@@ -40,16 +40,22 @@ export type TurnStats = {
   cachePct: number | null
   costUsd: number | null
 }
-export type AgentStatus = 'running' | 'done' | 'failed' | 'stopped'
+// `ended`: the subagent is over, and how it ended is not known (a restored row).
+export type AgentStatus = 'running' | 'done' | 'failed' | 'stopped' | 'ended'
 export type AgentRow = {
   id: string
   description: string
   type: string
   model: string | null
   status: AgentStatus
-  startedAt: number
+  // Null for a start that is not known (a restored row). Rows are drawn newest first, a row of no known start last of
+  // its group.
+  startedAt: number | null
   endedAt: number | null
   costUsd: number | null
+  // Marks a row rebuilt from the session's messages: its cost before the restore is not known, so a cost it has is
+  // the cost since.
+  restored?: true
 }
 export type TaskKind = 'shell' | 'monitor' | 'workflow'
 // `ended`: the task is over, and how it ended is not known.
@@ -68,7 +74,8 @@ export type TaskRow = {
   durationAtMost?: true
 }
 export type LogKind = 'info' | 'ok' | 'error'
-export type LogEntry = { at: number; who: string; text: string; kind: LogKind; outcome?: string }
+// `at` is null for a line whose time is not known (a restored line).
+export type LogEntry = { at: number | null; who: string; text: string; kind: LogKind; outcome?: string }
 
 export type PanelRateLimit = { kind: string; percentUsed: number; resetsAt?: number }
 export type PanelUsage = {

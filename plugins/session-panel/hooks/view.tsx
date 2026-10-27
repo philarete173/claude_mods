@@ -11,7 +11,7 @@ import {
   fmtClock, fmtCountdown, fmtDuration, fmtPct, fmtRate, fmtTokens, fmtTtft, fmtUsd, orderAgents, orderTasks, shortType,
   splitCost, TYPE_MAX,
 } from './stats'
-import type { LogEntry, TaskRow, TaskStatus } from './stats'
+import type { AgentRow, LogEntry, TaskRow, TaskStatus } from './stats'
 
 export type SectionId = 'usage' | 'turn' | 'agents' | 'tasks' | 'mcp' | 'sources' | 'log'
 
@@ -62,7 +62,7 @@ const ICON_CELLS = 2 // the slot an icon sits in: the text after it starts 3 cel
 const PCT_CELLS = 6 // `100.0%`
 const LIMIT_LABEL_CELLS = 7 // `5-hour`, `Weekly`, `Spend`
 const LIMIT_PCT_CELLS = 5 // `100%`
-const COST_CELLS = 7 // `$148.59`, `<$0.001`
+const COST_CELLS = 7 // `$148.59`, `<$0.001`; a restored row's `$148.59+` takes a cell more (agentsSection)
 // A time from 100 hours on takes 8 cells (`100h 00m`), the widest this cell holds. A time of 1000 hours or more
 // (`1000h 00m`) would overflow it, and taskTime draws it as not known; a cost of $1000 or more overflows COST_CELLS.
 // The `≤` of a bound takes a cell of its own, so `≤99h 59m` is the widest bound the cell holds, and `≤100h 00m` is
@@ -88,7 +88,7 @@ const TEXT_METER_CELLS = 10
 const SVG_MAX_PX = 4096
 const RULE_PX = SVG_MAX_PX // the divider image; the Box around it cuts it to the pane
 // The rows that the Subagents and the Tasks show each; the rest of a list is counted in a line after its rows.
-const MAX_AGENT_ROWS = 8
+const MAX_STATUS_ROWS = 8
 // The Log keeps at least this many lines, and when they do not fit the pane scrolls (the user's decision, 2026-10-08),
 // as the Subagents list shows up to 8.
 const MIN_LOG_ROWS = 8
@@ -110,10 +110,10 @@ const MIN_LOG_TEXT_CELLS = 8 // the least text a log line keeps: below it `who` 
 // In a narrow pane the identity column gives way first, as in the log: a subagent row or a task row leaves out its `@…`
 // tag (the `@type` of a subagent, the `@kind` of a task), on every row of its list, when the description would keep
 // fewer cells than this beside it.
-const MIN_AGENT_DESC_CELLS = 12
+const MIN_STATUS_DESC_CELLS = 12
 const LOG_GAP_CELLS = 1 // the gap between the cells of a log row
-const AGENT_GAP_CELLS = 1 // the gap between the cells of a subagent or task row, and between those of its group
-const AGENT_ROW_GAPS = 3 // the gaps of such a row that has its tag: two between its cells, one in its group
+const STATUS_GAP_CELLS = 1 // the gap between the cells of a subagent or task row, and between those of its group
+const STATUS_ROW_GAPS = 3 // the gaps of such a row that has its tag: two between its cells, one in its group
 const TEXT_MARK_CELLS = 1 // the mark of such a row where there is no icon slot
 
 // The meter, the ring and the icons are images, so their colours are raw and the same in both themes.
@@ -137,9 +137,9 @@ const LINES_SEP = '\u00a0/\u00a0'
 
 const LIMIT_LABELS: Record<string, string> = { five_hour: '5-hour', seven_day: 'Weekly', spend_limit: 'Spend' }
 // The marks of a status on a surface with no images. The Subagents and the Tasks share one set, keyed by the statuses
-// of a task: a subagent has the first four, and `ended` is a task that is over with no known end. A stopped row has a
-// dim square and an ended one a dim ring: neither is a failure, so neither is a cross.
-const AGENT_MARKS: Record<TaskStatus, { glyph: string; color?: string; isDim?: boolean }> = {
+// of a task. `ended` is a task or a subagent that is over with no known end (a restored row). A stopped row has a dim
+// square and an ended one a dim ring: neither is a failure, so neither is a cross.
+const STATUS_MARKS: Record<TaskStatus, { glyph: string; color?: string; isDim?: boolean }> = {
   running: { glyph: '◐', color: BLUE },
   done: { glyph: '✓', color: OK },
   failed: { glyph: '✗', color: BAD },
@@ -284,7 +284,7 @@ function moreLine(d: Draw, count: number, props: Partial<BoxProps> = {}): Render
   const { Box, Text } = d.ui
 
   return (
-    <Box flexDirection="row" paddingLeft={markCellsOf(d) + AGENT_GAP_CELLS} {...props}>
+    <Box flexDirection="row" paddingLeft={markCellsOf(d) + STATUS_GAP_CELLS} {...props}>
       <Text dimColor>{`+${count} more`}</Text>
     </Box>
   )
@@ -476,6 +476,9 @@ function contextRows(d: Draw): RenderElement[] {
   ]
 }
 
+// Whether a subagent row was rebuilt from the session's messages: its cost before the restore is not known.
+const hasRestored = (agents: AgentRow[]): boolean => agents.some(agent => agent.restored === true)
+
 // Session and Total, the context, and the split of the cost when subagents ran. The card never folds and has no rule
 // above it. The total is primary weight: bold is for titles. Its rows, one line each: Session with its total, the
 // context (two with a reading, the label and the meter), and the split.
@@ -497,7 +500,11 @@ function topBlock(d: Draw): Block {
     </Box>,
     ...contextRows(d),
   ]
-  if (split.session !== null && split.subagents > 0) {
+  // A restored row's cost before the restore is not known, so the subagents' cost is a lower bound and Session, which
+  // is Total less that cost, is not shown. With no Total there is no split line, as for live rows.
+  if (split.total !== null && hasRestored(Object.values(agents))) {
+    rows.push(<Text dimColor wrap="truncate">{`Subagents ${fmtUsd(split.subagents)}+`}</Text>)
+  } else if (split.session !== null && split.subagents > 0) {
     rows.push(
       <Text dimColor wrap="truncate">
         {`Session ${fmtUsd(split.session)} · Subagents ${fmtUsd(split.subagents)}`}
@@ -649,14 +656,14 @@ type StatusRow = { status: TaskStatus; description: string; tag: string; value: 
 // One row of such a list, in columns: the mark (a cell of its own), a group that takes the rest of the row, and the
 // value (right-aligned in a column of `valueCells`, a dim dash where it is not known). The group holds the
 // description, which grows and is cut to the room there is, and the tag, a column of `tagCells` on every row, so the
-// tags start at one x whatever the descriptions are. A pane too narrow to leave the description MIN_AGENT_DESC_CELLS
+// tags start at one x whatever the descriptions are. A pane too narrow to leave the description MIN_STATUS_DESC_CELLS
 // has no tag column (`tagCells` is 0): the description takes the whole group, on every row alike.
 function statusRow(d: Draw, item: StatusRow, tagCells: number, valueCells: number): RenderElement {
   const { Box, Text, Svg } = d.ui
-  const mark = AGENT_MARKS[item.status]
+  const mark = STATUS_MARKS[item.status]
 
   return (
-    <Box flexDirection="row" alignItems="center" columnGap={AGENT_GAP_CELLS}>
+    <Box flexDirection="row" alignItems="center" columnGap={STATUS_GAP_CELLS}>
       {Svg === undefined ? (
         <Box flexDirection="row" width={TEXT_MARK_CELLS} flexShrink={0}>
           <Text color={mark.color} dimColor={mark.isDim}>
@@ -672,7 +679,7 @@ function statusRow(d: Draw, item: StatusRow, tagCells: number, valueCells: numbe
         flexShrink={1}
         minWidth={0}
         overflow="hidden"
-        columnGap={AGENT_GAP_CELLS}
+        columnGap={STATUS_GAP_CELLS}
       >
         {growText(d, item.description)}
         {tagCells > 0 && (
@@ -694,43 +701,46 @@ function statusRow(d: Draw, item: StatusRow, tagCells: number, valueCells: numbe
 type StatusColumns = { desktopTagCells: number; terminalTagCells: number; valueCells: number }
 
 // A section of rows with a status mark, the Subagents' and the Tasks' alike; `items` come in the order they are drawn.
-// The summary counts the rows that run (`2/5`), and all of them when none does. Up to MAX_AGENT_ROWS are drawn, and the
-// ones that do not fit are counted, in line with the descriptions. A row each, and the line that counts the rest is one
-// more.
+// The summary counts the rows that run (`2/5`), and all of them when none does. Up to MAX_STATUS_ROWS are drawn, and
+// the ones that do not fit are counted, in line with the descriptions. A row each, and the line that counts the rest is
+// one more.
 function statusSection(d: Draw, id: SectionId, title: string, items: StatusRow[], columns: StatusColumns): Block {
   const { Svg } = d.ui
   if (items.length === 0) return NO_BLOCK
   const running = items.filter(item => item.status === 'running').length
   const summary = running > 0 ? `${running}/${items.length}` : String(items.length)
-  const shown = items.slice(0, MAX_AGENT_ROWS)
+  const shown = items.slice(0, MAX_STATUS_ROWS)
   // One width for the tag column of every row, as for the `who` of the log: the terminal takes the longest tag that is
   // drawn, the desktop a width of its own.
   const longest = Math.max(...shown.map(item => item.tag.length))
   const tagCells = Svg === undefined ? Math.min(columns.terminalTagCells, longest) : columns.desktopTagCells
   // What the description keeps beside the tag: the body less the mark, the tag, the value and the gaps of a row. With
-  // less than MIN_AGENT_DESC_CELLS the tag is left out of every row.
-  const descCells = d.cols - markCellsOf(d) - tagCells - columns.valueCells - AGENT_ROW_GAPS * AGENT_GAP_CELLS
-  const hasTag = descCells >= MIN_AGENT_DESC_CELLS
+  // less than MIN_STATUS_DESC_CELLS the tag is left out of every row.
+  const descCells = d.cols - markCellsOf(d) - tagCells - columns.valueCells - STATUS_ROW_GAPS * STATUS_GAP_CELLS
+  const hasTag = descCells >= MIN_STATUS_DESC_CELLS
   const rows = shown.map(item => statusRow(d, item, hasTag ? tagCells : 0, columns.valueCells))
-  const more = items.length - MAX_AGENT_ROWS
+  const more = items.length - MAX_STATUS_ROWS
   // The line starts where the descriptions do: after the mark and its gap.
   if (more > 0) rows.push(moreLine(d, more))
 
   return section(d, id, title, summary, rows)
 }
 
-// The subagents, running ones first and then the newest; the value of a row is its cost.
+// The subagents, running ones first and then the newest; the value of a row is its cost. The cost of a restored row is
+// the cost since the restore, with a plus after it, so while a row is restored the cell has a cell more.
 function agentsSection(d: Draw): Block {
-  const items = orderAgents(Object.values(d.data.agents)).map((agent): StatusRow => ({
+  const agents = Object.values(d.data.agents)
+  const items = orderAgents(agents).map((agent): StatusRow => ({
     status: agent.status,
     description: agent.description,
     tag: `@${shortType(agent.type)}`,
-    value: agent.costUsd === null ? null : fmtUsd(agent.costUsd),
+    value: agent.costUsd === null ? null : `${fmtUsd(agent.costUsd)}${agent.restored === true ? '+' : ''}`,
   }))
+  const costCells = COST_CELLS + (hasRestored(agents) ? 1 : 0)
 
   return statusSection(
     d, 'agents', 'Subagents', items,
-    { desktopTagCells: TYPE_CELLS, terminalTagCells: TYPE_CELLS_MAX, valueCells: COST_CELLS },
+    { desktopTagCells: TYPE_CELLS, terminalTagCells: TYPE_CELLS_MAX, valueCells: costCells },
   )
 }
 
@@ -943,7 +953,7 @@ function logParts(d: Draw, above: number): RenderElement[] {
   const lineRows = lines.map(line => (
     <Box flexDirection="row" columnGap={LOG_GAP_CELLS}>
       <Box flexDirection="row" width={TIME_CELLS} flexShrink={0}>
-        <Text dimColor>{fmtClock(line.at)}</Text>
+        <Text dimColor>{line.at === null ? '—' : fmtClock(line.at)}</Text>
       </Box>
       {hasWho && (
         <Box flexDirection="row" width={whoCells} flexShrink={0} overflow="hidden">

@@ -300,7 +300,7 @@ const markCells = async (ui: Pane): Promise<Array<[mark: string, cells: unknown]
 // The log rows as drawn: who, how many cells wide the columns of the time and of `who` are, how many cells the row
 // has, and its outcome cell, the fourth, when there is one.
 const isTimeCell = (cell: Node | undefined): boolean =>
-  cell?.type === 'Box' && childrenOf(cell)[0]?.type === 'Text' && /^\d\d:\d\d:\d\d$/.test(textsOf(cell)[0] ?? '')
+  cell?.type === 'Box' && childrenOf(cell)[0]?.type === 'Text' && /^(\d\d:\d\d:\d\d|—)$/.test(textsOf(cell)[0] ?? '')
 type LogColumns = {
   who: string; timeCells: unknown; whoCells: unknown; cells: number; outcomeCell: Node | undefined
 }
@@ -3546,5 +3546,108 @@ test('`→ background` stays whole: no `who` at 44 (desktop) and 34 (terminal) c
         expect(logRows(tree).map(rowText)[0], where).toBe(`${outcome} Bash npm test`)
       }
     }
+  }
+})
+
+// ---- Rows that a restore builds: a time or a start not known, an `ended` subagent, a cost since the restore ----
+
+// A line whose time is not known has a dim dash in the time column, which keeps its width.
+test('a log line with no known time draws a dim dash in its time column, as wide as a clock time', () => {
+  const log = logLines(3, i => ({ who: 'main', ...(i === 1 ? { at: null } : {}) }))
+  for (const surface of SURFACES) {
+    for (const bodyColumns of [8, 20, 45, 120]) {
+      const where = `${surface} ${bodyColumns} columns`
+      const tree = draw(onSurface(withLog(log), surface), bodyColumns)
+      const rows = logRows(tree)
+      expect(rows.map(rowText), where).toEqual(['line 1', 'line 2', 'line 3'])
+      expect(rowProblems(tree), where).toEqual([])
+      const cells = rows.map(row => childrenOf(row)[0])
+      expect(cells.map(cell => cell?.props?.width), where).toEqual([8, 8, 8])
+      expect(cells.map(cell => textsOf(cell)[0]?.replace(/\d/g, '0')), where).toEqual(['00:00:00', '—', '00:00:00'])
+      expect(childrenOf(cells[1]).map(styleOf), where).toEqual([[undefined, true, undefined]])
+    }
+  }
+})
+
+// The mark and the icon of an `ended` task are the ones of an `ended` subagent: passing already, as the marks are keyed
+// by the status of a task and a subagent's status goes in as it is.
+test('an `ended` subagent has the dim ring of an `ended` task, and a dim dash for a cost that is not known', () => {
+  const rows = [agent(1, 'ended', { startedAt: null, costUsd: null })]
+  for (const surface of SURFACES) {
+    const tree = draw(withAgents(rows, surface))
+    const ended = draw(withTasks([task(1, 'ended')], surface))
+    expect(marksOf(tree), surface).toEqual(marksOf(ended))
+    expect(marksOf(tree).map(([mark]) => mark), surface).toEqual(surface === 'desktop' ? ['ended'] : ['○'])
+    if (surface === 'terminal') {
+      expect(flat(tree).filter(({ node }) => textsOf(node)[0] === '○' && node.type === 'Text')
+        .map(({ node }) => node.props?.dimColor), surface).toEqual([true])
+    }
+    const [drawn] = agentRows(tree)
+    expect(textsOf(childrenOf(drawn)[2]), surface).toEqual(['—'])
+    expect(childrenOf(childrenOf(drawn)[2]).map(styleOf), surface).toEqual([[undefined, true, undefined]])
+  }
+})
+
+const restoredAgentRows = (tree: unknown): Node[] => listRows(tree, 8)
+
+// A subagent that was restored has a cost from the restore on only: the cell shows `$x+`, one cell wider than a cost.
+// A column of 8 cells holds the widest, `$148.59+` and `<$0.001+`, on every row of the list.
+test('the cost of a restored subagent is `$x+` in a cell of 8 cells; a cost that is not known stays a dim dash', () => {
+  const costs: Array<[costUsd: number | null, shown: string]> = [
+    [0.5, '$0.500+'], [12.345, '$12.35+'], [148.59, '$148.59+'], [0.0004, '<$0.001+'], [0, '$0+'], [null, '—'],
+  ]
+  for (const surface of SURFACES) {
+    for (const [costUsd, shown] of costs) {
+      const where = `${surface} ${shown}`
+      const rows = [agent(1, 'ended', { startedAt: null, costUsd, restored: true }), agent(2, 'done')]
+      for (const bodyColumns of [8, 45, 120]) {
+        const tree = draw(withAgents(rows, surface), bodyColumns)
+        expect(rowProblems(tree), where).toEqual([])
+        // Both rows of the list have the cell of 8 cells: the cost of the live one is drawn whole in it.
+        const drawn = restoredAgentRows(tree)
+        expect(drawn, where).toHaveLength(2)
+        const [live, restored] = drawn.map(row => childrenOf(row)[2])
+        expect(textsOf(restored), where).toEqual([shown])
+        expect(textsOf(live), where).toEqual(['$2.50'])
+        expect(shown.length, where).toBeLessThanOrEqual(8)
+      }
+    }
+    // A pane with no restored row keeps the cell of 7 cells: nothing of the live layout moves.
+    expect(agentRows(draw(withAgents([agent(1, 'done')], surface))), surface).toHaveLength(1)
+  }
+})
+
+// The split of the cost: while a row is restored, the Subagents have the cost since the restore, and Session is not
+// shown, for it would be Total less a cost that is not the whole.
+test('while a subagent is restored the split is `Subagents $Y+` with no Session; a live one keeps its split', () => {
+  // `total` is the Total cost, null for none.
+  const dataOf = (rows: AgentRow[], surface: Surface, total: number | null = 148.59): PaneData => ({
+    ...onSurface(FULL, surface), usage: { ...FULL.usage, costUsd: total ?? undefined }, agents: agentsOf(rows),
+  })
+  const read = (data: PaneData): string[] => textsOf(childrenOf(draw(data))[0]).filter(text => !/^[▰▱]+$/.test(text))
+  const split = (data: PaneData): string[] => read(data).filter(text => /^(Session |Subagents )/.test(text))
+  for (const surface of SURFACES) {
+    const restored = (costUsd: number | null, n = 1): AgentRow => (
+      agent(n, 'ended', { startedAt: null, costUsd, restored: true })
+    )
+    // Y is 0: nothing known, and the line is there all the same.
+    expect(split(dataOf([restored(null)], surface)), surface).toEqual(['Subagents $0+'])
+    expect(split(dataOf([restored(0)], surface)), surface).toEqual(['Subagents $0+'])
+    // Y is the sum of the known costs, those of the restored rows and of the live ones.
+    expect(split(dataOf([restored(1.5), agent(2, 'done', { costUsd: 2 }), restored(null, 3)], surface)), surface)
+      .toEqual(['Subagents $3.50+'])
+    // The Total, at the right edge of the first row, is as it was.
+    expect(read(dataOf([restored(1.5)], surface))).toContain('$148.59')
+    // No total: no split line, as for live rows.
+    expect(split(dataOf([restored(1.5)], surface, null)), surface).toEqual([])
+    // A total and Y = 0: the line is there.
+    expect(split(dataOf([restored(null)], surface, 3)), surface).toEqual(['Subagents $0+'])
+    // A live row with no cost, and no restored one: as before, no `+` and no line.
+    expect(split(dataOf([agent(1, 'running', { costUsd: null })], surface)), surface).toEqual([])
+    expect(split(dataOf([agent(1, 'running', { costUsd: 0.25 })], surface)), surface)
+      .toEqual(['Session $148.34 · Subagents $0.250'])
+    // The line is dim and cut, the last row of the card.
+    const [top] = childrenOf(draw(dataOf([restored(1.5)], surface)))
+    expect(childrenOf(top).at(-1)?.props, surface).toMatchObject({ dimColor: true, wrap: 'truncate' })
   }
 })

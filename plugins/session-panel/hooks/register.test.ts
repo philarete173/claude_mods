@@ -293,6 +293,32 @@ const UNSTARTED: Plugin = {
     })
   },
 }
+// A plugin above the mod's that puts what a restore would: a row of subagents the mod writes for the first time is
+// `ended` with no known start and marked `restored`, and a row of tasks that runs is `ended` with no known start. A row
+// that is marked already goes on as it is, so the mod's later writes of it (a resume, a charge, an end) are its own.
+// Like any plugin of a test it closes over nothing of this file.
+const RESTORER: Plugin = {
+  name: 'restorer',
+  tier: 'prepend',
+  register(on) {
+    on('state.set', (_$, e, next) => {
+      if (e.plugin !== 'session-panel') return next(e)
+      if (e.key === 'agents') {
+        const rows = Object.fromEntries(Object.entries(e.value).map(([id, row]) => [
+          id, 'restored' in row ? row : { ...row, status: 'ended' as const, startedAt: null, restored: true as const },
+        ]))
+
+        return next({ ...e, value: rows })
+      }
+      if (e.key !== 'tasks') return next(e)
+      const rows = Object.fromEntries(Object.entries(e.value).map(([id, row]) => [
+        id, row.status === 'running' ? { ...row, status: 'ended' as const, startedAt: null } : row,
+      ]))
+
+      return next({ ...e, value: rows })
+    })
+  },
+}
 // A plugin beneath the mod's (the `append` tier lies inside the tier of the plugins that a person installs, and the
 // bottom of the test inside that) that notes the status of every row of tasks as a prompt reaches it, and says what it
 // saw when it is asked. Like any plugin of a test it closes over nothing of this file.
@@ -422,6 +448,7 @@ const WITH_STORE = { plugins: [READER, OTHER_SESSION], timeoutMs: 30_000 }
 const WITH_WRITE_HOLDER = { plugins: [READER, WRITE_HOLDER], timeoutMs: 30_000 }
 const WITH_CLOCK_SKEW = { plugins: [READER, CLOCK_SKEW], timeoutMs: 30_000 }
 const WITH_UNSTARTED = { plugins: [READER, UNSTARTED], timeoutMs: 30_000 }
+const WITH_RESTORER = { plugins: [READER, RESTORER], timeoutMs: 30_000 }
 const WITH_PROMPT_PROBE = { plugins: [READER, PROMPT_PROBE], timeoutMs: 30_000 }
 const WITH_PROMPT_HOLDER = { plugins: [READER, PROMPT_HOLDER], timeoutMs: 30_000 }
 const WITH_PROMPT_ANSWERER = { plugins: [READER, PROMPT_ANSWERER], timeoutMs: 30_000 }
@@ -6646,4 +6673,108 @@ test('a reset whose second log write fails has no count above the lines, and nor
     const ui = await mountPane($)
     expect(await ui.find({ type: 'Text', text: /^\+\d+ more$/ })).toBeUndefined()
     await ui.unmount()
+  })
+
+// The cells at the right edge of the rows of the Subagents and the Tasks of a drawn pane, in the order they are drawn,
+// each as its texts with whether the text is dim. A restored subagent's cost cell is 8 cells wide, as a task's time
+// cell is; the pane of a test has no other row of either, so a row is found by its three cells and the last one's
+// width.
+type Drawn = { type: string; props?: Record<string, unknown>; children?: unknown[] }
+const valueCellsOf = (tree: unknown, width: number): Array<Array<[text: string, isDim: boolean]>> => {
+  const node = tree as Drawn
+  const cells = (node.children ?? []).filter(child => typeof child === 'object' && child !== null) as Drawn[]
+  const value = cells[2]
+  const isRow = node.type === 'Box' && cells.length === 3 && value?.props?.width === width &&
+    value.props.justifyContent === 'flex-end'
+  const own = isRow ? [(value?.children as Drawn[]).map((el): [string, boolean] => [
+    String(el.children?.[0]), el.props?.dimColor === true,
+  ])] : []
+
+  return [...own, ...cells.flatMap(child => valueCellsOf(child, width))]
+}
+
+// The parked mounted test: a subagent and a task that are `ended` (the restore's rows, put in through the
+// `state.set` of a plugin above the mod's) are drawn on the desktop and on the terminal: the dim ring of an `ended`
+// row, in the icon's slot or as a glyph, a dim dash in the cell of the cost and in the cell of the time, and the
+// split line of a restored row.
+test('a mounted pane draws an `ended` subagent and an `ended` task with the dim ring and a dim dash', WITH_RESTORER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.agent.spawn(SPAWN)
+    await startTask($, clock, w, 'b1')
+    const state = await readState($)
+    expect(state.agents.a1).toMatchObject({ status: 'ended', startedAt: null, restored: true, costUsd: null })
+    expect(state.tasks.b1).toMatchObject({ status: 'ended', startedAt: null })
+
+    for (const surface of ['desktop', 'terminal'] as const) {
+      const ui = await mountPane($, surface)
+      if (surface === 'desktop') {
+        const marks = await ui.findAll({ type: 'Svg' })
+        expect(marks.filter(el => el.props.alt === 'ended'), surface).toHaveLength(2)
+      } else {
+        const rings = (await ui.findAll({ type: 'Text' })).filter(el => el.text === '○')
+        expect(rings.map(el => el.props.dimColor), surface).toEqual([true, true])
+      }
+      // The cost of the subagent and the time of the task: each cell is a dim dash, and the Context row's is not one.
+      expect(valueCellsOf(await ui.drawn(), 8), surface).toEqual([[['—', true]], [['—', true]]])
+      expect(await ui.find({ type: 'Text', text: 'Subagents $0+' }), surface).toBeDefined()
+      await ui.unmount()
+    }
+  })
+
+// Spec §5.5: a restored subagent that is resumed. It is `ended` and `restored` in the atom; its next request makes it
+// run again with the `resumed` line, a charge then shows `$x+` in its cost cell (the cost since the restore: what it
+// cost before is not known), and its end says `done · $x+`. The mark `restored` stays on the row through each step.
+test('a restored subagent that is resumed: the resumed line, then `$x+` in its cost cell and in its end line',
+  WITH_RESTORER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await $.agent.spawn(SPAWN)
+    const restoredOf = async () => (await readState($)).agents.a1
+    // The cost cell of the subagent's row, the only row of the pane that has one: its texts as drawn.
+    const costCell = async (): Promise<Array<Array<[string, boolean]>>> => {
+      const ui = await mountPane($)
+      const cells = valueCellsOf(await ui.drawn(), 8)
+      await ui.unmount()
+
+      return cells
+    }
+    const hasLine = async (text: string): Promise<boolean> => {
+      const ui = await mountPane($)
+      const found = await ui.find({ type: 'Text', text })
+      await ui.unmount()
+
+      return found !== undefined
+    }
+    expect(await restoredOf()).toMatchObject({ status: 'ended', startedAt: null, restored: true, costUsd: null })
+
+    // The request carries its id: it runs again, with the one line that says so. Nothing is charged yet.
+    await chargedAfter($, clock, w, 'a1', 0)
+    expect((await readState($)).log[0]).toMatchObject({
+      who: 'main', text: 'resumed · engineer: Fix cart total qty', kind: 'info',
+    })
+    expect(await restoredOf()).toMatchObject({ status: 'running', startedAt: null, restored: true, costUsd: null })
+    expect(await costCell()).toEqual([[['—', true]]])
+
+    // A charge: its cost is the cost since the restore, with a plus. The split has no Session in it.
+    expect(await chargedAfter($, clock, w, 'a1', 0.5)).toBe(0.5)
+    expect(await restoredOf()).toMatchObject({ status: 'running', startedAt: null, restored: true, costUsd: 0.5 })
+    expect(await costCell()).toEqual([[['$0.500+', false]]])
+    expect(await hasLine('Subagents $0.500+')).toBe(true)
+
+    // It ends: the line says the cost has a plus, and the row is marked still.
+    await $.turn.complete({
+      answer: 'found it', durationMs: 4000, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer',
+    })
+    expect((await readState($)).log[0]).toMatchObject({
+      who: 'engineer', text: 'done · $0.500+ — found it', kind: 'ok', outcome: '\u2713 4.0s',
+    })
+    expect(await restoredOf()).toMatchObject({ status: 'done', startedAt: null, restored: true, costUsd: 0.5 })
+    expect(await costCell()).toEqual([[['$0.500+', false]]])
   })
