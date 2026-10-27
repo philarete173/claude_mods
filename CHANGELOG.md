@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.6.0 — 2026-10-27
+
+- The pane restores itself. At `session.start`, when Subagents, Tasks and the Log are all empty (a new process: the
+  desktop app reopened, `claude --resume`, the mod enabled mid-session; a hot reload keeps the state and restores
+  nothing), and after an in-process `/resume` at the first turn of the main agent, without that turn's own rows, the
+  pane is rebuilt from the session's messages, the newest 4096 rows from the latest compaction summary on. Subagents:
+  every Agent call with an agent id, `done` or `failed` by its result, `done`, `failed` or `stopped` by a task notice or
+  a `TaskStop`, else `running` while the engine still lists it, or `ended`. Tasks: the background calls, closed by
+  notices or `TaskStop`, else `ended`. The Log: prompts, other agents' messages, task notices, subagent and task lines,
+  and the main agent's tool calls, the newest 200; the header counts all. Not after `/clear`; live rows win over
+  restored ones.
+- Restored rows look different: a Log line has a dim `—` where the clock time is. A tool call keeps its `✓` or `✗` with
+  no time, `→ background` for a call that started a task, and no outcome for a call that was still running when the
+  transcript was read. An end line has a time only where the call or a notice gave one (a foreground subagent's
+  duration, a notice's `<duration_ms>`); without one, a subagent's end line keeps a bare `✓` or `✗`, a task's has no
+  outcome, and a stop has none. A restored subagent or task has no known start, so it is listed after the live rows of
+  its group, newest first. An unfinished subagent whose run is over is `ended`, drawn as an ended task (`○`, dim). A
+  subagent's cost is `—`, or `$x+` once it is charged after the restore, and while one is listed and the Total is known
+  the split reads `Subagents $Y+` (a lower bound) and Session is not shown. Not restored: subagents' own tool calls,
+  tool times, denials, Turn stats, costs before the restore.
+- One rule decides the Log line of a turn, live or restored. Leading `<system-reminder>` blocks are skipped: the
+  desktop's first prompt after a reopen is logged `you` (it was `engine system-reminder`), and a turn that is only a
+  reminder has no line. Another agent's message is logged `engine › peer`, not as a `you` line with its text. The rule
+  fails closed: when a reminder block may have quoted its own closing tag, or a prompt starts with an engine opening of
+  its own (`[Image: source: `, `Base directory for this skill: `, `[Request interrupted by user`), the turn has no line.
+- To restore, the mod reads the session's transcript through the engine, tool results included. It draws only prompts,
+  call labels, subagent descriptions and answers and task descriptions, masked best-effort as live lines are, and never
+  tool output, file contents, the prompts given to subagents, error texts or the compaction summary. Nothing is written
+  to disk or sent; it stays in session plugin state, which other plugins can read, as live lines do.
+- Docs: the README and the specs record the restore and its limits, the engine 2.1.308 (the rows of
+  `$.session.messages()`, an `agentId` on an Agent call), and the five view constants that were renamed
+  (`MAX_AGENT_ROWS` to `MAX_STATUS_ROWS`, and the others) because tasks use them too.
+
 ## 0.5.2 — 2026-10-21
 
 - An agent's run no longer disturbs the main turn. Since engine 2.1.299 every agent run, foreground or background (a

@@ -7,10 +7,12 @@
 > (§6.3); in a narrow log a prompt reads `you › …` and an engine message `engine › …` (§6.10); the Log fills the pane's
 > free height, 8 lines at least (§6.12); the rule above a section is one line high, with no margins (§5.1); the Log's
 > header counts every event, and a dim `+N more` line counts the ones it does not draw (§6.12); the Tasks section lists
-> the background tasks after the Subagents, in rows built as theirs are (§6.7). The HTML preview
-> `docs/design/session-panel-preview.html` stays the approved v2 mock-up and predates these changes.
+> the background tasks after the Subagents, in rows built as theirs are (§6.7); a restored Log line has a dim `—` where
+> its time goes (§6.10), and while a restored subagent is listed its cost cell is 8 cells, `$x+`, and, with a Total, the
+> split reads `Subagents $Y+` (§6.1, §6.7). The HTML preview `docs/design/session-panel-preview.html` stays the approved
+> v2 mock-up and predates these changes.
 
-Date: 2026-10-07. Status: implemented and shipped (0.5.2). The user approved the look in
+Date: 2026-10-07. Status: implemented and shipped (0.6.0). The user approved the look in
 `docs/design/session-panel-preview.html` before implementation.
 
 Scope: presentation only. The sections, their content, the formats and every formula of `2026-10-07-session-panel-design.md` §3–§4 stay as they are. Where the two specs differ on looks, this one replaces §3.1 of the main spec. Engine 2.1.288. "d.ts" below means `plugin-authoring/types/claude-code.d.ts` of that engine, cited by line.
@@ -29,7 +31,7 @@ Scope: presentation only. The sections, their content, the formats and every for
    - Session and the total;
    - Context with its ring and `tokens / window`;
    - a meter row ending in the percent;
-   - the cost split.
+   - the cost split (`Subagents $Y+` alone while a restored subagent is listed and the Total is known, §6.1).
 6. **The Project block follows it, as in OpenChamber:**
    - a rule, then the bold `Project` with the folder name, dim, at the right;
    - the branch;
@@ -184,7 +186,7 @@ const ICON_CELLS = 2 // the slot an icon sits in: the text after it starts 3 cel
 const PCT_CELLS = 6 // `100.0%`
 const LIMIT_LABEL_CELLS = 7 // `5-hour`, `Weekly`, `Spend`
 const LIMIT_PCT_CELLS = 5 // `100%`
-const COST_CELLS = 7 // `$148.59`, `<$0.001`
+const COST_CELLS = 7 // `$148.59`, `<$0.001`; a restored row's `$148.59+` takes a cell more (agentsSection)
 // A time from 100 hours on takes 8 cells (`100h 00m`), the widest this cell holds. A time of 1000 hours or more
 // (`1000h 00m`) would overflow it, and taskTime draws it as not known; a cost of $1000 or more overflows COST_CELLS.
 // The `≤` of a bound takes a cell of its own, so `≤99h 59m` is the widest bound the cell holds, and `≤100h 00m` is
@@ -210,7 +212,7 @@ const TEXT_METER_CELLS = 10
 const SVG_MAX_PX = 4096
 const RULE_PX = SVG_MAX_PX // the divider image; the Box around it cuts it to the pane
 // The rows that the Subagents and the Tasks show each; the rest of a list is counted in a line after its rows.
-const MAX_AGENT_ROWS = 8
+const MAX_STATUS_ROWS = 8
 // The Log keeps at least this many lines, and when they do not fit the pane scrolls (the user's decision, 2026-10-08),
 // as the Subagents list shows up to 8.
 const MIN_LOG_ROWS = 8
@@ -232,10 +234,10 @@ const MIN_LOG_TEXT_CELLS = 8 // the least text a log line keeps: below it `who` 
 // In a narrow pane the identity column gives way first, as in the log: a subagent row or a task row leaves out its `@…`
 // tag (the `@type` of a subagent, the `@kind` of a task), on every row of its list, when the description would keep
 // fewer cells than this beside it.
-const MIN_AGENT_DESC_CELLS = 12
+const MIN_STATUS_DESC_CELLS = 12
 const LOG_GAP_CELLS = 1 // the gap between the cells of a log row
-const AGENT_GAP_CELLS = 1 // the gap between the cells of a subagent or task row, and between those of its group
-const AGENT_ROW_GAPS = 3 // the gaps of such a row that has its tag: two between its cells, one in its group
+const STATUS_GAP_CELLS = 1 // the gap between the cells of a subagent or task row, and between those of its group
+const STATUS_ROW_GAPS = 3 // the gaps of such a row that has its tag: two between its cells, one in its group
 const TEXT_MARK_CELLS = 1 // the mark of such a row where there is no icon slot
 ```
 
@@ -460,6 +462,9 @@ function section(
 ### 6.1 Top block
 
 ```tsx
+// Whether a subagent row was rebuilt from the session's messages: its cost before the restore is not known.
+const hasRestored = (agents: AgentRow[]): boolean => agents.some(agent => agent.restored === true)
+
 // Session and Total, the context, and the split of the cost when subagents ran. The card never folds and has no rule
 // above it. The total is primary weight: bold is for titles. Its rows, one line each: Session with its total, the
 // context (two with a reading, the label and the meter), and the split.
@@ -481,7 +486,11 @@ function topBlock(d: Draw): Block {
     </Box>,
     ...contextRows(d),
   ]
-  if (split.session !== null && split.subagents > 0) {
+  // A restored row's cost before the restore is not known, so the subagents' cost is a lower bound and Session, which
+  // is Total less that cost, is not shown. With no Total there is no split line, as for live rows.
+  if (split.total !== null && hasRestored(Object.values(agents))) {
+    rows.push(<Text dimColor wrap="truncate">{`Subagents ${fmtUsd(split.subagents)}+`}</Text>)
+  } else if (split.session !== null && split.subagents > 0) {
     rows.push(
       <Text dimColor wrap="truncate">
         {`Session ${fmtUsd(split.session)} · Subagents ${fmtUsd(split.subagents)}`}
@@ -755,14 +764,14 @@ type StatusRow = { status: TaskStatus; description: string; tag: string; value: 
 // One row of such a list, in columns: the mark (a cell of its own), a group that takes the rest of the row, and the
 // value (right-aligned in a column of `valueCells`, a dim dash where it is not known). The group holds the
 // description, which grows and is cut to the room there is, and the tag, a column of `tagCells` on every row, so the
-// tags start at one x whatever the descriptions are. A pane too narrow to leave the description MIN_AGENT_DESC_CELLS
+// tags start at one x whatever the descriptions are. A pane too narrow to leave the description MIN_STATUS_DESC_CELLS
 // has no tag column (`tagCells` is 0): the description takes the whole group, on every row alike.
 function statusRow(d: Draw, item: StatusRow, tagCells: number, valueCells: number): RenderElement {
   const { Box, Text, Svg } = d.ui
-  const mark = AGENT_MARKS[item.status]
+  const mark = STATUS_MARKS[item.status]
 
   return (
-    <Box flexDirection="row" alignItems="center" columnGap={AGENT_GAP_CELLS}>
+    <Box flexDirection="row" alignItems="center" columnGap={STATUS_GAP_CELLS}>
       {Svg === undefined ? (
         <Box flexDirection="row" width={TEXT_MARK_CELLS} flexShrink={0}>
           <Text color={mark.color} dimColor={mark.isDim}>
@@ -778,7 +787,7 @@ function statusRow(d: Draw, item: StatusRow, tagCells: number, valueCells: numbe
         flexShrink={1}
         minWidth={0}
         overflow="hidden"
-        columnGap={AGENT_GAP_CELLS}
+        columnGap={STATUS_GAP_CELLS}
       >
         {growText(d, item.description)}
         {tagCells > 0 && (
@@ -802,25 +811,25 @@ function statusRow(d: Draw, item: StatusRow, tagCells: number, valueCells: numbe
 type StatusColumns = { desktopTagCells: number; terminalTagCells: number; valueCells: number }
 
 // A section of rows with a status mark, the Subagents' and the Tasks' alike; `items` come in the order they are drawn.
-// The summary counts the rows that run (`2/5`), and all of them when none does. Up to MAX_AGENT_ROWS are drawn, and the
-// ones that do not fit are counted, in line with the descriptions. A row each, and the line that counts the rest is one
-// more.
+// The summary counts the rows that run (`2/5`), and all of them when none does. Up to MAX_STATUS_ROWS are drawn, and
+// the ones that do not fit are counted, in line with the descriptions. A row each, and the line that counts the rest is
+// one more.
 function statusSection(d: Draw, id: SectionId, title: string, items: StatusRow[], columns: StatusColumns): Block {
   const { Svg } = d.ui
   if (items.length === 0) return NO_BLOCK
   const running = items.filter(item => item.status === 'running').length
   const summary = running > 0 ? `${running}/${items.length}` : String(items.length)
-  const shown = items.slice(0, MAX_AGENT_ROWS)
+  const shown = items.slice(0, MAX_STATUS_ROWS)
   // One width for the tag column of every row, as for the `who` of the log: the terminal takes the longest tag that is
   // drawn, the desktop a width of its own.
   const longest = Math.max(...shown.map(item => item.tag.length))
   const tagCells = Svg === undefined ? Math.min(columns.terminalTagCells, longest) : columns.desktopTagCells
   // What the description keeps beside the tag: the body less the mark, the tag, the value and the gaps of a row. With
-  // less than MIN_AGENT_DESC_CELLS the tag is left out of every row.
-  const descCells = d.cols - markCellsOf(d) - tagCells - columns.valueCells - AGENT_ROW_GAPS * AGENT_GAP_CELLS
-  const hasTag = descCells >= MIN_AGENT_DESC_CELLS
+  // less than MIN_STATUS_DESC_CELLS the tag is left out of every row.
+  const descCells = d.cols - markCellsOf(d) - tagCells - columns.valueCells - STATUS_ROW_GAPS * STATUS_GAP_CELLS
+  const hasTag = descCells >= MIN_STATUS_DESC_CELLS
   const rows = shown.map(item => statusRow(d, item, hasTag ? tagCells : 0, columns.valueCells))
-  const more = items.length - MAX_AGENT_ROWS
+  const more = items.length - MAX_STATUS_ROWS
   // The line starts where the descriptions do: after the mark and its gap.
   if (more > 0) rows.push(moreLine(d, more))
 
@@ -829,18 +838,21 @@ function statusSection(d: Draw, id: SectionId, title: string, items: StatusRow[]
 ```
 
 ```tsx
-// The subagents, running ones first and then the newest; the value of a row is its cost.
+// The subagents, running ones first and then the newest; the value of a row is its cost. The cost of a restored row is
+// the cost since the restore, with a plus after it, so while a row is restored the cell has a cell more.
 function agentsSection(d: Draw): Block {
-  const items = orderAgents(Object.values(d.data.agents)).map((agent): StatusRow => ({
+  const agents = Object.values(d.data.agents)
+  const items = orderAgents(agents).map((agent): StatusRow => ({
     status: agent.status,
     description: agent.description,
     tag: `@${shortType(agent.type)}`,
-    value: agent.costUsd === null ? null : fmtUsd(agent.costUsd),
+    value: agent.costUsd === null ? null : `${fmtUsd(agent.costUsd)}${agent.restored === true ? '+' : ''}`,
   }))
+  const costCells = COST_CELLS + (hasRestored(agents) ? 1 : 0)
 
   return statusSection(
     d, 'agents', 'Subagents', items,
-    { desktopTagCells: TYPE_CELLS, terminalTagCells: TYPE_CELLS_MAX, valueCells: COST_CELLS },
+    { desktopTagCells: TYPE_CELLS, terminalTagCells: TYPE_CELLS_MAX, valueCells: costCells },
   )
 }
 
@@ -890,7 +902,8 @@ The row has four columns. The description and the tag column sit in one group, b
      21). Terminal: the longest `@kind` drawn, at most `TASK_TYPE_CELLS` (10).
 4. **Value** (FIXED, `valueCells` wide, right-aligned). A dim `—` stands where it is not known.
    - Subagents: the cost, `COST_CELLS`, 7 cells. Costs line up on their right edge, and every description ends at the
-     same x.
+     same x. While a restored subagent is listed the cell is 8 cells, for the plus of its `$148.59+`. A restored
+     subagent's cost is a dim `—` until it is charged after the restore.
    - Tasks: the time, `TASK_TIME_CELLS`, 8 cells (`taskTime`). A running task shows how long it has run, never under 0
      (the wall clock may have been put back since it began); the pane redraws at least every 30 s, so the time moves
      with it. An ended task shows how long it ran, and a time that is a bound has `≤` before it (below). The time is
@@ -910,19 +923,19 @@ The row has four columns. The description and the tag column sit in one group, b
 
 **In a narrow pane the tag gives way first**, as `who` does in the log (§6.10). `statusSection` works out what a
 description would keep beside the tag: the body less the mark (`markCellsOf(d)`: `ICON_CELLS` on the desktop,
-`TEXT_MARK_CELLS` on the terminal), the tag column, the value column and the gaps of the row (`AGENT_ROW_GAPS` of
-`AGENT_GAP_CELLS` each: two between the cells and one in the group). With fewer than `MIN_AGENT_DESC_CELLS` (12) cells
+`TEXT_MARK_CELLS` on the terminal), the tag column, the value column and the gaps of the row (`STATUS_ROW_GAPS` of
+`STATUS_GAP_CELLS` each: two between the cells and one in the group). With fewer than `MIN_STATUS_DESC_CELLS` (12) cells
 the tag column leaves every row of the list, not some of them: `statusRow` gets `tagCells` 0, and the description takes
 the whole group. The choice is made once per list, so every description still ends at the same x. The two lists choose
-on their own columns: on the desktop the Subagents keep `@type` from 39 body columns (2 + 15 + 7 + 3 + 12) and the
-Tasks keep `@kind` from 35 (2 + 10 + 8 + 3 + 12).
+on their own columns: on the desktop the Subagents keep `@type` from 39 body columns (2 + 15 + 7 + 3 + 12; 40 with
+the 8-cell cost of a restored subagent) and the Tasks keep `@kind` from 35 (2 + 10 + 8 + 3 + 12).
 
 The list:
 
 - The header's summary is `running/total` while a row runs, and `total` otherwise.
-- The rows come running first and then the newest start (`orderAgents`, `orderTasks`). A task whose start is not known
-  comes last of its group.
-- Up to `MAX_AGENT_ROWS` (8) rows are drawn, and the rest are counted in a `+N more` line (below).
+- The rows come running first and then the newest start (`orderAgents`, `orderTasks`). A task or a restored subagent
+  whose start is not known comes last of its group: after the live rows that run, or after the other live rows.
+- Up to `MAX_STATUS_ROWS` (8) rows are drawn, and the rest are counted in a `+N more` line (below).
 - A list with no rows is left out, with its rule and its header: there is no Tasks section until there is a task. A
   folded list is its rule and its header (§5.4), and the fold is kept in `collapsed` under the section's id (`agents`
   or `tasks`).
@@ -937,15 +950,15 @@ The list:
 | `stopped` | stop square in a ring, `NEUTRAL` | `■` dim |
 | `ended` | empty ring, `NEUTRAL` | `○` dim |
 
-A subagent has the first four statuses. `ended` is a task that is over with no known end; nothing sets it in 0.5.0, and
-the restore of 0.6.0 will. A stopped row and an ended one are no failure, so neither is a cross, and failed and stopped
-differ by shape, not by colour alone. Until 0.5.0 the terminal drew a stopped subagent as a dim `✗`.
+`ended` is a task or a subagent that is over with no known end (a restored row): nothing set it in 0.5.0, and the
+restore of 0.6.0 does, for a subagent too. A stopped row and an ended one are no failure, so neither is a cross, and
+failed and stopped differ by shape, not by colour alone. Until 0.5.0 the terminal drew a stopped subagent as a dim `✗`.
 
 ```tsx
 // The marks of a status on a surface with no images. The Subagents and the Tasks share one set, keyed by the statuses
-// of a task: a subagent has the first four, and `ended` is a task that is over with no known end. A stopped row has a
-// dim square and an ended one a dim ring: neither is a failure, so neither is a cross.
-const AGENT_MARKS: Record<TaskStatus, { glyph: string; color?: string; isDim?: boolean }> = {
+// of a task. `ended` is a task or a subagent that is over with no known end (a restored row). A stopped row has a dim
+// square and an ended one a dim ring: neither is a failure, so neither is a cross.
+const STATUS_MARKS: Record<TaskStatus, { glyph: string; color?: string; isDim?: boolean }> = {
   running: { glyph: '◐', color: BLUE },
   done: { glyph: '✓', color: OK },
   failed: { glyph: '✗', color: BAD },
@@ -970,14 +983,14 @@ function moreLine(d: Draw, count: number, props: Partial<BoxProps> = {}): Render
   const { Box, Text } = d.ui
 
   return (
-    <Box flexDirection="row" paddingLeft={markCellsOf(d) + AGENT_GAP_CELLS} {...props}>
+    <Box flexDirection="row" paddingLeft={markCellsOf(d) + STATUS_GAP_CELLS} {...props}>
       <Text dimColor>{`+${count} more`}</Text>
     </Box>
   )
 }
 ```
 
-The line starts at `markCellsOf(d)` + `AGENT_GAP_CELLS`, where the descriptions start whether or not the tag column is
+The line starts at `markCellsOf(d)` + `STATUS_GAP_CELLS`, where the descriptions start whether or not the tag column is
 drawn. On the desktop that is 3 cells = the 2-cell icon slot + the 1-cell gap. On the terminal it is 2 cells = the
 1-cell mark + the 1-cell gap.
 
@@ -1163,7 +1176,7 @@ function logParts(d: Draw, above: number): RenderElement[] {
   const lineRows = lines.map(line => (
     <Box flexDirection="row" columnGap={LOG_GAP_CELLS}>
       <Box flexDirection="row" width={TIME_CELLS} flexShrink={0}>
-        <Text dimColor>{fmtClock(line.at)}</Text>
+        <Text dimColor>{line.at === null ? '—' : fmtClock(line.at)}</Text>
       </Box>
       {hasWho && (
         <Box flexDirection="row" width={whoCells} flexShrink={0} overflow="hidden">
@@ -1205,7 +1218,7 @@ function logParts(d: Draw, above: number): RenderElement[] {
 }
 ```
 
-- **Time and `who`** are fixed columns.
+- **Time and `who`** are fixed columns. A restored line has no known time, and its time cell is a dim `—`.
   - In the full layout every text starts at the same x: 8 + 1 + 13 + 1 = 23 cells = 184 px on the desktop.
   - Proportional digits can no longer move the columns.
   - The `who` column no longer shrinks with the text beside it. It did in v1, which moved the text column row to row.
@@ -1219,7 +1232,11 @@ function logParts(d: Draw, above: number): RenderElement[] {
   `stopped · …`, its `who` and outcome are red for `failed` only, and an end that came between turns has the engine's
   `task-notification` line beside it. A time that is a bound has `≤` before it: `✓ ≤12.2s`, `✗ ≤…` for a failure, `≤…`
   for a stop (§6.7). A call that started a background task has `→ background` instead of `✓` and its time, whichever
-  agent made the call: its time would be the call's, not the task's.
+  agent made the call: its time would be the call's, not the task's. A restored tool call has its `✓` or `✗` and no time
+  (`→ background` if it started a task, and none if it was still running when the transcript was read). A restored end
+  line has a time only where the call or the notice gave one (a foreground Agent's `durationMs`, a notice's
+  `<duration_ms>`): without one, a subagent's end line keeps its `✓` or `✗` and a task's has no outcome, and a stop has
+  none.
   - The column is FIXED and right-aligned (`justifyContent="flex-end"`). It holds one `Text wrap="truncate"`, styled like the `who` of the same line: red for an error line, dim otherwise.
   - A line without an outcome (a prompt, `spawned`, `resumed`, a compaction) gets the same cell, empty, so every text is cut at the same x.
 - **Outcome width per surface.** Worked out once per section, from the lines drawn.
@@ -1273,6 +1290,8 @@ function logParts(d: Draw, above: number): RenderElement[] {
 | New files not all counted | `+2061+ / −4`; with no line counted, no numbers, as in the next row (§6.3) |
 | Lines unknown (an unborn HEAD, a failed diff) or both 0 (only binary files changed) | the changes row with the count alone, no numbers |
 | Subagent cost unknown | dim `—` in the cost column |
+| A restored subagent is listed | cost cell 8 cells (`$x+` once charged); with a Total, `Subagents $Y+` (§6.1) |
+| A restored Log line | a dim `—` in the time column; a call has its mark, no time; an end line a time if given |
 | Task time not known (none, or wider than its cell) | dim `—` in the time column (§6.7) |
 | More than 8 subagents or tasks | `+N more` (§6.7) |
 | Events the Log does not draw | a dim `+N more` at its bottom; none when all are drawn or the Log is folded (§6.12) |
@@ -1301,7 +1320,7 @@ scrolls, and the engine does that. Where the body's height is not known (`bodyRo
     so that the two cannot part.
   - A rule and a section header take one row each (`RULE_ROWS`, `HEADER_ROWS`), measured on the desktop (the 0.4.0
     spec, §8.1). A folded section is its rule and header. A block that is left out is 0 rows.
-  - The Subagents and the Tasks count a row for each row they draw, 8 at most (`MAX_AGENT_ROWS`), and one more for the
+  - The Subagents and the Tasks count a row for each row they draw, 8 at most (`MAX_STATUS_ROWS`), and one more for the
     `+N more` line when there is one (`statusSection`, §6.7). The Tasks block is left out, and so counts 0 rows, while
     there is no task.
   - The one estimate is the chips of MCP (`chipRows`, §6.8), because the layout engine wraps them: whole chips, greedy,
@@ -1611,8 +1630,8 @@ three checks of 0.4.3 that were left for it, and four that the final review of 0
 22. **The Tasks icon.** A terminal (§7) in its 2-cell slot beside the title, in the grey of the other icons, readable on
     dark and light, and told from the others.
 23. **The terminal's ■ and ○.** In a terminal a stopped task and a stopped subagent are a dim `■`, and a failed one a
-    red `✗`: the two differ by shape (§6.7). The dim `○` of `ended` cannot be seen yet, since nothing sets that status
-    before 0.6.0; only the tests pin it.
+    red `✗`: the two differ by shape (§6.7). The dim `○` of `ended` was not to be seen before 0.6.0, since nothing set
+    that status; the restore sets it now, and check 38 looks at its icon on the desktop.
 24. **A pane maximized on a 21:9 monitor** (left from 0.4.3, §5.1 and §6.2). The rules between the sections reach the
     right edge, and the meters reach their values: the context meter its percent, a limit meter its countdown.
 25. **A long Log line on a wide pane** (left from 0.4.3, §9). A line keeps up to 512 characters of its text, and the
@@ -1655,6 +1674,20 @@ Checks for the 0.5.2 release (engine 2.1.299 or later):
 37. **The mask (0.5.2).** `{"secret_key": "wJalrXUtnFEMI/K7MDENG"}`, `secret_key=wJalrXUtnFEMI` and
     `aws configure set aws_secret_access_key wJalrXUtnFEMI` show `•••` for the value; `{"max_token": 4096,
     "secret": false}` shows as typed.
+
+Checks for the 0.6.0 release (the restore, §5 of the 0.4–0.6 spec; engine 2.1.308 or later):
+
+38. **A reopen.** Reopen the desktop app in a session that had subagents, background tasks and a compaction: Subagents,
+    Tasks and the Log come back. The Log times are `—`, an unfinished subagent is `ended` (a dim `○`), and the split
+    reads `Subagents $Y+`.
+39. **A subagent continued after the reopen.** A subagent that started before the reopen and is continued after it with
+    SendMessage shows under its type, logs `resumed · type: …`, and its cost reads `$x+`.
+40. **The count.** After a reopen, the Log header's count equals the lines shown plus the `+N more`.
+41. **A hot reload.** A hot reload mid-session: no row and no Log line doubles.
+42. **A resume in a terminal.** `/resume` to another session in a terminal: the pane shows that session after its first
+    turn, and the turn's prompt is logged once.
+43. **The prompt rule.** The first prompt after a reopen is logged `you`; a subagent's hand-back is logged
+    `engine › peer`.
 
 Results of the live renders (2026-10-07, 2026-10-08, 2026-10-09, 2026-10-12 and 2026-10-13):
 

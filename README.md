@@ -23,12 +23,13 @@ is a plugin marketplace, `philarete-mods`, that holds this one plugin.
   background tasks, compactions. Its header counts the events it has seen, and a `+N more` line counts the ones that do
   not fit.
 
-Every section below the Session and Project blocks can be folded, and the fold state persists. Every rule is in
+Every section below the Session and Project blocks can be folded, and the fold state persists. A reopened or resumed
+session is restored from its messages: Subagents, Tasks and the Log come back, with no clock times. Every rule is in
 [the plugin's README](plugins/session-panel/README.md).
 
 ## Install
 
-Requires Claude Code 2.1.287 or later (mods support). The mod runs on engines 2.1.288 to 2.1.304 and was checked
+Requires Claude Code 2.1.287 or later (mods support). The mod runs on engines 2.1.288 to 2.1.308 and was checked
 live on Linux with the desktop app (engines 2.1.288, 2.1.299 and 2.1.304) and the CLI 2.1.294. The Project section
 needs git.
 
@@ -61,9 +62,14 @@ Then start a new session.
 ## Privacy
 
 - No network access.
-- No reading of credentials, environment variables or settings.
+- No reading of a credential store, environment variables or settings files. The transcript that the mod reads to
+  restore the pane (below) can hold a secret in a tool result, which the pane does not draw.
 - Git runs read-only commands only (`branch`, `rev-parse`, `status` and `diff`), in the session's folder.
 - Nothing is written to disk except the fold state, in the plugin store.
+- To rebuild the pane on a reopen or a resume, it reads the session's transcript through the engine, tool results
+  included. It draws only prompts, call labels, subagent descriptions and answers, and task descriptions, masked
+  best-effort as live lines are, so a reopen shows earlier prompts and commands again. Nothing from it is written or
+  sent; it stays in session plugin state, which other plugins can read.
 
 The details are in [the plugin's README](plugins/session-panel/README.md).
 
