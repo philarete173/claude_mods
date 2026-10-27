@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock, Plugin } from 'claude-code/testing'
 import type { On, PluginState, PromptOrigin, RenderPropsOf, RenderSurface, SessionMessage, UiPane } from 'claude-code'
 
-import { LOG_MAX } from './stats'
+import { HANDBACK_TOOL, LOG_MAX } from './stats'
 import type { AgentRow, LogEntry, TaskRow, TurnAcc, TurnStats } from './stats'
 
 type State = PluginState['session-panel']
@@ -18,7 +18,6 @@ const mirrorsStats: [
 ] = [true, true, true, true, true]
 
 const ROOT = '/work/online_shop'
-const HANDBACK_TOOL: string = 'SubagentHandback' // the tool a subagent reports through in auto mode: not in the types
 const START = { cwd: ROOT, surface: 'desktop', isInteractive: true } as const
 const RUN = { args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } } as const
 // The engine refuses a compaction with no messages, in the input and in the result.

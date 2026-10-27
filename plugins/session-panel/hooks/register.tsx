@@ -11,9 +11,9 @@ import type {
 } from 'claude-code'
 
 import {
-  addAgentCost, agentOutcome, attributeCost, computeTurnStats, finishTask, fmtDuration, fmtTokens, LOG_TEXT_MAX,
-  logHead, parseStatus, parseTaskNotification, promptKind, pushLog, redact, shortType, shorten, stripFormat,
-  sumNumstat, TASK_END, taskFromCall, taskLine, toolLabel,
+  addAgentCost, agentOutcome, attributeCost, computeTurnStats, endKind, finishTask, fmtDuration, fmtTokens,
+  HANDBACK_TOOL, LOG_TEXT_MAX, logText, parseStatus, parseTaskNotification, promptKind, pushLog, redact, shortType,
+  shorten, SPAWN_TOOLS, stripFormat, sumNumstat, TASK_END, taskFromCall, taskLine, toolLabel,
 } from './stats'
 import type {
   AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, TaskEndStatus, TaskRow, Usage,
@@ -42,13 +42,6 @@ const TICK_MS = 30_000
 
 // The words $.agent.list() uses for how a subagent ended; any other word (`running` too) leaves the row as it is.
 const LISTED_STATUS: Record<string, AgentStatus> = { completed: 'done', failed: 'failed', killed: 'stopped' }
-
-// The tools that start a subagent (`Task` is the name of `Agent` in older builds).
-const SPAWN_TOOLS: string[] = ['Agent', 'Task']
-
-// The tool that a subagent reports through in auto mode; its turn then ends with an empty answer. A `string`, not the
-// literal: the engine's types do not list it, and comparing `e.tool` with a literal they lack is an error.
-const HANDBACK_TOOL: string = 'SubagentHandback'
 
 // The tools whose call may have changed a file, whichever agent made it: the project is read again after one.
 const WRITE_TOOLS: string[] = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash']
@@ -638,7 +631,7 @@ async function reviveAgent($: EngineInterface, agentId: string): Promise<void> {
   })
   if (revived !== null) {
     const line = `resumed · ${revived.type}: ${revived.description}`
-    await addLog($, await $.clock.now(), 'main', shorten(redact(logHead(line)), LOG_TEXT_MAX), 'info')
+    await addLog($, await $.clock.now(), 'main', logText(line), 'info')
   }
 }
 
@@ -849,8 +842,9 @@ export const register: Register = on => {
     if (e.text.trim() !== '' && !queued.includes(e.text)) {
       const shown = promptKind(e.text)
       if (shown.kind === 'tag' || shown.kind === 'prompt') {
-        const [who, head] = shown.kind === 'tag' ? ['engine', shown.tag] : ['you', logHead(shown.text)]
-        await addLog($, now, who, shorten(redact(head), LOG_TEXT_MAX), 'info')
+        const [who, text] =
+          shown.kind === 'tag' ? ['engine', shorten(redact(shown.tag), LOG_TEXT_MAX)] : ['you', logText(shown.text)]
+        await addLog($, now, who, text, 'info')
       }
     }
 
@@ -935,7 +929,7 @@ export const register: Register = on => {
       // has the time alone, as a stopped subagent has, and is news, not a fault.
       const took = fmtDuration(t1 - t0)
       const outcome = ran.deny !== undefined ? 'denied' : isAbandoned ? took : `${isFailed ? '✗' : '✓'} ${took}`
-      const label = shorten(redact(logHead(toolLabel(e.tool, e, await $.session.root()))), LOG_TEXT_MAX)
+      const label = logText(toolLabel(e.tool, e, await $.session.root()))
       const { who, isUnknown } = await whoIs($, e.agentId)
       // The engine's own forks and a workflow's agents carry ids that no agent.spawn announced, so the agents atom has
       // no row for them. Core refuses the tools of most forks, so a fork that tries one would show a red failure that
@@ -997,9 +991,7 @@ export const register: Register = on => {
     const row = rows[agentId]
     if (row !== undefined) {
       const { text, outcome } = agentOutcome(status, row, e.durationMs, answer)
-      // A subagent that failed is an error in the log; one that was stopped is news, not a fault.
-      const kind: LogKind = status === 'done' ? 'ok' : status === 'stopped' ? 'info' : 'error'
-      await addLog($, now, shortType(row.type), text, kind, outcome)
+      await addLog($, now, shortType(row.type), text, endKind(status), outcome)
     }
 
     return done
@@ -1015,16 +1007,14 @@ export const register: Register = on => {
       // characters (a U+202E would reorder what the list shows, and the engine refuses a text that holds a control
       // character and draws its own pane in place of the mod's), then the secrets, then the cut. No other step writes a
       // row from what the engine gave: a sync, a resume and the end of a run only change a row that is there.
-      const type = shorten(redact(logHead(e.subagentType ?? e.name ?? 'agent')), LOG_TEXT_MAX)
-      const description = shorten(redact(logHead(e.description)), LOG_TEXT_MAX)
+      const type = logText(e.subagentType ?? e.name ?? 'agent')
+      const description = logText(e.description)
       const row: AgentRow = {
         id: agentId, description, type, model: spawned.model, status: 'running', startedAt: now, endedAt: null,
         costUsd: null,
       }
       await update($, agentsAtom, rows => ({ ...rows, [agentId]: row }))
-      await addLog(
-        $, now, 'main', shorten(redact(logHead(`spawned · ${type}: ${description}`)), LOG_TEXT_MAX), 'info',
-      )
+      await addLog($, now, 'main', logText(`spawned · ${type}: ${description}`), 'info')
     }
 
     return spawned
@@ -1051,7 +1041,7 @@ export const register: Register = on => {
         const at = (await arrival) ?? (await $.clock.now())
         const shown = promptKind(text)
         if (shown.kind !== 'service') {
-          await addLog($, at, 'you', shorten(redact(logHead(shown.text)), LOG_TEXT_MAX), 'info')
+          await addLog($, at, 'you', logText(shown.text), 'info')
         }
       }
     }

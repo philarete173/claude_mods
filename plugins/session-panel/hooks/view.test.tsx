@@ -4,6 +4,7 @@ import type { On, RenderPropsOf, RenderSurface, SessionRateLimit } from 'claude-
 
 import { chipRows, contextMeterWidth, limitMeterWidth, meterSvg, renderPane, ringSvg } from './view'
 import type { PaneData } from './view'
+import { restoreFromMessages } from './restore'
 import type { AgentRow, AgentStatus, LogEntry, TaskKind, TaskRow, TaskStatus, TurnStats } from './stats'
 
 // The state of the pane is seeded the way register.test.ts does it: the events of a session run through the real
@@ -3650,4 +3651,23 @@ test('while a subagent is restored the split is `Subagents $Y+` with no Session;
     const [top] = childrenOf(draw(dataOf([restored(1.5)], surface)))
     expect(childrenOf(top).at(-1)?.props, surface).toMatchObject({ dimColor: true, wrap: 'truncate' })
   }
+})
+
+test('the pane draws restored rows with hostile ids', () => {
+  const ids = ['__proto__', 'constructor', 'toString']
+  const launch = (id: string) => ({
+    tool_use_id: `toolu_a${id}`, tool: 'Agent', agentId: id,
+    input: { description: 'Map the flow', subagent_type: 'Explore' }, result: { status: 'async_launched', agentId: id },
+  })
+  const shell = (id: string) => ({
+    tool_use_id: `toolu_b${id}`, tool: 'Bash', input: { command: 'npm run dev', run_in_background: true },
+    result: { backgroundTaskId: id },
+  })
+  const rows = [{ role: 'assistant', text: '', toolUses: [...ids.map(launch), ...ids.map(shell)] }]
+  const restored = restoreFromMessages(rows, new Set(ids), ROOT)
+  expect(Object.keys(restored.agents)).toEqual([...ids].reverse())
+  expect(Object.keys(restored.tasks)).toEqual([...ids].reverse())
+  const tree = draw({ ...EMPTY, ...restored }, 45, 40)
+  expect(rowProblems(tree)).toEqual([])
+  expect(textsOf(tree).filter(text => text === 'Map the flow')).toHaveLength(3)
 })

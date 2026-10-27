@@ -652,6 +652,9 @@ export const LOG_TEXT_MAX = 512
 // (wordHead).
 export const logHead = (text: string): string => wordHead(stripFormat(text), TEXT_HEAD_MAX)
 
+// The pipeline of a Log line's text: the head (logHead), the secrets, then the cut.
+export const logText = (text: string): string => shorten(redact(logHead(text)), LOG_TEXT_MAX)
+
 const str = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback)
 const relativeTo = (path: string, root: string): string =>
   path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path
@@ -663,6 +666,13 @@ function hostOf(url: string): string {
     return url
   }
 }
+
+// The tools that start a subagent (`Task` is the name of `Agent` in older builds).
+export const SPAWN_TOOLS: string[] = ['Agent', 'Task']
+
+// The tool that a subagent reports through in auto mode; its turn then ends with an empty answer. A `string`, not the
+// literal: the engine's types do not list it, and comparing `e.tool` with a literal they lack is an error.
+export const HANDBACK_TOOL: string = 'SubagentHandback'
 
 // The log line of a tool call: what it did. How it went is the outcome of the entry, a field of its own.
 export function toolLabel(tool: string, input: Record<string, unknown>, root: string): string {
@@ -755,7 +765,7 @@ export function taskFromCall(
 // (the first ones) nor the duration (the last one). The tags are found with indexOf, not with a pattern that
 // backtracks: a notification carries the result of a subagent or a workflow, which can be long, and a lazy pattern over
 // the whole text takes quadratic time on a crafted one.
-function tagText(text: string, tag: string, fromEnd = false): string | undefined {
+export function tagText(text: string, tag: string, fromEnd = false): string | undefined {
   const open = `<${tag}>`
   const start = fromEnd ? text.lastIndexOf(open) : text.indexOf(open)
   const end = start < 0 ? -1 : text.indexOf(`</${tag}>`, start)
@@ -861,6 +871,10 @@ export type TaskEndStatus = 'done' | 'failed' | 'stopped'
 export const TASK_END: Record<TaskEnd['status'], TaskEndStatus> = {
   completed: 'done', failed: 'failed', killed: 'stopped', stopped: 'stopped',
 }
+
+// The kind of the log line of a subagent that has ended: a stop is news, not a fault; a failure is an error.
+export const endKind = (status: TaskEndStatus): LogKind =>
+  status === 'done' ? 'ok' : status === 'stopped' ? 'info' : 'error'
 
 // The log line of a subagent that has ended: its text, and its outcome, the time it took behind a mark (✓ for an
 // answer, ✗ for a failure; a stop is no fault, so it has no mark). A time that is not known (a restored row) leaves
