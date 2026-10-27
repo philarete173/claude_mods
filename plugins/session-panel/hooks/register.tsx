@@ -720,6 +720,8 @@ async function readAndCharge($: EngineInterface, agentId: string | undefined): P
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    // The session.start restore, when it runs, covers what a due in-process restore would: the two must not both run.
+    isRestoreDue = false
     // The restore: the rows and the three atoms are read in this frame, before any other await, so that no event of
     // the session lands between them. An empty pane is a new process (a reopen, `claude --resume`, the mod enabled
     // mid-session); a hot reload keeps the atoms, and restores nothing.

@@ -6937,6 +6937,26 @@ test('after a resume the first main turn restores the other conversation, less i
     expect(w.messageReads).toBe(2)
   })
 
+test('a session.start after a resume restores once: the turn that follows does not restore again', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(10)
+    await endSession($, 'resume')
+    w.messages = ROWS
+
+    await $.session.start(START) // restores on its own, so the turn's restore, due since the resume, must not run
+    await clock.advance(10)
+    await $.turn.start({ text: 'go on', turnId: 't1' })
+    await clock.advance(10)
+
+    const restored = restoreFromMessages(ROWS, new Set(), ROOT)
+    const state = await readState($)
+    expect(state.log.map(line => line.text)).toEqual(['go on', ...restored.log.map(line => line.text)])
+    expect(state.logCount).toBe(1 + restored.logCount)
+  })
+
 for (const resets of [['clear'], ['resume', 'clear']] as const) {
   test(`no restore at the next turn after ${resets.join(' then ')}`, SLOW_READER, async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })

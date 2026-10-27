@@ -193,6 +193,7 @@ function orderByStart<T extends { status: string; startedAt: number | null }>(ro
   return [...rows].sort((a, b) => rank(a) - rank(b) || (b.startedAt ?? 0) - (a.startedAt ?? 0))
 }
 
+// Running first, then the newest start first; a row of no known start last of its group, in the given order.
 export const orderAgents = (rows: AgentRow[]): AgentRow[] => orderByStart(rows)
 
 export const LOG_MAX = 200 // the most lines the Log keeps: the newest ones
@@ -713,7 +714,7 @@ const asRecord = (v: unknown): Record<string, unknown> =>
 // left is the description (one of spaces and format characters is none); the name of the kind is the last resort.
 function runningTask(kind: TaskKind, id: string, texts: string[], now: number): TaskRow | null {
   if (id === '') return null
-  const cleaned = texts.map(text => shorten(redact(logHead(text)), LOG_TEXT_MAX))
+  const cleaned = texts.map(logText)
 
   return {
     id, kind, description: cleaned.find(text => text !== '') ?? kind, status: 'running', startedAt: now,
@@ -872,7 +873,7 @@ export const TASK_END: Record<TaskEnd['status'], TaskEndStatus> = {
   completed: 'done', failed: 'failed', killed: 'stopped', stopped: 'stopped',
 }
 
-// The kind of the log line of a subagent that has ended: a stop is news, not a fault; a failure is an error.
+// The kind of the end line of a subagent or a task: a stop is news, not a fault; a failure is an error.
 export const endKind = (status: TaskEndStatus): LogKind =>
   status === 'done' ? 'ok' : status === 'stopped' ? 'info' : 'error'
 
@@ -914,7 +915,7 @@ export const taskLine = (
 
   return {
     text: shorten(`${status} · ${row.kind}: ${row.description}`, LOG_TEXT_MAX),
-    kind: status === 'done' ? 'ok' : status === 'stopped' ? 'info' : 'error',
+    kind: endKind(status),
     outcome: row.durationMs === null ? undefined : `${mark}${bound}${fmtDuration(row.durationMs)}`,
   }
 }
@@ -932,6 +933,7 @@ export function finishTask(
   return { ...row, status, endedAt: at, durationMs: durationMs ?? ran, ...(isBound ? { durationAtMost: true } : {}) }
 }
 
+// The same rule as orderAgents.
 export const orderTasks = (rows: TaskRow[]): TaskRow[] => orderByStart(rows)
 
 // The entries of `git status --porcelain -z`: `XY path`, the two status letters, a space and the path, each ended by a

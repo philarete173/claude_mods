@@ -219,8 +219,8 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   without one, a subagent's end line keeps its `✓` or `✗` and a task's has no outcome, and a stop has none. A restored
   subagent or task has no known start, so it is listed after the live rows of its group, newest first.
 - Live rows win on an id, and restored lines are older than live ones.
-- Not restored: subagents' own tool calls; what arrived mid-turn (prompts, notices, other agents' messages) and
-  subagents' hand-backs, which are not rows; tool times, denials and interruptions (a denied or interrupted call reads
+- Not restored: subagents' own tool calls; prompts, notices and other agents' messages (hand-backs among them)
+  that arrived mid-turn, which are not rows; tool times, denials and interruptions (a denied or interrupted call reads
   `✗`); Turn stats (`No completed turn yet` until a new turn); the `compacted` and `resumed` lines; costs before the
   restore; rows before the latest compaction after a restart. A task that was restored while it still ran stays `ended`
   when its notice comes, and a task that the engine's own notice after a reopen names (`failed` or `stopped`, with a

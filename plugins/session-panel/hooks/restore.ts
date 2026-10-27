@@ -162,6 +162,8 @@ export function restoreFromMessages(rows: readonly unknown[], alive: ReadonlySet
   }
   for (const [id, row] of tasks) if (row.status === 'running') tasks.set(id, { ...row, status: 'ended' })
 
+  // A record keeps insertion order only for keys that are not integer-like (the engine's ids are not): so the order of
+  // the rows of no known start holds.
   return {
     agents: Object.fromEntries([...agents].reverse()),
     tasks: Object.fromEntries([...tasks].reverse()),

@@ -1688,6 +1688,9 @@ Checks for the 0.6.0 release (the restore, §5 of the 0.4–0.6 spec; engine 2.1
     turn, and the turn's prompt is logged once.
 43. **The prompt rule.** The first prompt after a reopen is logged `you`; a subagent's hand-back is logged
     `engine › peer`.
+44. **A resume in a new process.** Start `claude --resume` (a new CLI process) on a session with subagents and tasks,
+    once with no prompt and once with an initial prompt (`claude --resume <id> "…"`): the pane restores, and the
+    initial prompt is logged once.
 
 Results of the live renders (2026-10-07, 2026-10-08, 2026-10-09, 2026-10-12 and 2026-10-13):
 
