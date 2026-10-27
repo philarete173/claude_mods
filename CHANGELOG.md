@@ -29,8 +29,8 @@
   call labels, subagent descriptions and answers and task descriptions, masked best-effort as live lines are, and never
   tool output, file contents, the prompts given to subagents, error texts or the compaction summary. Nothing is written
   to disk or sent; it stays in session plugin state, which other plugins can read, as live lines do.
-- State contract: other plugins read `PluginState['session-panel']`. `AgentRow.startedAt` and `LogEntry.at` may be
-  null now, `AgentStatus` has `ended`, and rows may carry `restored: true`. A typed reader that does arithmetic on
+- State contract: other plugins read `PluginState['session-panel']`. `AgentRow.startedAt` and `LogEntry.at` may be null
+  now, `AgentStatus` has `ended`, and subagent rows may carry `restored: true`. A typed reader that does arithmetic on
   them must handle null.
 - Docs: the README and the specs record the restore and its limits, the engine 2.1.308 (the rows of
   `$.session.messages()`, an `agentId` on an Agent call), and the five view constants that were renamed
