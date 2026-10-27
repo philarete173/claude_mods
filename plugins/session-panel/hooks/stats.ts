@@ -786,6 +786,107 @@ export function engineTag(text: string): string | undefined {
   return /^<([a-z][a-z0-9]*(?:[-_][a-z0-9]+){1,8})(?:\s[^<>]*)?>/.exec(stripFormat(text.slice(0, 256)))?.[1]
 }
 
+// What a turn's text is, for the Log: a person's prompt, a turn the engine opened, a compaction summary, or nothing to
+// draw. The desktop opens its first prompt after a reopen with reminder blocks, `<system-reminder>…</system-reminder>`,
+// which are no turn of the engine's: they are skipped, and what follows is read, on the text with its format
+// characters out (one before a block must not stop the strip). One forward pass by indexOf, so linear on any input,
+// with no pattern over the blocks. `service` is nothing to draw: a text that is empty or all blocks, an unclosed block,
+// and a remainder, after a block, that holds a reminder tag: the strip may have stopped at a closing tag that a block
+// quoted, and the tail of a block cannot be told from a prompt with a reminder after it (a block, a prompt and a block
+// after it is `service` too: a known cost, for the tail may hold what a reminder holds). With no block before it, a
+// reminder after the prompt is cut off, not drawn; a closing tag with no opening one before it is a tail again. The
+// notes that the engine puts in the person's turn (an image's source, a skill's folder, an interrupt) are `service`;
+// another session's message is the tag `peer`. The `text` of the other kinds is the remainder, which the caller cleans
+// and masks as any text it draws.
+export type PromptKind =
+  | { kind: 'prompt'; text: string }
+  | { kind: 'tag'; tag: string; text: string }
+  | { kind: 'summary'; text: string }
+  | { kind: 'service' }
+
+const REMINDER_OPEN = '<system-reminder>'
+const REMINDER_CLOSE = '</system-reminder>'
+const SUMMARY_START = 'This session is being continued from a previous conversation'
+const PEER_START = 'Another Claude session sent a message:'
+const SERVICE_STARTS = ['[Image: source: ', 'Base directory for this skill: ', '[Request interrupted by user']
+
+export function promptKind(text: string): PromptKind {
+  const clean = stripFormat(text)
+  // `at` only moves forward: the blocks are not sliced off the rest one by one, which is quadratic with many blocks.
+  const skipSpace = (from: number): number => {
+    let i = from
+    while (i < clean.length && /\s/.test(clean.charAt(i))) i += 1
+
+    return i
+  }
+  let at = skipSpace(0)
+  let hasBlock = false
+  while (clean.startsWith(REMINDER_OPEN, at)) {
+    const end = clean.indexOf(REMINDER_CLOSE, at)
+    if (end < 0) return { kind: 'service' } // an unclosed block
+    at = skipSpace(end + REMINDER_CLOSE.length)
+    hasBlock = true
+  }
+
+  const open = clean.indexOf(REMINDER_OPEN, at)
+  const close = clean.indexOf(REMINDER_CLOSE, at)
+  // After a block, any reminder tag in the remainder; with none, a closing tag that no opening one comes before.
+  if (hasBlock ? open >= 0 || close >= 0 : close >= 0 && (open < 0 || close < open)) return { kind: 'service' }
+
+  const rest = open < 0 ? clean.slice(at) : clean.slice(at, open)
+  if (rest.trim() === '') return { kind: 'service' }
+  const tag = engineTag(rest)
+  if (tag !== undefined) return { kind: 'tag', tag, text: rest }
+  if (rest.startsWith(SUMMARY_START)) return { kind: 'summary', text: rest }
+  if (rest.startsWith(PEER_START)) return { kind: 'tag', tag: 'peer', text: rest }
+
+  return SERVICE_STARTS.some(start => rest.startsWith(start)) ? { kind: 'service' } : { kind: 'prompt', text: rest }
+}
+
+// The statuses that the row of a task takes when it ends.
+export type TaskEndStatus = 'done' | 'failed' | 'stopped'
+
+// How the notice of a task words its end, and the status its row takes: `killed` and `stopped` are both a stop. Not
+// LISTED_STATUS, which is for $.agent.list() and has no `stopped`.
+export const TASK_END: Record<TaskEnd['status'], TaskEndStatus> = {
+  completed: 'done', failed: 'failed', killed: 'stopped', stopped: 'stopped',
+}
+
+// The log line of a subagent that has ended: its text, and its outcome, the time it took behind a mark (✓ for an
+// answer, ✗ for a failure; a stop is no fault, so it has no mark). One that still runs has no outcome, so its status
+// is not a parameter.
+export const agentOutcome = (
+  status: TaskEndStatus, row: AgentRow, durationMs: number, answer: string,
+): { text: string; outcome: string } => {
+  const took = fmtDuration(durationMs)
+  if (status === 'stopped') return { text: status, outcome: took }
+  if (status !== 'done') return { text: status, outcome: `✗ ${took}` }
+  // The format and control characters go first and the head is cut (logHead), then the marks, then the secrets: no pass
+  // that takes quadratic time reads more than the head. The answer is markdown, which the pane shows as it is: its
+  // marks go after its format and control characters, as one beside a mark (a BOM after `**`) hides it from plainText.
+  const said = shorten(redact(plainText(logHead(answer))), LOG_TEXT_MAX)
+  const head = row.costUsd === null ? 'done' : `done · ${fmtUsd(row.costUsd)}`
+
+  return { text: said === '' ? head : `${head} — ${said}`, outcome: `✓ ${took}` }
+}
+
+// The log line of a task that has ended, drawn as the end of a subagent is (agentOutcome): the text is the status, the
+// kind and what the task was; the outcome is the time it ran behind a mark (✓ for a task that finished, ✗ for one that
+// failed; a stop is no fault, so it has no mark). A task whose time is not known has no outcome, and a time that is a
+// bound (durationAtMost) has `≤` before it.
+export const taskLine = (
+  status: TaskEndStatus, row: TaskRow,
+): { text: string; kind: LogKind; outcome: string | undefined } => {
+  const mark = status === 'done' ? '✓ ' : status === 'failed' ? '✗ ' : ''
+  const bound = row.durationAtMost === true ? '\u{2264}' : ''
+
+  return {
+    text: shorten(`${status} · ${row.kind}: ${row.description}`, LOG_TEXT_MAX),
+    kind: status === 'done' ? 'ok' : status === 'stopped' ? 'info' : 'error',
+    outcome: row.durationMs === null ? undefined : `${mark}${bound}${fmtDuration(row.durationMs)}`,
+  }
+}
+
 // The row of a task that has ended: its status, the end time and the time it ran. The notification's duration stands
 // when it gives one; otherwise it is the time from the start to `at`, never under 0 (the wall clock can be put back),
 // and a task whose start is not known has none. With `atMost` set, a time from the clock is a bound (durationAtMost):

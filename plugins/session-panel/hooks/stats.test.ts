@@ -1,6 +1,7 @@
 import { test, expect } from 'claude-code/testing'
 import {
   addAgentCost,
+  agentOutcome,
   attributeCost,
   cacheHitPct,
   computeTurnStats,
@@ -23,6 +24,7 @@ import {
   parseStatus,
   parseTaskNotification,
   plainText,
+  promptKind,
   pushLog,
   redact,
   shortType,
@@ -31,7 +33,9 @@ import {
   stripFormat,
   sumNumstat,
   sumUsage,
+  TASK_END,
   taskFromCall,
+  taskLine,
   textHead,
   toolLabel,
   wordHead,
@@ -1920,6 +1924,94 @@ test('engineTag is undefined for a text that is the person\'s: markup, a pasted 
     '<my-tag x="1"', '<my-tag x="1" <b>', '<x-y=z>', '<teammate-message teammate_id="lead"',
   ]
   for (const text of given) expect(engineTag(text), JSON.stringify(text)).toBeUndefined()
+})
+
+const REMINDER = (body: string): string => `<system-reminder>${body}</system-reminder>`
+
+// The text of a turn, read once, by indexOf: the reminder blocks that the desktop puts before a prompt (the first one
+// after a reopen) are skipped, and what follows is the prompt, a turn of the engine's, a compaction summary or nothing.
+test('promptKind reads a prompt, with or without reminder blocks before it or after it', () => {
+  expect(promptKind('fix it')).toEqual({ kind: 'prompt', text: 'fix it' })
+  expect(promptKind('  \n fix it')).toEqual({ kind: 'prompt', text: 'fix it' })
+  expect(promptKind(`${REMINDER('\nnote\n')}\n\nfix it`)).toEqual({ kind: 'prompt', text: 'fix it' })
+  expect(promptKind(` ${REMINDER('a')} \n${REMINDER('b')}\t${REMINDER('c')}\nfix it`))
+    .toEqual({ kind: 'prompt', text: 'fix it' })
+  // A reminder after the prompt is not drawn: the remainder is cut at its opening tag.
+  expect(promptKind(`fix it\n${REMINDER('note')}`)).toEqual({ kind: 'prompt', text: 'fix it\n' })
+  // A zero-width space before a block does not stop the strip: the text is read with its format characters out.
+  expect(promptKind(`\u{200B}${REMINDER('a')}\u{200B}fix it`)).toEqual({ kind: 'prompt', text: 'fix it' })
+})
+
+test('promptKind names a turn of the engine\'s and a compaction summary behind the blocks', () => {
+  expect(promptKind('<task-notification>done</task-notification>'))
+    .toEqual({ kind: 'tag', tag: 'task-notification', text: '<task-notification>done</task-notification>' })
+  expect(promptKind(`${REMINDER('a')}\n<command-name>/clear</command-name>`))
+    .toEqual({ kind: 'tag', tag: 'command-name', text: '<command-name>/clear</command-name>' })
+  const summary = 'This session is being continued from a previous conversation that ran out of context.'
+  expect(promptKind(summary)).toEqual({ kind: 'summary', text: summary })
+  expect(promptKind(`${REMINDER('a')}\n${summary}`)).toEqual({ kind: 'summary', text: summary })
+})
+
+// Another session's message opens with a fixed line; a peer is the engine's turn, drawn as the tag `peer`.
+test('promptKind names a message of another session `peer`, and draws nothing for the notes of the engine', () => {
+  const peer = 'Another Claude session sent a message:\n<agent-message from="x">hi</agent-message>'
+  expect(promptKind(peer)).toEqual({ kind: 'tag', tag: 'peer', text: peer })
+  expect(promptKind(`${REMINDER('a')}\n${peer}`)).toEqual({ kind: 'tag', tag: 'peer', text: peer })
+  for (const text of [
+    '[Image: source: /tmp/a.png]', 'Base directory for this skill: /x/y', '[Request interrupted by user]',
+    '[Request interrupted by user for tool use]', `${REMINDER('a')}\n[Image: source: /tmp/a.png]`,
+  ]) expect(promptKind(text), JSON.stringify(text)).toEqual({ kind: 'service' })
+  // A typed prompt that only looks like one of them is a prompt.
+  for (const text of ['[Image 1] what is this', '[Image: a cat]', 'Base directory is /x', '[Request failed]']) {
+    expect(promptKind(text), JSON.stringify(text)).toEqual({ kind: 'prompt', text })
+  }
+})
+
+test('promptKind draws nothing for no remainder, an unclosed block, and a block that quoted its closing tag', () => {
+  for (const text of [
+    '', ' \n ', REMINDER('a'), ` ${REMINDER('a')}\n${REMINDER('b')} \n`, '<system-reminder>a',
+    `${REMINDER('a')}<system-reminder>`,
+    // The strip stopped at the closing tag that the block quoted: what is left is the block's tail.
+    `${REMINDER('a')} b DB_PASSWORD x</system-reminder>fix it`,
+    `${REMINDER('a')} b</system-reminder>c<system-reminder>d`,
+    `${REMINDER('a')}</system-reminder>`,
+    // The same, with an opening tag after the tail: it is no prompt with a reminder after it, and no tail is drawn.
+    `${REMINDER('quoted: ')} DB_PASSWORD=x ${REMINDER(' more')}fix it`,
+    `${REMINDER('o <system-reminder>i')} SECRET ${REMINDER('j')} k</system-reminder>fix`,
+    // An opening tag inside a block: the block ends at the first closing tag, and the rest holds the second.
+    `${REMINDER('o <system-reminder>i')} tail</system-reminder>fix`,
+    // A block, a prompt and a block after it cannot be told from the tail of a quoting block: the rule's known cost.
+    `${REMINDER('a')}fix it${REMINDER('b')}`, `${REMINDER('a')}fix it${REMINDER('b')}and more`,
+    `${REMINDER('a')}fix <system-reminder>b</system-reminder> it`,
+  ]) expect(promptKind(text), JSON.stringify(text)).toEqual({ kind: 'service' })
+})
+
+test('promptKind reads 100 KB once: a long reminder, many blocks, and an unclosed one', () => {
+  const started = performance.now()
+  expect(promptKind(`${REMINDER('x'.repeat(102_400))}\nfix it`)).toEqual({ kind: 'prompt', text: 'fix it' })
+  expect(promptKind(`${REMINDER('').repeat(3000)}go`)).toEqual({ kind: 'prompt', text: 'go' })
+  expect(promptKind(`${REMINDER('').repeat(3000)}${' '.repeat(100_000)}go`)).toEqual({ kind: 'prompt', text: 'go' })
+  expect(promptKind(`<system-reminder>${'x'.repeat(102_400)}`)).toEqual({ kind: 'service' })
+  expect(promptKind(`${REMINDER('a')}${'x'.repeat(102_400)}${REMINDER('b')}`)).toEqual({ kind: 'service' })
+  expect(promptKind(`${'x'.repeat(102_400)}${REMINDER('b')}`)).toEqual({ kind: 'prompt', text: 'x'.repeat(102_400) })
+  expect(performance.now() - started).toBeLessThan(300)
+})
+
+// The Log lines of the end of a subagent and of a task are built here, so that the restore draws them as live does.
+test('agentOutcome and taskLine word the end of a subagent and of a task', () => {
+  const row: AgentRow = { ...agent('done', 0), costUsd: 0.5 }
+  expect(agentOutcome('done', row, 2500, '**ok** answer'))
+    .toEqual({ text: 'done · $0.500 — ok answer', outcome: '✓ 2.5s' })
+  expect(agentOutcome('done', agent('done', 0), 2500, '')).toEqual({ text: 'done', outcome: '✓ 2.5s' })
+  expect(agentOutcome('failed', row, 2500, 'x')).toEqual({ text: 'failed', outcome: '✗ 2.5s' })
+  expect(agentOutcome('stopped', row, 2500, 'x')).toEqual({ text: 'stopped', outcome: '2.5s' })
+  const ran: TaskRow = { ...task('done', 0), durationMs: 3000 }
+  expect(taskLine('done', ran)).toEqual({ text: 'done · shell: d', kind: 'ok', outcome: '✓ 3.0s' })
+  expect(taskLine('failed', { ...ran, durationAtMost: true }))
+    .toEqual({ text: 'failed · shell: d', kind: 'error', outcome: '✗ \u{2264}3.0s' })
+  expect(taskLine('stopped', { ...ran, durationMs: null }))
+    .toEqual({ text: 'stopped · shell: d', kind: 'info', outcome: undefined })
+  expect(TASK_END).toEqual({ completed: 'done', failed: 'failed', killed: 'stopped', stopped: 'stopped' })
 })
 
 test('finishTask ends the row: the status, the end time, and a duration from the notification or the clock', () => {

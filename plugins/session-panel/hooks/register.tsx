@@ -11,11 +11,13 @@ import type {
 } from 'claude-code'
 
 import {
-  addAgentCost, attributeCost, computeTurnStats, engineTag, finishTask, fmtDuration, fmtTokens, fmtUsd, LOG_TEXT_MAX,
-  logHead, parseStatus, parseTaskNotification, plainText, pushLog, redact, shortType, shorten, stripFormat, sumNumstat,
-  taskFromCall, toolLabel,
+  addAgentCost, agentOutcome, attributeCost, computeTurnStats, finishTask, fmtDuration, fmtTokens, LOG_TEXT_MAX,
+  logHead, parseStatus, parseTaskNotification, promptKind, pushLog, redact, shortType, shorten, stripFormat,
+  sumNumstat, TASK_END, taskFromCall, taskLine, toolLabel,
 } from './stats'
-import type { AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, TaskEnd, TaskRow, Usage } from './stats'
+import type {
+  AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, TaskEndStatus, TaskRow, Usage,
+} from './stats'
 import { renderPane } from './view'
 import type { PaneData, SectionId } from './view'
 
@@ -40,15 +42,6 @@ const TICK_MS = 30_000
 
 // The words $.agent.list() uses for how a subagent ended; any other word (`running` too) leaves the row as it is.
 const LISTED_STATUS: Record<string, AgentStatus> = { completed: 'done', failed: 'failed', killed: 'stopped' }
-
-// The statuses that the row of a task takes when it ends.
-type TaskEndStatus = 'done' | 'failed' | 'stopped'
-
-// How the notice of a task words its end, and the status its row takes: `killed` and `stopped` are both a stop. Not
-// LISTED_STATUS, which is for $.agent.list() and has no `stopped`.
-const TASK_END: Record<TaskEnd['status'], TaskEndStatus> = {
-  completed: 'done', failed: 'failed', killed: 'stopped', stopped: 'stopped',
-}
 
 // The tools that start a subagent (`Task` is the name of `Agent` in older builds).
 const SPAWN_TOOLS: string[] = ['Agent', 'Task']
@@ -258,41 +251,6 @@ const usageFields = (
     kind: stripFormat(r.kind), percentUsed: r.percentUsed, resetsAt: toMs(r.resetsAt),
   })),
 })
-
-// The log line of a subagent that has ended: its text, and its outcome, the time it took behind a mark (✓ for an
-// answer, ✗ for a failure; a stop is no fault, so it has no mark). One that still runs has no outcome, so its status
-// is not a parameter.
-const agentOutcome = (
-  status: 'done' | 'failed' | 'stopped', row: AgentRow, durationMs: number, answer: string,
-): { text: string; outcome: string } => {
-  const took = fmtDuration(durationMs)
-  if (status === 'stopped') return { text: status, outcome: took }
-  if (status !== 'done') return { text: status, outcome: `✗ ${took}` }
-  // The format and control characters go first and the head is cut (logHead), then the marks, then the secrets: no pass
-  // that takes quadratic time reads more than the head. The answer is markdown, which the pane shows as it is: its
-  // marks go after its format and control characters, as one beside a mark (a BOM after `**`) hides it from plainText.
-  const said = shorten(redact(plainText(logHead(answer))), LOG_TEXT_MAX)
-  const head = row.costUsd === null ? 'done' : `done · ${fmtUsd(row.costUsd)}`
-
-  return { text: said === '' ? head : `${head} — ${said}`, outcome: `✓ ${took}` }
-}
-
-// The log line of a task that has ended, drawn as the end of a subagent is (agentOutcome): the text is the status, the
-// kind and what the task was; the outcome is the time it ran behind a mark (✓ for a task that finished, ✗ for one that
-// failed; a stop is no fault, so it has no mark). A task whose time is not known has no outcome, and a time that is a
-// bound (durationAtMost) has `≤` before it.
-const taskLine = (
-  status: TaskEndStatus, row: TaskRow,
-): { text: string; kind: LogKind; outcome: string | undefined } => {
-  const mark = status === 'done' ? '✓ ' : status === 'failed' ? '✗ ' : ''
-  const bound = row.durationAtMost === true ? '\u{2264}' : ''
-
-  return {
-    text: shorten(`${status} · ${row.kind}: ${row.description}`, LOG_TEXT_MAX),
-    kind: status === 'done' ? 'ok' : status === 'stopped' ? 'info' : 'error',
-    outcome: row.durationMs === null ? undefined : `${mark}${bound}${fmtDuration(row.durationMs)}`,
-  }
-}
 
 // Whether a value of the store is a map of booleans, the shape of the folded sections: an object that is neither null
 // nor an array, with booleans only in it.
@@ -882,16 +840,18 @@ export const register: Register = on => {
     await update($, turnAtom, () => ({
       turnId: e.turnId, startedAt: now, costAtStart: cost?.usd ?? null, steps: [], toolIntervals: [],
     }))
-    // A turn the engine started on its own opens with a hyphenated lowercase tag (engineTag: `<task-notification>`);
-    // its line is the name of the tag. Any other prompt is the person's, one that opens with a pasted `<token…` or
-    // `<div class=…>` too, and its line is its head. Either line is masked: a tag can be a lowercase token. A turn with
-    // no text (a continuation) is no line of the log, and nor is one with the text of a message that has its line
-    // already (queued).
+    // A turn the engine started on its own opens with a hyphenated lowercase tag (promptKind, engineTag:
+    // `<task-notification>`); its line is the name of the tag. Reminder blocks before the text are skipped, and a text
+    // that is only such blocks, or a compaction summary, has no line. Any other prompt is the person's, one that opens
+    // with a pasted `<token…` or `<div class=…>` too, and its line is its head. Either line is masked: a tag can be a
+    // lowercase token. A turn with no text (a continuation) is no line of the log, and nor is one with the text of a
+    // message that has its line already (queued).
     if (e.text.trim() !== '' && !queued.includes(e.text)) {
-      const tag = engineTag(e.text)
-      await addLog(
-        $, now, tag === undefined ? 'you' : 'engine', shorten(redact(tag ?? logHead(e.text)), LOG_TEXT_MAX), 'info',
-      )
+      const shown = promptKind(e.text)
+      if (shown.kind === 'tag' || shown.kind === 'prompt') {
+        const [who, head] = shown.kind === 'tag' ? ['engine', shown.tag] : ['you', logHead(shown.text)]
+        await addLog($, now, who, shorten(redact(head), LOG_TEXT_MAX), 'info')
+      }
     }
 
     return started
@@ -1089,7 +1049,10 @@ export const register: Register = on => {
       if (text.trim() !== '') {
         unfolded = [...unfolded, text].slice(-8)
         const at = (await arrival) ?? (await $.clock.now())
-        await addLog($, at, 'you', shorten(redact(logHead(text)), LOG_TEXT_MAX), 'info')
+        const shown = promptKind(text)
+        if (shown.kind !== 'service') {
+          await addLog($, at, 'you', shorten(redact(logHead(shown.text)), LOG_TEXT_MAX), 'info')
+        }
       }
     }
     // The notice of a background task is the engine's word that the task is over, and how it ended. Only a prompt that

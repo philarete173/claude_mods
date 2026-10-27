@@ -3332,6 +3332,39 @@ test('turn.start logs a prompt as you, redacted and cut to 512, and an engine tu
     expect(state.turn?.turnId).toBe('t5')
   })
 
+// The desktop opens the first prompt after a reopen with reminder blocks: they are no turn of the engine's, and the
+// prompt behind them is the person's (promptKind). A text of reminders alone draws nothing, and a notice is a tag
+// still.
+test('turn.start logs the prompt behind a reminder block as you, and no line for a reminder alone', WITH_READER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+
+    await $.turn.start({ text: '<system-reminder>\nnote\n</system-reminder>\n\nfix the order', turnId: 't1' })
+    await $.turn.start({ text: '<system-reminder>\nnote\n</system-reminder>\n', turnId: 't2' })
+    await $.turn.start({ text: '<task-notification>done</task-notification>', turnId: 't3' })
+
+    const { log } = await readState($)
+    expect(log.map(entry => [entry.who, entry.text, entry.kind])).toEqual([
+      ['engine', 'task-notification', 'info'],
+      ['you', 'fix the order', 'info'],
+    ])
+  })
+
+// The message of another Claude session opens with a fixed line, not a tag: it is a turn of the engine's all the same,
+// and its line is `engine › peer` (promptKind).
+test('turn.start logs a message of another session as the engine\'s `peer`', WITH_READER, async ($, on) => {
+  bottom(on, mock.clock(on))
+  await $.session.start(START)
+
+  await $.turn.start({
+    text: 'Another Claude session sent a message:\n<agent-message from="x">hi</agent-message>', turnId: 't1',
+  })
+
+  const { log } = await readState($)
+  expect(log.map(entry => [entry.who, entry.text, entry.kind])).toEqual([['engine', 'peer', 'info']])
+})
+
 // A turn is the engine's only when its text opens with a tag of the engine's kind (engineTag): a name of lowercase
 // words joined by hyphens, closed by `>` after its attributes, if it has any. What else starts with `<` is the
 // person's, a token or a secret in brackets and markup among it, and its line is the head of the prompt, masked as any
@@ -3956,13 +3989,14 @@ test('a byte order mark inside a URL password does not end the word that the cut
     bottom(on, mock.clock(on))
     await $.session.start(START)
 
-    // 4072 spaces and 19 units of the URL put the mark at the 4092nd unit, and the 4096th is the `p` of `er2pass`.
-    const text = `${' '.repeat(4072)}https://deploy:Hunt\uFEFFer2pass@db.example.com/prod`
+    // An `x` and 4071 spaces (4072 units) and 19 units of the URL put the mark at the 4092nd unit, and the 4096th is
+    // the `p` of `er2pass`. The `x` keeps the spaces: the ones at the start of a prompt are skipped (promptKind).
+    const text = `x${' '.repeat(4071)}https://deploy:Hunt\uFEFFer2pass@db.example.com/prod`
     await $.turn.start({ text, turnId: 't1' })
 
     const { log } = await readState($)
     expect(JSON.stringify(log)).not.toContain('Hunt')
-    expect(log.map(entry => entry.text)).toEqual([''])
+    expect(log.map(entry => entry.text)).toEqual(['x'])
   })
 
 // The same text in the answer of a subagent. The words of the done line come in front of the answer after the cut, so
@@ -5920,6 +5954,28 @@ test('a message of the person that opens with the tag of an engine turn is a you
 
     expect(await logRows($)).toEqual([['you', '<task-notification>done</task-notification>', 'info', undefined]])
   })
+
+// A reminder block before the message is the engine's, not the person's: the line is the message behind it.
+test('a message of the person that has a reminder block before it has the message as its you line', WITH_READER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await startTurn($, 't1')
+
+    await typeOver($, '<system-reminder>\nnote\n</system-reminder>\nuse the cache')
+
+    expect(await logRows($)).toEqual([['you', 'use the cache', 'info', undefined]])
+  })
+
+test('a message of the person that is a reminder block alone has no line', WITH_READER, async ($, on) => {
+  bottom(on, mock.clock(on))
+  await $.session.start(START)
+  await startTurn($, 't1')
+
+  await typeOver($, '<system-reminder>\nnote\n</system-reminder>\n')
+
+  expect(await logRows($)).toEqual([])
+})
 
 // The turn that drains a message skips its line by the text, whatever the label of that line would be: a text with an
 // engine tag at its head would be an `engine` line, and the message has its line already.
