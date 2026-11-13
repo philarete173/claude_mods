@@ -3402,9 +3402,9 @@ test('turn.start logs the prompt behind a reminder block as you, and no line for
     ])
   })
 
-// The message of another Claude session opens with a fixed line, not a tag: it is a turn of the engine's all the same,
-// and its line is `engine › peer` (promptKind).
-test('turn.start logs a message of another session as the engine\'s `peer`', WITH_READER, async ($, on) => {
+// The engine's frame of another Claude session's message opens with a fixed line, not a tag: should a text open with
+// it, it is a turn of the engine's, and its line is `engine › peer` (promptKind).
+test('turn.start logs the frame of another session\'s message as the engine\'s `peer`', WITH_READER, async ($, on) => {
   bottom(on, mock.clock(on))
   await $.session.start(START)
 
@@ -3414,6 +3414,20 @@ test('turn.start logs a message of another session as the engine\'s `peer`', WIT
 
   const { log } = await readState($)
   expect(log.map(entry => [entry.who, entry.text, entry.kind])).toEqual([['engine', 'peer', 'info']])
+})
+
+// A hand-back opens its turn with the tag `<agent-message from="…">` (2.1.321): the engine's line is the tag's name.
+test('turn.start logs a hand-back as the engine\'s agent-message', WITH_READER, async ($, on) => {
+  bottom(on, mock.clock(on))
+  await $.session.start(START)
+
+  await $.turn.start({
+    text: '<agent-message from="scout">\n[Subagent hand-back] The report follows:\n  done\n</agent-message>',
+    turnId: 't1',
+  })
+
+  const { log } = await readState($)
+  expect(log.map(entry => [entry.who, entry.text, entry.kind])).toEqual([['engine', 'agent-message', 'info']])
 })
 
 // A turn is the engine's only when its text opens with a tag of the engine's kind (engineTag): a name of lowercase

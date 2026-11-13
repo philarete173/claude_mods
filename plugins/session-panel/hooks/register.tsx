@@ -11,9 +11,9 @@ import type {
 } from 'claude-code'
 
 import {
-  addAgentCost, agentOutcome, attributeCost, computeTurnStats, endKind, finishTask, fmtDuration, fmtTokens,
-  HANDBACK_TOOL, LOG_MAX, LOG_TEXT_MAX, logText, parseStatus, parseTaskNotification, promptKind, pushLog, redact,
-  shortType, shorten, SPAWN_TOOLS, stripFormat, sumNumstat, TASK_END, taskFromCall, taskLine, toolLabel,
+  addAgentCost, agentOutcome, attributeCost, computeTurnStats, endKind, engineLineText, finishTask, fmtDuration,
+  fmtTokens, HANDBACK_TOOL, LOG_MAX, logText, parseStatus, parseTaskNotification, promptKind, pushLog, shortType,
+  SPAWN_TOOLS, stripFormat, sumNumstat, TASK_END, taskFromCall, taskLine, toolLabel,
 } from './stats'
 import type {
   AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, TaskEndStatus, TaskRow, Usage,
@@ -903,7 +903,7 @@ export const register: Register = on => {
       const shown = promptKind(e.text)
       if (shown.kind === 'tag' || shown.kind === 'prompt') {
         const [who, text] =
-          shown.kind === 'tag' ? ['engine', shorten(redact(shown.tag), LOG_TEXT_MAX)] : ['you', logText(shown.text)]
+          shown.kind === 'tag' ? ['engine', engineLineText(shown.tag)] : ['you', logText(shown.text)]
         await addLog($, now, who, text, 'info')
       }
     }

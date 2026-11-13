@@ -4,8 +4,8 @@
 // may answer the call): a row or a field of the wrong type counts as absent, ids key Maps only, and nothing read from
 // the rows is kept but the value returned.
 import {
-  agentOutcome, endKind, HANDBACK_TOOL, LOG_MAX, logText, parseTaskNotification, promptKind, shortType, SPAWN_TOOLS,
-  stripFormat, tagText, TASK_END, taskFromCall, taskLine, toolLabel,
+  agentOutcome, endKind, engineLineText, HANDBACK_TOOL, LOG_MAX, logText, parseTaskNotification, promptKind,
+  shortType, SPAWN_TOOLS, stripFormat, tagText, TASK_END, taskFromCall, taskLine, toolLabel,
 } from './stats'
 import type { AgentRow, LogEntry, LogKind, TaskEndStatus, TaskRow } from './stats'
 
@@ -131,7 +131,8 @@ export function restoreFromMessages(rows: readonly unknown[], alive: ReadonlySet
     if (stopId !== undefined && !isError) close(stopId, 'stopped', null, '')
   }
 
-  for (const row of rows) {
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i]
     const { role, text, toolUses, toolResults } = fieldsOf(row)
     const hasResults = Array.isArray(toolResults)
     if (role === 'user' && !hasResults && typeof text === 'string') {
@@ -144,12 +145,19 @@ export function restoreFromMessages(rows: readonly unknown[], alive: ReadonlySet
       } else if (shown.kind === 'prompt') {
         // A prompt right after tool results is one of the engine's mid-turn rows (a skill body or note), not typed.
         if (!isAfterResults) lines.push(() => entry('you', logText(shown.text), 'info'))
-      } else if (shown.kind === 'tag' && (shown.tag === 'peer' || shown.tag === 'task-notification')) {
-        // The close line first, then the engine's: live, prompt.submit closes the task before turn.start writes.
+      } else if (shown.kind === 'tag') {
+        // A notice closes its task or agent wherever it stands: live, prompt.submit closes it as it arrives. The
+        // close line comes first, then the engine's: live, prompt.submit closes the task before turn.start writes.
         const { tag } = shown
         const end = tag === 'task-notification' ? parseTaskNotification(shown.text) : null
         if (end !== null) close(end.id, TASK_END[end.status], end.durationMs, tagText(shown.text, 'result') ?? '')
-        lines.push(() => entry('engine', tag, 'info'))
+        // The line is the turn's, as turn.start writes it. A turn's text is the newest row of its input that is no
+        // note, so a tag row opened the turn when the next row is the assistant's answer and it does not follow tool
+        // results (a mid-turn row): two notices that one turn answers give one line, and a local command that asks the
+        // model nothing (`/model`, `/compact`) gives none.
+        if (!isAfterResults && fieldsOf(rows[i + 1]).role === 'assistant') {
+          lines.push(() => entry('engine', engineLineText(tag), 'info'))
+        }
       }
     } else if (role === 'assistant' && Array.isArray(toolUses)) {
       for (const use of toolUses) readCall(fieldsOf(use))

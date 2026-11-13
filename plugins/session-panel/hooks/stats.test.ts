@@ -6,6 +6,7 @@ import {
   cacheHitPct,
   computeTurnStats,
   CUT_WORD_MAX,
+  engineLineText,
   engineTag,
   finishTask,
   fmtClock,
@@ -1966,11 +1967,17 @@ test('promptKind names a turn of the engine\'s and a compaction summary behind t
   expect(promptKind(`${REMINDER('a')}\n${summary}`)).toEqual({ kind: 'summary', text: summary })
 })
 
-// Another session's message opens with a fixed line; a peer is the engine's turn, drawn as the tag `peer`.
-test('promptKind names a message of another session `peer`, and draws nothing for the notes of the engine', () => {
+// The engine's frame of another session's message opens with a fixed line; it is the tag `peer`.
+test('promptKind names the engine\'s frame of a session\'s message `peer`, and draws nothing for its notes', () => {
   const peer = 'Another Claude session sent a message:\n<agent-message from="x">hi</agent-message>'
   expect(promptKind(peer)).toEqual({ kind: 'tag', tag: 'peer', text: peer })
   expect(promptKind(`${REMINDER('a')}\n${peer}`)).toEqual({ kind: 'tag', tag: 'peer', text: peer })
+  const working =
+    'Another Claude session sent a message while you were working:\n<agent-message from="x">hi</agent-message>'
+  expect(promptKind(working)).toEqual({ kind: 'tag', tag: 'peer', text: working })
+  // A hand-back opens with the tag itself, and that is its name.
+  const handBack = '<agent-message from="scout">\n[Subagent hand-back] done\n</agent-message>'
+  expect(promptKind(handBack)).toEqual({ kind: 'tag', tag: 'agent-message', text: handBack })
   for (const text of [
     '[Image: source: /tmp/a.png]', 'Base directory for this skill: /x/y', '[Request interrupted by user]',
     '[Request interrupted by user for tool use]', `${REMINDER('a')}\n[Image: source: /tmp/a.png]`,
@@ -2207,4 +2214,12 @@ test('fmtCountdown', () => {
 test('fmtClock', () => {
   expect(fmtClock(Date.now())).toMatch(/^\d\d:\d\d:\d\d$/)
   expect(fmtClock(new Date(2026, 0, 15, 3, 4, 5).getTime())).toBe('03:04:05') // local time, zero-padded
+})
+
+test('engineLineText is the tag\'s name, masked and cut as the Log draws it', () => {
+  expect(engineLineText('task-notification')).toBe('task-notification')
+  const token = `ghp_${'a1'.repeat(18)}`
+  expect(token).toHaveLength(40)
+  expect(engineLineText(token)).not.toContain(token)
+  expect(engineLineText(token)).toBe(shorten(redact(token), LOG_TEXT_MAX))
 })

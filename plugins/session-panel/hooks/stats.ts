@@ -817,8 +817,11 @@ export function engineTag(text: string): string | undefined {
 // after it is `service` too: a known cost, for the tail may hold what a reminder holds). With no block before it, a
 // reminder after the prompt is cut off, not drawn; a closing tag with no opening one before it is a tail again. The
 // notes that the engine puts in the person's turn (an image's source, a skill's folder, an interrupt) are `service`;
-// another session's message is the tag `peer`. The `text` of the other kinds is the remainder, which the caller cleans
-// and masks as any text it draws.
+// the engine's frame of a message from another session or agent (`Another Claude session sent a message:`, or `… while
+// you were working:`, each whole) is the tag `peer`. The engine keeps that frame on meta rows, which neither turn.start
+// nor `messages()` gives (2.1.321: a hand-back opens its turn with `<agent-message from="…">`), so the rule is a
+// fail-safe that keeps such a text from reading as the person's. The `text` of the other kinds is the remainder, which
+// the caller cleans and masks as any text it draws.
 export type PromptKind =
   | { kind: 'prompt'; text: string }
   | { kind: 'tag'; tag: string; text: string }
@@ -828,8 +831,14 @@ export type PromptKind =
 const REMINDER_OPEN = '<system-reminder>'
 const REMINDER_CLOSE = '</system-reminder>'
 const SUMMARY_START = 'This session is being continued from a previous conversation'
-const PEER_START = 'Another Claude session sent a message:'
+const PEER_STARTS = [
+  'Another Claude session sent a message:', 'Another Claude session sent a message while you were working:',
+]
 const SERVICE_STARTS = ['[Image: source: ', 'Base directory for this skill: ', '[Request interrupted by user']
+
+// The Log text of a turn that the engine opened: the tag's name, masked (a lowercase token in brackets has a tag's
+// shape) and cut, live (turn.start) and restored.
+export const engineLineText = (tag: string): string => shorten(redact(tag), LOG_TEXT_MAX)
 
 export function promptKind(text: string): PromptKind {
   const clean = stripFormat(text)
@@ -859,7 +868,7 @@ export function promptKind(text: string): PromptKind {
   const tag = engineTag(rest)
   if (tag !== undefined) return { kind: 'tag', tag, text: rest }
   if (rest.startsWith(SUMMARY_START)) return { kind: 'summary', text: rest }
-  if (rest.startsWith(PEER_START)) return { kind: 'tag', tag: 'peer', text: rest }
+  if (PEER_STARTS.some(start => rest.startsWith(start))) return { kind: 'tag', tag: 'peer', text: rest }
 
   return SERVICE_STARTS.some(start => rest.startsWith(start)) ? { kind: 'service' } : { kind: 'prompt', text: rest }
 }
