@@ -323,7 +323,8 @@ async function addLog(
 // in the agents atom, whose line says `agent`. The row decides, not the label: a subagent's type may be named `agent`.
 async function whoIs($: EngineInterface, agentId: string | undefined): Promise<{ who: string; isUnknown: boolean }> {
   if (agentId === undefined) return { who: 'main', isUnknown: false }
-  const row = (await read($, agentsAtom))[agentId]
+  const rows = await read($, agentsAtom)
+  const row = Object.hasOwn(rows, agentId) ? rows[agentId] : undefined
 
   return row === undefined ? { who: 'agent', isUnknown: true } : { who: shortType(row.type), isUnknown: false }
 }
@@ -721,7 +722,7 @@ async function readAndCharge($: EngineInterface, agentId: string | undefined): P
   await update($, usageAtom, held => ({ ...held, costUsd: cost.usd }))
   if (agentId === undefined || charged.delta === 0) return
   await update($, agentsAtom, rows => {
-    const row = rows[agentId]
+    const row = Object.hasOwn(rows, agentId) ? rows[agentId] : undefined
 
     return row === undefined ? rows : { ...rows, [agentId]: addAgentCost(row, charged.delta) }
   })
@@ -1075,11 +1076,11 @@ export const register: Register = on => {
     await chargeCost($, agentId).catch(() => undefined)
     const status: AgentStatus = e.isAborted ? 'stopped' : e.reason === 'answer' ? 'done' : 'failed'
     const rows = await update($, agentsAtom, held => {
-      const row = held[agentId]
+      const row = Object.hasOwn(held, agentId) ? held[agentId] : undefined
 
       return row === undefined ? held : { ...held, [agentId]: { ...row, status, endedAt: now } }
     })
-    const row = rows[agentId]
+    const row = Object.hasOwn(rows, agentId) ? rows[agentId] : undefined
     if (row !== undefined) {
       const { text, outcome } = agentOutcome(status, row, e.durationMs, answer)
       await addLog($, now, shortType(row.type), text, endKind(status), outcome)

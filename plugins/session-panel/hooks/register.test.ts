@@ -6923,12 +6923,11 @@ test('an id that the agents record inherits is no held row', SLOW_READER, async 
   await clock.advance(1)
   await $.turn.start({ text: 'go', turnId: 't1' })
   await $.agent.spawn(SPAWN)
-  const version = await agentsVersion($)
+  const held = (await readState($)).agents
 
-  await runStep($, clock, { turnId: 't1', index: 1, agentId: 'constructor' })
-  await clock.advance(10)
+  await chargedAfter($, clock, w, 'constructor', 0.25) // a cost to charge: no row to charge it to
   expect(Object.hasOwn((await readState($)).agents, 'constructor')).toBe(false)
-  expect(await agentsVersion($)).toBe(version)
+  expect((await readState($)).agents).toEqual(held)
 
   await $.agent.spawn(resumeOf('constructor'))
   const state = await readState($)
@@ -6936,6 +6935,25 @@ test('an id that the agents record inherits is no held row', SLOW_READER, async 
   expect(state.agents.constructor).toMatchObject({ type: 'engineer', status: 'running' })
   expect(await texts($)).toContain(RESUMED)
   expect(w.spawns).toBe(1)
+})
+
+test('a call and an end of an agent that the agents record inherits write no row', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+
+  const called = await drive(clock, $.tool.call({ tool: 'Bash', command: 'ls', agentId: 'constructor' } as never))
+  const ended = await $.turn.complete({
+    answer: 'done', durationMs: 5, isAborted: false, turnId: 't1', agentId: 'constructor', reason: 'answer',
+  })
+
+  expect(called).toMatchObject({ result: { stdout: 'ok' }, text: 'ok' })
+  expect(ended).toEqual({ text: 'done' })
+  const state = await readState($)
+  expect(Object.keys(state.agents ?? {})).toEqual([])
+  expect(state.log.map(line => [line.who, line.text])).toEqual([['agent', 'Bash ls'], ['you', 'go']]) // no end line
 })
 
 // The restore (0.6.0): the pane is rebuilt from the session's messages at session.start when its state is empty, and
@@ -7182,6 +7200,24 @@ test('a row written before the first main turn keeps the fallback restore out', 
   const lists = w.lists
   await clock.advance(30_000)
   expect(w.lists).toBe(lists + 1)
+})
+
+test('a session that starts with a line in the Log and no row restores nothing', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await drive(clock, $.tool.call({ tool: 'Bash', command: 'ls' } as never)) // a hot reload keeps a line, no row
+  const seeded = await readState($)
+  expect([Object.keys(seeded.agents ?? {}), Object.keys(seeded.tasks ?? {}), seeded.log.length]).toEqual([[], [], 1])
+  w.messages = ROWS
+
+  await $.session.start(START)
+  await clock.advance(10)
+
+  expect(w.lists).toBe(0)
+  const state = await readState($)
+  expect([Object.keys(state.agents ?? {}), Object.keys(state.tasks ?? {})]).toEqual([[], []])
+  expect(state.log).toEqual(seeded.log)
+  expect(state.logCount).toBe(seeded.logCount)
 })
 
 for (const resets of [['clear'], ['resume', 'clear']] as const) {

@@ -227,7 +227,7 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
 - What: from the newest 4096 rows of the main conversation, walked from the latest compaction summary on. Subagents:
   every Agent call that has an agent id, `done` or `failed` by its result, `done`, `failed` or `stopped` by a task
   notice or a `TaskStop`, else `running` when the engine still lists it alive, or `ended`. Tasks: the background calls,
-  closed by notices or `TaskStop`, else `ended`. The Log: prompts, other agents' messages, the turns the engine opened,
+  closed by notices or `TaskStop`, else `ended`. The Log: prompts, the turns the engine opened,
   as live (`engine › task-notification`, a `!` command or a skill's command that the model answered; a local command
   that asks the model nothing has no line), task notices, subagent and task lines, and the main agent's tool calls with
   `✓` or `✗`; the newest 200 are kept, and the header counts all.

@@ -6,7 +6,7 @@
   stopped, the engine waking a parked one) raises the spawn again, with `resume`. The pane rebuilt the row: the subagent
   lost its start and its cost (which moved to Session), and the Log said `spawned`. The row now runs again with its
   start and its cost, and the Log says `resumed · type: …`. A subagent with no row (one from before the restore's rows)
-  is listed with `restored: true` and its cost since the resume (`$x+`), logged `resumed` too.
+  is listed as restored, its cost since the resume (`$x+`), logged `resumed` too.
 - The restore draws the engine's turns as live does. A turn that the engine opened is logged `engine › <tag>` live
   (`task-notification`, a `!` command's `bash-stdout`, a skill's slash command `command-message`); after a reopen it has
   the same line now, when the assistant's row comes next and does not follow tool results. A local command that asks the

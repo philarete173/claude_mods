@@ -472,7 +472,8 @@ const QUOTED_AUTHORIZATION = new RegExp(
 // required: `the token count` and `"tokens"` are no key. The `access` and `auth` token names and the `client` secret
 // name are covered by `token` and `secret` already (no `\b` keeps them out), so they widen nothing. Left as they are: a
 // nested value (`{"password": {"value": …}}`), the later items of a list, a bare value cut at `, ; ) ] }`, a quoted
-// value across a line end, and a literal (NOT_LITERAL).
+// value across a line end, a literal (NOT_LITERAL), and a bare number after a counter's name (COUNTER_BEFORE, in
+// redact).
 const QUOTED_KEY = new RegExp(
   // The name, its quote and its separator, then the gap: any whitespace before a quoted value, and before a bare one
   // any but a line end (CR, LF, and the line and paragraph separators U+2028 and U+2029), so a tab, a no-break space

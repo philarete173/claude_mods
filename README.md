@@ -67,9 +67,10 @@ Then start a new session.
 - Git runs read-only commands only (`branch`, `rev-parse`, `status` and `diff`), in the session's folder.
 - Nothing is written to disk except the fold state, in the plugin store.
 - To rebuild the pane on a reopen or a resume, it reads the session's transcript through the engine, tool results
-  included. It draws only prompts, call labels, subagent descriptions and answers, and task descriptions, masked
-  best-effort as live lines are, so a reopen shows earlier prompts and commands again. Nothing from it is written or
-  sent; it stays in session plugin state, which other plugins can read.
+  included. It draws only prompts, call labels, subagent descriptions and answers, task descriptions, and the name of
+  the tag that opened a turn (not its body or attributes), masked best-effort as live lines are, so a reopen shows
+  earlier prompts and commands again. Nothing from it is written or sent; it stays in session plugin state, which
+  other plugins can read.
 
 The details are in [the plugin's README](plugins/session-panel/README.md).
 
