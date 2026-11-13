@@ -27,6 +27,17 @@ export type Restored = {
 const MODEL_MAX = 64
 // The longest tool name a call keeps, in UTF-16 units (API names are 128 at most): toolLabel's pattern is quadratic.
 const TOOL_NAME_MAX = 256
+// The engine's sentences that stand where a subagent's answer would (2.1.321): it ended with no report (its last text
+// is dropped), or its report came as a message (a hand-back, which messages() does not give). A result that holds one
+// is no answer, so the end line has none. Whole sentences of the engine, not words that prose may hold.
+const NO_ANSWER_NOTES = [
+  'The subagent ended without delivering a report through SubagentHandback',
+  'This agent\'s report was delivered to you as a message from "',
+]
+// The engine's sentence for an agent that has stopped its turn but still waits on its own background work: its notice
+// is no end, and a later one closes it.
+const WAITING_NOTE = 'This agent has not reported yet:'
+const answerOf = (text: string): string => (NO_ANSWER_NOTES.some(note => text.includes(note)) ? '' : text)
 
 // A value read as a record of fields, or as a string; a value of another type counts as absent.
 const fieldsOf = (v: unknown): Record<string, unknown> =>
@@ -108,7 +119,7 @@ export function restoreFromMessages(rows: readonly unknown[], alive: ReadonlySet
       } else if (got.status === 'completed') {
         const ms = use.durationMs
         const durationMs = typeof ms === 'number' && Number.isSafeInteger(ms) && ms >= 0 ? ms : null
-        endAgent(row, 'done', durationMs, textOf(use.text) ?? '')
+        endAgent(row, 'done', durationMs, answerOf(textOf(use.text) ?? ''))
       }
       return
     }
@@ -150,7 +161,10 @@ export function restoreFromMessages(rows: readonly unknown[], alive: ReadonlySet
         // close line comes first, then the engine's: live, prompt.submit closes the task before turn.start writes.
         const { tag } = shown
         const end = tag === 'task-notification' ? parseTaskNotification(shown.text) : null
-        if (end !== null) close(end.id, TASK_END[end.status], end.durationMs, tagText(shown.text, 'result') ?? '')
+        const result = end === null ? '' : (tagText(shown.text, 'result') ?? '')
+        if (end !== null && !result.includes(WAITING_NOTE)) {
+          close(end.id, TASK_END[end.status], end.durationMs, answerOf(result))
+        }
         // The line is the turn's, as turn.start writes it. A turn's text is the newest row of its input that is no
         // note, so a tag row opened the turn when the next row is the assistant's answer and it does not follow tool
         // results (a mid-turn row): two notices that one turn answers give one line, and a local command that asks the

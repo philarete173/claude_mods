@@ -450,6 +450,56 @@ test('only a running row closes: a notice after a TaskStop, and the same notice 
   ])
 })
 
+// The engine's own sentences that stand where a subagent's answer would (2.1.321).
+const NO_REPORT = 'The subagent ended without delivering a report through SubagentHandback, so no report was ' +
+  'delivered. Its unsent text is not shown. Send the agent a message (SendMessage) to ask it to deliver its report.'
+const HANDED_BACK = 'This agent\'s report was delivered to you as a message from "scout" (its SubagentHandback ' +
+  'call). Read it there; it is not repeated here.'
+const WAITING = 'This agent has not reported yet: it is waiting on its own background work.'
+// A restored a1 closed by one notice that carries that result, as its end line says it.
+const endedBy = (result: string): string[] => said(restore([
+  assistant(launched('a1')),
+  user(notice('a1', 'completed', 'done', `<result>${result}</result>\n${usageBlock(65_000)}`)), assistant(),
+])).slice(0, 2)
+
+test('a restored end line shows no engine note for an answer, but the answer when there is one', () => {
+  expect(endedBy(NO_REPORT)).toEqual(['engine: task-notification', 'Explore: done ✓ 1m 05s'])
+  expect(endedBy(`\u{26A0} The agent reached its turn limit.\n${NO_REPORT}`))
+    .toEqual(['engine: task-notification', 'Explore: done ✓ 1m 05s'])
+  expect(endedBy(HANDED_BACK)).toEqual(['engine: task-notification', 'Explore: done ✓ 1m 05s'])
+  expect(endedBy('All green')).toEqual(['engine: task-notification', 'Explore: done — All green ✓ 1m 05s'])
+  // Prose that holds some of the words is an answer.
+  expect(endedBy('CI has not reported yet, so I stopped.'))
+    .toEqual(['engine: task-notification', 'Explore: done — CI has not reported yet, so I stopped. ✓ 1m 05s'])
+})
+
+test('a notice of an agent that has not reported yet closes nothing, a later one closes it', () => {
+  const waits = user(notice('a1', 'completed', 'done', `<result>${WAITING}</result>\n${usageBlock(5000)}`))
+  const alone = restore([assistant(launched('a1')), waits, assistant()], new Set(['a1']))
+  expect(alone.agents).toEqual({ a1: agentRow('a1', 'running') })
+  expect(said(alone)).toEqual(['engine: task-notification', 'main: spawned · Explore: Map the flow'])
+  expect(restore([assistant(launched('a1')), waits, assistant()]).agents).toEqual({ a1: agentRow('a1', 'ended') })
+  const later = restore([
+    assistant(launched('a1')), waits, assistant(),
+    user(notice('a1', 'completed', 'done', `<result>All green</result>\n${usageBlock(65_000)}`)), assistant(),
+  ])
+  expect(later.agents).toEqual({ a1: agentRow('a1', 'done') })
+  expect(said(later)).toEqual([
+    'engine: task-notification', 'Explore: done — All green ✓ 1m 05s', 'engine: task-notification',
+    'main: spawned · Explore: Map the flow',
+  ])
+})
+
+test('a foreground agent that completed with an engine note has no answer on its end line', () => {
+  const done = call('Agent', AGENT_INPUT, {
+    agentId: 'a1', result: { status: 'completed', totalDurationMs: 65_000, agentId: 'a1' }, text: NO_REPORT,
+    durationMs: 65_000,
+  })
+  expect(said(restore([user('map it'), assistant(done), results()]))).toEqual([
+    'Explore: done ✓ 1m 05s', 'main: spawned · Explore: Map the flow', 'you: map it',
+  ])
+})
+
 test('a TaskStop that failed closes nothing', () => {
   const stop = call('TaskStop', { task_id: 'b1' }, { result: 'No task b1', text: 'No task b1', isError: true })
   const restored = restore([assistant(bash('b1', DEV), launched('a1')), assistant(stop, call('TaskStop', {
