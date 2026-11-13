@@ -486,13 +486,15 @@ test('stripFormat reads 128 KB of unfinished sequences and of invisibles once: m
 // its value: each is read in one pass; so are a backtick before a long scheme, 128 KB of no-break spaces after a
 // scheme, a long second word after a scheme and a long token after a Bearer. The same for a `_key` name: a gap with no
 // separator behind it, an unclosed value in each kind of quote, a run of `-`, a flag with no name in it, the AWS name
-// and a gap, names in a row, a long number after a quoted key, and a long word after a key.
+// and a gap, names in a row, a long number after a quoted key (masked, but after a counter's name as typed, and a row
+// of counters), and a long word after a key.
 test('redact reads 128 KB of an unclosed quoted value and of a gap after a key once: milliseconds, not seconds', () => {
   const gap = ' '.repeat(131_072)
   const long = 'a'.repeat(131_072)
   const kept = [
     `secret_key${gap}x`, `--secret-key${gap}`, '-'.repeat(131_072), `--${long}`, '--x '.repeat(32_768),
-    `aws_secret_access_key${gap}`, 'secret_key '.repeat(11_916), `"token": ${'1'.repeat(131_072)}`,
+    `aws_secret_access_key${gap}`, 'secret_key '.repeat(11_916), `"max_token": ${'1'.repeat(131_072)}`,
+    '"max_token": 1, '.repeat(16_384),
   ]
   const started = performance.now()
   for (const text of kept) expect(redact(text) === text, text.slice(0, 24)).toBe(true)
@@ -503,6 +505,7 @@ test('redact reads 128 KB of an unclosed quoted value and of a gap after a key o
   expect(redact(`secret_key="${'\\a'.repeat(65_536)}`)).toBe('secret_key=•••')
   // Each name is the value of the one before it, and an anchor of its own: the last, with nothing after it, is masked.
   expect(redact('secret_key:'.repeat(11_916))).toBe(`${'secret_key:'.repeat(11_915)}•••`)
+  expect(redact(`"token": ${'1'.repeat(131_072)}`)).toBe('"token": •••')
   expect(redact(`"token": ${'1'.repeat(131_072)}x`)).toBe('"token": •••')
   // The check for an anchor at the start of a bare value reads a long word once.
   expect(redact(`secret_key=--${long}`)).toBe('secret_key=•••')
@@ -1574,21 +1577,63 @@ test('redact leaves a flag or a key that begins the value of a key to its own pa
 })
 
 // A bare value after a quoted key that is a literal (`true`, `false`, `null` or `none` in any case, as a Python dict
-// writes `True` and `None`) or a number, and that a space, `,`, `;` or a closing bracket or the end of the text
-// follows, is no secret: it stays. A value that only begins with one (`120abc`, `0x1F`, `falsey`), a quoted one and a
-// Bearer credential are masked as before.
-test('redact leaves a number, true, false, null and none after a quoted key as they are', () => {
+// writes `True` and `None`) stays after every name when a space, `,`, `;`, a closing bracket or the end of the text
+// follows it. A bare number stays only after a counter's name (`max` or `min`, then `_`, `-` or nothing, then `token`,
+// the whole name in a key's own quotes) and is masked after every other quoted secret name. A value that only begins
+// with a literal or a number (`120abc`, `0x1F`, `falsey`), a quoted one and a Bearer credential are masked.
+test('redact leaves a literal after a quoted key and a number after a counter name, and masks any other number', () => {
   const kept = [
-    '{"max_token": 4096, "secret": false}', '"token": 120', "{'password': None}", '"token": null,', '"pwd": -1.5e3}',
-    '"token": 120]',
+    '{"max_token": 4096, "secret": false}', '{"maxToken": 2048}', '{"MIN-TOKEN": 1}', '{"max_token": -1.5e3}',
+    "{'password': None}", '"token": null,', '"secret": true}',
+    // At the very start of the text: the six units before the match are fewer than six.
+    '"maxToken": 2048', '"max_token": 4096',
+    // Other quotes and separators round a counter's name.
+    '\u{201C}max_token\u{201D}: 4096', '`min_token`: 1', "'max_token' => 4096", '"max_token"=4096',
+    '"max_token" : 4096',
+    // A long number after a counter's name and a row of counters: read once.
+    `{"max_token": ${'1'.repeat(1_000)}}`, '"max_token": 1, '.repeat(100),
   ]
   for (const text of kept) expect(redact(text), text).toBe(text)
   const cases: Array<[input: string, want: string]> = [
+    ['{"token": 482913}', '{"token": •••}'],
+    ['curl -d \'{"username":"admin","password":123456}\'', 'curl -d \'{"username":"admin","password":•••}\''],
+    ['"DB_PASSWORD": 12345678', '"DB_PASSWORD": •••'],
+    ["'password' => 123456", "'password' => •••"],
+    ['{"client_secret": 0e47}', '{"client_secret": •••}'],
+    ['"token": 120', '"token": •••'],
+    ['"pwd": -1.5e3}', '"pwd": •••}'],
+    ['"token": 120]', '"token": •••]'],
+    ['{"admin_token": 7}', '{"admin_token": •••}'],
+    ['{"max_auth_token": 7}', '{"max_auth_token": •••}'], // its name is `auth_token`
+    ['{"max_new_token": 5}', '{"max_new_token": •••}'],
+    ['{"secret_key": 8e54632190}', '{"secret_key": •••}'],
+    // Masked as before.
     ['"token": 120abc', '"token": •••'],
     ['"password": "123456"', '"password": •••'],
     ['"token": 0x1F', '"token": •••'],
     ['"secret": falsey', '"secret": •••'],
     ['"token": Bearer 12345678', '"token": •••'],
+    // A counter's name earlier in the text lends nothing to a later key.
+    ['{"max_token": 4096,"password":123456}', '{"max_token": 4096,"password":•••}'],
+    ['{"max_token": 4096, "token": 482913}', '{"max_token": 4096, "token": •••}'],
+    // Near a counter's name, but not one.
+    ['max_token": 4096', 'max_token": •••'],
+    ['{"max_password": 123456}', '{"max_password": •••}'],
+    ['{"min_secret": 482913}', '{"min_secret": •••}'],
+    ['{"max_api_key": 482913}', '{"max_api_key": •••}'],
+    ['{"maxpwd": 1234}', '{"maxpwd": •••}'],
+    ['{"max_access_token": 7}', '{"max_access_token": •••}'],
+    ['{"xmax_token": 7}', '{"xmax_token": •••}'],
+    ['{"max__token": 7}', '{"max__token": •••}'],
+    ['{"TOKEN": 482913}', '{"TOKEN": •••}'],
+    // A quote that is not the key's own opening quote.
+    ['{"secret"max_token": 482913}', '{"secret"max_token": •••}'],
+    ['{"a\\"max_token": 482913}', '{"a\\"max_token": •••}'],
+    ['"password""max_token": 482913', '"password""max_token": •••'],
+    // Under a counter's name, no bare number.
+    ['{"max_token": "4096"}', '{"max_token": •••}'],
+    ['{"max_token": 4096abc}', '{"max_token": •••}'],
+    ['{"max_token": 0x10}', '{"max_token": •••}'],
   ]
   for (const [input, want] of cases) expect(redact(input), JSON.stringify(input)).toBe(want)
 })

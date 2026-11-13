@@ -426,9 +426,19 @@ const INLINE_SPACE = String.raw`[^\S\r\n\u{2028}\u{2029}]`
 // `access_key` and `private_key`, with `_`, `-` or nothing between the words. The patterns that take them ignore case.
 const KEY_NAMES = String.raw`secret[_-]?key(?:[_-]?base)?|access[_-]?key|private[_-]?key`
 
-// No plain value ahead: a bare value that is wholly a literal (`true`, `false`, `null`, `none`: JSON and a Python dict)
-// or a number, with what ends a bare value or the end of the text after it, is no secret.
-const NOT_PLAIN = String.raw`(?!(?:true|false|null|none|[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?:[\s,;}\])]|$))`
+// No literal ahead: a bare value that is wholly a literal (`true`, `false`, `null`, `none`: JSON and a Python dict),
+// with what ends a bare value or the end of the text after it, is no secret. A number is one only after a counter's
+// name (redact).
+const NOT_LITERAL = String.raw`(?!(?:true|false|null|none)(?:[\s,;}\])]|$))`
+
+// A counter's name, after which a bare number is no secret: `max` or `min`, then `_`, `-` or nothing, then `token`,
+// the whole name in a key's quotes (`"max_token": 4096`, `"maxToken": 2048`). QUOTED_KEY's match starts at `token`,
+// so the key's opening quote and the counter word are read in the six characters before it, and before the quote
+// stands the text's start or a character that is no word character, backslash or quote (`{"secret"max_token": 1}` has
+// no counter). Neither pattern is global: `test` keeps no state.
+const COUNTER_BEFORE =
+  /(?:^|[^\w\\"'\x60\u{201C}\u{201D}\u{2018}\u{2019}])["'\x60\u{201C}\u{201D}\u{2018}\u{2019}](?:max|min)[_-]?$/iu
+const BARE_NUMBER = /^[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/u
 
 // No anchor of a later pattern ahead: a bare value does not begin with a flag that SECRETS or UNQUOTED_KEY reads, and
 // what that pattern reads after it (`--token` and `=` or a space, `--secret-key` and `=` or a gap); or with `Bearer`
@@ -462,7 +472,7 @@ const QUOTED_AUTHORIZATION = new RegExp(
 // required: `the token count` and `"tokens"` are no key. The `access` and `auth` token names and the `client` secret
 // name are covered by `token` and `secret` already (no `\b` keeps them out), so they widen nothing. Left as they are: a
 // nested value (`{"password": {"value": …}}`), the later items of a list, a bare value cut at `, ; ) ] }`, a quoted
-// value across a line end, and a plain value (NOT_PLAIN).
+// value across a line end, and a literal (NOT_LITERAL).
 const QUOTED_KEY = new RegExp(
   // The name, its quote and its separator, then the gap: any whitespace before a quoted value, and before a bare one
   // any but a line end (CR, LF, and the line and paragraph separators U+2028 and U+2029), so a tab, a no-break space
@@ -474,9 +484,9 @@ const QUOTED_KEY = new RegExp(
     // The prefix and the value stay on the key's line; a value never starts with `=`. The prefix may open with a
     // backtick that nothing closes (QUOTED_VALUE takes a closed one), as in AUTH_SCHEME: the bare value would otherwise
     // take the backtick and `Bearer` for one word, and the token after it would show. An anchor (NO_ANCHOR) and a
-    // plain value are read before the prefix: after it, `Bearer 12345678` would lose `Bearer` alone and show the
+    // literal are read before the prefix: after it, `Bearer 12345678` would lose `Bearer` alone and show the
     // number.
-    String.raw`(?:${QUOTED_VALUE}|${NO_ANCHOR}${NOT_PLAIN}(?:\x60?(?:bearer|basic)${INLINE_SPACE}+)?` +
+    String.raw`(?:${QUOTED_VALUE}|${NO_ANCHOR}${NOT_LITERAL}(?:\x60?(?:bearer|basic)${INLINE_SPACE}+)?` +
     String.raw`[^\s,;}\])\[{(=][^\s,;}\])]*)`,
   'giu',
 )
@@ -557,7 +567,13 @@ const GLUED_BEARER = /(Bearer)\s+(?![\w.-]*(?:[Aa]uthorization|AUTHORIZATION)\s*
 export function redact(s: string): string {
   const clean = stripFormat(s)
     .replace(QUOTED_AUTHORIZATION, '$1•••')
-    .replace(QUOTED_KEY, '$1•••')
+    .replace(QUOTED_KEY, (match: string, kept: string, offset: number, whole: string) => {
+      // The name is `kept` up to its first quote character; a bare number stays after a counter's name alone.
+      const isCounter = /^token["'\x60\u{201C}\u{201D}\u{2018}\u{2019}]/iu.test(kept) &&
+        COUNTER_BEFORE.test(whole.slice(Math.max(0, offset - 6), offset)) && BARE_NUMBER.test(match.slice(kept.length))
+
+      return isCounter ? match : `${kept}•••`
+    })
     .replace(UNQUOTED_KEY, '$1•••')
     .replace(AUTH_SCHEME, '$1•••')
     .replace(GLUED_TOKEN, '•••')
