@@ -138,6 +138,12 @@ let resetsRunning = 0
 // sets it with reason `resume`, and reason `clear` clears it.
 let isRestoreDue = false
 
+// Whether this module has started the pane (startPane): at session.start, or at the first turn of the main agent when
+// another plugin sent session.start past this one (a managed plugin's `next.to`), or when an event in flight reached a
+// module that loaded mid-session before its session.start did. A module that reloads starts over, and the engine
+// raises session.start for it again. Neither `/clear` nor an in-process resume raises one, so session.end leaves it.
+let isStarted = false
+
 // The statuses of $.agent.list() under which an agent still runs.
 const ALIVE_STATUS = new Set<string>(['pending', 'running', 'waiting', 'idle'])
 
@@ -721,57 +727,74 @@ async function readAndCharge($: EngineInterface, agentId: string | undefined): P
   })
 }
 
+// Asks the restore of the pane: the rows of $.session.messages() and the three atoms, read in the frame of the caller.
+// `turnText` is the text of a turn that runs already, whose own rows are cut; null when no turn runs. It awaits
+// nothing: the reads are asked before any other await, so that no event of the session lands between them. An empty
+// pane is a new process (a reopen, `claude --resume`, the mod enabled mid-session); a hot reload keeps the atoms, and
+// restores nothing.
+function askRestore($: EngineInterface, turnText: string | null): void {
+  const epoch = logEpoch
+  const wasResetting = resetsRunning > 0
+  const asked = $.session.messages().catch(() => null)
+  const isEmpty = Promise.all([read($, agentsAtom), read($, tasksAtom), read($, logAtom)])
+    .then(([agents, tasks, log]) => Object.keys(agents).length + Object.keys(tasks).length + log.length === 0)
+    .catch(() => false)
+  inBackground($, () => restorePane($, asked, isEmpty, turnText, epoch, wasResetting))
+}
+
+// Starts the pane: the command, the cost baseline, the folds, the first reads, the timer, and the pane on a desktop.
+async function startPane($: EngineInterface): Promise<void> {
+  // The command only touches panes, so it may run while a turn is in flight.
+  await $.command.register({
+    name: 'session-panel', description: 'Open the session stats pane', immediate: true,
+  })
+  // The baseline, and the first Total. A reading that fails must not stop the timer or the opening of the pane.
+  await chargeCost($, undefined).catch(() => undefined)
+  // The store holds the map this mod wrote itself, but a file can be edited: what is not a map of booleans is
+  // ignored, and so is a store that cannot be read. A press made while the map was loading wins over it; the atom
+  // starts as `{}`, so with no press the stored map is taken whole.
+  const saved = await $.store.get('collapsed').catch(() => undefined)
+  if (isFoldedMap(saved)) await update($, collapsedAtom, held => ({ ...saved, ...held }))
+  inBackground($, () => refreshUsage($))
+  inBackground($, () => requestProject($))
+  let ticks = 0
+  $.clock.every(TICK_MS, () => {
+    ticks += 1
+    $.ui.invalidate('ui.render')
+    syncAgents($).catch(() => undefined)
+    if (ticks % 2 === 0) {
+      refreshUsage($).catch(() => undefined)
+      // A file that changed outside Claude's tools (an editor, a terminal, a background command that ended after
+      // its call returned) shows without a new turn. The gap rule keeps git to about a quarter of the time
+      // (PROJECT_GAP_FACTOR). The tick asks only for a pane in front of the session's other plugin panes, placed and
+      // shown (the Session pane alone is always in front): until 0.3.0 an idle session ran no git, and a pane that is
+      // closed, waits undrawn or is a tab behind another plugin pane has no one to show the count to. The reads that
+      // follow the person's or the agent's work (turn ends, write calls, CwdChanged) are unchanged, and a pane that
+      // opens asks for one itself. A list of panes that cannot be read asks for nothing.
+      $.clock.now()
+        .then(async now => {
+          const panes = await $.ui.panes()
+          if (panes.some(pane => pane.id === PANE && pane.isPlaced && pane.isShown)) requestProjectLater($, now)
+        })
+        .catch(() => undefined)
+    }
+  })
+  if ((await $.session.surfaces()).includes('desktop')) await $.ui.open({ id: PANE, title: 'Session' })
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    // The session.start restore, when it runs, covers what a due in-process restore would: the two must not both run.
+    // The restore is asked by the first start of this module, and by one that comes after a resume left a restore due
+    // (it covers what the due in-process restore would: the two must not both run). A start after the turn fallback
+    // has asked already: its rows are there.
+    const isDue = !isStarted || isRestoreDue
     isRestoreDue = false
-    // The restore: the rows and the three atoms are read in this frame, before any other await, so that no event of
-    // the session lands between them. An empty pane is a new process (a reopen, `claude --resume`, the mod enabled
-    // mid-session); a hot reload keeps the atoms, and restores nothing.
-    const epoch = logEpoch
-    const wasResetting = resetsRunning > 0
-    const asked = $.session.messages().catch(() => null)
-    const isEmpty = Promise.all([read($, agentsAtom), read($, tasksAtom), read($, logAtom)])
-      .then(([agents, tasks, log]) => Object.keys(agents).length + Object.keys(tasks).length + log.length === 0)
-      .catch(() => false)
-    inBackground($, () => restorePane($, asked, isEmpty, null, epoch, wasResetting))
-    // The command only touches panes, so it may run while a turn is in flight.
-    await $.command.register({
-      name: 'session-panel', description: 'Open the session stats pane', immediate: true,
-    })
-    // The baseline, and the first Total. A reading that fails must not stop the timer or the opening of the pane.
-    await chargeCost($, undefined).catch(() => undefined)
-    // The store holds the map this mod wrote itself, but a file can be edited: what is not a map of booleans is
-    // ignored, and so is a store that cannot be read. A press made while the map was loading wins over it; the atom
-    // starts as `{}`, so with no press the stored map is taken whole.
-    const saved = await $.store.get('collapsed').catch(() => undefined)
-    if (isFoldedMap(saved)) await update($, collapsedAtom, held => ({ ...saved, ...held }))
-    inBackground($, () => refreshUsage($))
-    inBackground($, () => requestProject($))
-    let ticks = 0
-    $.clock.every(TICK_MS, () => {
-      ticks += 1
-      $.ui.invalidate('ui.render')
-      syncAgents($).catch(() => undefined)
-      if (ticks % 2 === 0) {
-        refreshUsage($).catch(() => undefined)
-        // A file that changed outside Claude's tools (an editor, a terminal, a background command that ended after
-        // its call returned) shows without a new turn. The gap rule keeps git to about a quarter of the time
-        // (PROJECT_GAP_FACTOR). The tick asks only for a pane in front of the session's other plugin panes, placed and
-        // shown (the Session pane alone is always in front): until 0.3.0 an idle session ran no git, and a pane that is
-        // closed, waits undrawn or is a tab behind another plugin pane has no one to show the count to. The reads that
-        // follow the person's or the agent's work (turn ends, write calls, CwdChanged) are unchanged, and a pane that
-        // opens asks for one itself. A list of panes that cannot be read asks for nothing.
-        $.clock.now()
-          .then(async now => {
-            const panes = await $.ui.panes()
-            if (panes.some(pane => pane.id === PANE && pane.isPlaced && pane.isShown)) requestProjectLater($, now)
-          })
-          .catch(() => undefined)
-      }
-    })
-    if ((await $.session.surfaces()).includes('desktop')) await $.ui.open({ id: PANE, title: 'Session' })
+    if (isDue) askRestore($, null)
+    if (!isStarted) {
+      isStarted = true
+      await startPane($)
+    }
 
     return started
   })
@@ -874,6 +897,14 @@ export const register: Register = on => {
     }
     const started = await next(e)
     if (!isMain) return started
+    // A start that never came (session.start sent past this module): the first main turn starts the pane and restores
+    // the conversation less its own rows. The reads are asked in this frame; the rest runs in the background.
+    if (!isStarted) {
+      isStarted = true
+      isRestoreDue = false
+      askRestore($, e.text)
+      inBackground($, () => startPane($))
+    }
     // The first main turn after a resume restores the other conversation, less its own rows (cutAtTurn); the read is
     // asked for in this frame, before any other await.
     if (isRestoreDue) {

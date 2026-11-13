@@ -2930,10 +2930,10 @@ test('a wait set after a read of an hour does not outlive the fast read that fol
     const HOUR = 3_600_000
     const clock = mock.clock(on)
     const w = bottom(on, clock)
-    // The session does not start: its timer would ask for a read every minute of that hour, with the pane shown, and
-    // each ask would mark the read under way stale. The attach arms the timer of TICKER, so that the clock moves
-    // fast.
-    await $.session.attach({ surface: 'terminal', clientId: 'terminal:default' })
+    // The session starts, and its reads are done before the lag is set. With no pane listed, its timer asks for no read
+    // in that hour: an ask would mark the read under way stale.
+    await $.session.start(START)
+    await clock.advance(1000)
     w.rootLag = HOUR // the read that the first turn asks for takes an hour: a suspend in the middle of it
     await startTurn($)
     await clock.advance(1 + HOUR)
@@ -7003,15 +7003,15 @@ test('a session that starts with something in the pane restores nothing', SLOW_R
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = bottom(on, clock)
   w.messages = ROWS
-  await $.turn.start({ text: 'hi', turnId: 't1' }) // a hot reload keeps the atoms: a line is there already
+  await $.agent.spawn(SPAWN) // a hot reload keeps the atoms: a row and a line are there already
 
   await $.session.start(START)
   await clock.advance(10)
 
   expect(w.lists).toBe(0)
   const state = await readState($)
-  expect([state.agents, state.tasks, state.log.map(line => line.text), state.logCount]).toEqual([
-    undefined, undefined, ['hi'], 1,
+  expect([Object.keys(state.agents ?? {}), state.tasks, state.log.map(line => line.text), state.logCount]).toEqual([
+    ['a1'], undefined, [SPAWNED], 1,
   ])
 })
 
@@ -7094,6 +7094,95 @@ test('a session.start after a resume restores once: the turn that follows does n
     expect(state.log.map(line => line.text)).toEqual(['go on', ...restored.log.map(line => line.text)])
     expect(state.logCount).toBe(1 + restored.logCount)
   })
+
+// A start that never came (another plugin sent session.start past the mod, or an event in flight reached a module that
+// loaded mid-session): the first main turn starts the pane and restores the conversation less its own rows.
+const ROWS_NEXT = [...ROWS, { role: 'user', text: 'next', toolUses: [] }]
+const PANE_OPENED = [{ id: 'session-panel', title: 'Session' }]
+
+test('with no session.start, the first main turn starts the pane and restores less its own rows', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    w.messages = ROWS_NEXT
+
+    await $.turn.start({ text: 'next', turnId: 't1' })
+    await clock.advance(10)
+
+    expect(w.messageReads).toBe(1)
+    expect(w.registered).toHaveLength(1)
+    expect(w.opened).toEqual(PANE_OPENED)
+    const restored = restoreFromMessages(ROWS, new Set(), ROOT)
+    const state = await readState($)
+    expect(Object.keys(state.agents).sort()).toEqual(['a1', 'a7'])
+    expect(Object.keys(state.tasks)).toEqual(['b7'])
+    expect(state.log.map(line => line.text)).toEqual(['next', ...restored.log.map(line => line.text)])
+    const lists = w.lists
+    await clock.advance(30_000)
+    expect(w.lists).toBe(lists + 1)
+  })
+
+test('a session.start after that starts nothing again', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  w.messages = ROWS_NEXT
+  await $.turn.start({ text: 'next', turnId: 't1' })
+  await clock.advance(10)
+
+  await $.session.start(START)
+  await clock.advance(10)
+
+  expect(w.messageReads).toBe(1)
+  expect(w.registered).toHaveLength(1)
+  expect(w.opened).toEqual(PANE_OPENED)
+  const lists = w.lists
+  await clock.advance(30_000)
+  expect(w.lists).toBe(lists + 1)
+})
+
+test('after session.start, the first main turn starts nothing', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(10)
+
+  await $.turn.start({ text: 'next', turnId: 't1' })
+  await clock.advance(10)
+
+  expect(w.messageReads).toBe(1)
+  expect(w.registered).toHaveLength(1)
+})
+
+test("an agent's turn does not start the pane", SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+
+  await $.turn.start({ text: 'p', turnId: 't1', agentId: 'a1' } as never)
+  await clock.advance(10)
+
+  expect([w.messageReads, w.registered, w.opened]).toEqual([0, [], []])
+})
+
+// The limit of the fallback's restore: a row written before the first main turn makes the pane not empty, and a restore
+// merges only into an empty pane.
+test('a row written before the first main turn keeps the fallback restore out', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  w.messages = ROWS_NEXT
+  await $.agent.spawn(resumeOf('a9', 'p'))
+
+  await $.turn.start({ text: 'next', turnId: 't1' })
+  await clock.advance(10)
+
+  expect(w.messageReads).toBe(1)
+  expect(w.registered).toHaveLength(1)
+  expect(w.opened).toEqual(PANE_OPENED)
+  const state = await readState($)
+  expect([Object.keys(state.agents), state.tasks]).toEqual([['a9'], undefined])
+  const lists = w.lists
+  await clock.advance(30_000)
+  expect(w.lists).toBe(lists + 1)
+})
 
 for (const resets of [['clear'], ['resume', 'clear']] as const) {
   test(`no restore at the next turn after ${resets.join(' then ')}`, SLOW_READER, async ($, on) => {
