@@ -688,7 +688,10 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
   on('prompt.submit', (_$, e) => ({ text: e.text, origin: e.origin }))
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
-  on('agent.spawn', () => {
+  on('agent.spawn', (_$, e) => {
+    // The engine settles a resume with the agent's own id, and it is no new spawn (2.1.308 has `resume`, 2.1.288 none).
+    const { resume } = e as { resume?: { agentId: string } }
+    if (resume !== undefined) return { model: 'claude-sonnet-5', agentId: resume.agentId } as never
     w.spawns += 1
 
     return { model: 'claude-sonnet-5', agentId: `a${w.spawns}` }
@@ -6799,6 +6802,127 @@ test('a restored subagent that is resumed: the resumed line, then `$x+` in its c
     expect(await restoredOf()).toMatchObject({ status: 'done', startedAt: null, restored: true, costUsd: 0.5 })
     expect(await costCell()).toEqual([[['$0.500+', false]]])
   })
+
+// Engine 2.1.308: a SendMessage that wakes a stopped subagent raises agent.spawn again, with `resume` (the agent's id).
+// The row stays the agent's own, whatever the event says about it.
+const resumeOf = (agentId: string, prompt = 'more') => ({ ...SPAWN, prompt, resume: { agentId } }) as never
+const SPAWNED = 'spawned · engineer: Fix cart total qty'
+const RESUMED = 'resumed · engineer: Fix cart total qty'
+const texts = async ($: Engine): Promise<string[]> => (await readState($)).log.map(entry => entry.text).reverse()
+
+test('a resumed subagent keeps its row, its start and its cost, and is logged resumed once', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await $.agent.spawn(SPAWN)
+    const first = (await readState($)).agents.a1
+    expect(await chargedAfter($, clock, w, 'a1', 0.5)).toBe(0.5)
+    await finish($, 'a1', 'ok')
+    await clock.advance(1000)
+
+    expect(await $.agent.spawn(resumeOf('a1'))).toMatchObject({ agentId: 'a1' })
+    const row = (await readState($)).agents.a1
+    expect(row).toMatchObject({ status: 'running', endedAt: null, startedAt: first?.startedAt, costUsd: 0.5 })
+    expect('restored' in (row ?? {})).toBe(false)
+    expect((await texts($)).filter(text => text === SPAWNED)).toHaveLength(1)
+    expect((await texts($)).filter(text => text === RESUMED)).toHaveLength(1)
+
+    expect(await chargedAfter($, clock, w, 'a1', 0.25)).toBe(0.75)
+    expect((await texts($)).filter(text => text === RESUMED)).toHaveLength(1)
+  })
+
+test('a resumed restored row keeps its mark', WITH_RESTORER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.agent.spawn(SPAWN)
+  expect((await readState($)).agents.a1).toMatchObject({ status: 'ended', restored: true, costUsd: null })
+
+  await $.agent.spawn(resumeOf('a1'))
+  expect((await readState($)).agents.a1).toMatchObject({ status: 'running', restored: true })
+  expect(await chargedAfter($, clock, w, 'a1', 0.25)).toBe(0.25)
+  expect((await readState($)).agents.a1).toMatchObject({ status: 'running', restored: true, costUsd: 0.25 })
+})
+
+test('a resume with no row makes the row, of a cost since, logged resumed', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await clock.advance(500)
+
+  await $.agent.spawn(resumeOf('a9', 'p'))
+  expect((await readState($)).agents.a9).toEqual({
+    id: 'a9', description: 'Fix cart total qty', type: 'engineer', model: 'claude-sonnet-5', status: 'running',
+    startedAt: clock.now(), endedAt: null, costUsd: null, restored: true,
+  })
+  const lines = await texts($)
+  expect(lines).toContain(RESUMED)
+  expect(lines).not.toContain(SPAWNED)
+})
+
+test('a resume of a row that runs writes nothing', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.agent.spawn(SPAWN)
+  const before = await readState($)
+  const version = await agentsVersion($)
+  await clock.advance(500)
+
+  await $.agent.spawn(resumeOf('a1'))
+  const after = await readState($)
+  expect(after.agents).toEqual(before.agents)
+  expect(after.log).toEqual(before.log)
+  expect(await agentsVersion($)).toBe(version)
+})
+
+test('the waking message of a resume reaches neither the row nor the Log', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.agent.spawn(SPAWN)
+  await chargedAfter($, clock, w, 'a1', 0.5)
+  await finish($, 'a1', 'ok')
+
+  await $.agent.spawn(resumeOf('a1', 'secret plan xyz')) // a held row
+  await $.agent.spawn(resumeOf('a9', 'secret plan xyz')) // no row
+  const state = await readState($)
+  expect(JSON.stringify(state.agents)).not.toContain('secret plan xyz')
+  expect(JSON.stringify(state.log)).not.toContain('secret plan xyz')
+})
+
+test('an id that the agents record inherits is no held row', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.agent.spawn(SPAWN)
+  const version = await agentsVersion($)
+
+  await runStep($, clock, { turnId: 't1', index: 1, agentId: 'constructor' })
+  await clock.advance(10)
+  expect(Object.hasOwn((await readState($)).agents, 'constructor')).toBe(false)
+  expect(await agentsVersion($)).toBe(version)
+
+  await $.agent.spawn(resumeOf('constructor'))
+  const state = await readState($)
+  expect(Object.hasOwn(state.agents, 'constructor')).toBe(true)
+  expect(state.agents.constructor).toMatchObject({ type: 'engineer', status: 'running' })
+  expect(await texts($)).toContain(RESUMED)
+  expect(w.spawns).toBe(1)
+})
 
 // The restore (0.6.0): the pane is rebuilt from the session's messages at session.start when its state is empty, and
 // after an in-process resume at the first main turn.start. The rows are the main conversation's, as

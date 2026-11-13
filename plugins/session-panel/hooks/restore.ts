@@ -98,7 +98,8 @@ export function restoreFromMessages(rows: readonly unknown[], alive: ReadonlySet
         model: model !== null && model !== '' && model.length <= MODEL_MAX ? model : null,
         status: 'running', startedAt: null, endedAt: null, costUsd: null, restored: true,
       }
-      // A repeated agentId re-opens the agent in its first place, as live agent.spawn writes over its row.
+      // A repeated agentId re-opens the agent in its first place, as a live agent.spawn that is no resume writes over
+      // its row.
       agents.set(agentId, row)
       lines.push(() => entry('main', logText(`spawned · ${type}: ${description}`), 'info'))
       if (isError) {
