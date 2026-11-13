@@ -110,18 +110,24 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   there), so a wrong guess leaves a blank row rather than cutting the last line. The Log keeps 200 lines, so a pane with
   room for more than 201 Log rows shows blank rows above `+N more`: a known limit. The events are prompts, tool calls,
   subagent spawns, resumes and results (a successful Agent call, a SendMessage to a known subagent or a subagent's
-  `SubagentHandback` is not logged: their lines say it), compactions. A prompt that starts a turn of the main agent is
+  `SubagentHandback` is not logged: their lines say it), compactions. A subagent that is resumed (SendMessage to one
+  that stopped; engine 2.1.308 and later raise its spawn again) keeps its row, its start and its cost, and is logged
+  `resumed · type: …`; with no row (one from before the restore's rows) it is listed again with its cost since the
+  resume (`$x+`). A prompt that starts a turn of the main agent is
   logged `you`, unless the engine started the turn with a tag of its own, a lowercase name with a hyphen or an
   underscore (`<task-notification>`, `<teammate-message teammate_id="lead">`): that line is `engine`, with the tag's
   name, and any other text, one that starts with `<` too (`<div class="x">`), is yours. The line goes by the shape: a
   tag that you type in that shape (`<my_note>`) is logged `engine`, and an engine tag of one word is logged `you`.
   Leading `<system-reminder>` blocks are skipped: the desktop's first prompt after a reopen carries one and is logged
-  `you`, a turn that is only a reminder has no line, and the line of a message typed mid-turn skips them too. Another
-  agent's message (`Another Claude session sent a message:`, which is how a subagent's hand-back arrives) is logged
-  `engine` with the text `peer`, never its own text. The rule fails closed: a turn whose reminder block may have quoted
-  its own closing tag has no line, and nor has a prompt that starts with one of the engine's own openings (`[Image:
-  source: `, `Base directory for this skill: `, `[Request interrupted by user`). An agent's run (a subagent, a
-  Workflow's agent; engine 2.1.299 and later raise a turn of its own for it) gets no line for its prompt and leaves the
+  `you`, a turn that is only a reminder has no line, and the line of a message typed mid-turn skips them too. A
+  subagent's hand-back, and any message another agent sends with SendMessage, opens its turn with the engine's
+  `<agent-message from="…">` tag, so its line is `engine › agent-message`. The engine's frame of such a message
+  (`Another Claude session sent a message:` or `… while you were working:`) stays on rows the mod does not get; a text
+  that opens with it is logged `engine` with the text `peer`, never its own text. The rule fails closed: a turn whose
+  reminder block may have quoted its own closing tag has no line, and nor has a prompt that starts with one of the
+  engine's own openings (`[Image: source: `, `Base directory for this skill: `, `[Request interrupted by user`). An
+  agent's run (a subagent, a Workflow's agent; engine 2.1.299 and later raise a turn of its own for it) gets no line for
+  its prompt and leaves the
   Turn stats of the main turn alone. A message you type while a turn runs goes into that turn, with no turn of its own,
   and has its `you` line when the model takes it in (the desktop) or at Enter (a terminal); one still queued when the
   turn ends keeps one line. Only a person's message has that line (typed, from a bridge, the SDK or Slack), not a
@@ -140,9 +146,10 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   engine's `next.signal`, and was seen live for a subagent stopped with `TaskStop` and for Esc on the main agent, while
   a call that fails by itself stays red. A call of an agent that is not in Subagents is labeled `agent`, and its failure
   is drawn dim, not red: the pane cannot tell a fork's refused try from a real failure. Such an agent is one of the
-  engine's own forks (most of them have every tool refused), or a subagent that was started before the session was
-  reopened (or Claude Code restarted) and is resumed after it, whose row the restore could not rebuild (see "What a
-  reopen restores"): a known limit. A subagent's answer loses its markdown marks (a pair of `**`, unless an ASCII
+  engine's own forks (most of them have every tool refused), or, on engines before 2.1.308, a subagent that was started
+  before the session was reopened (or Claude Code restarted) and is resumed after it, whose row the restore could not
+  rebuild (see "What a reopen restores"): a known limit. From 2.1.308 the resume raises the spawn again and gives such a
+  subagent a row, as above. A subagent's answer loses its markdown marks (a pair of `**`, unless an ASCII
   letter, digit or `_` touches it on the outside, so `2**10 and 3**4` stays, and a letter of another script does not
   stop it: `这是**重要**的` gives `这是重要的`; backticks; a heading's `#`). In auto mode a subagent's `done` line shows the
   report it handed back, even when auto mode withheld or flagged it; the text is masked as any other, and the main agent
@@ -179,53 +186,68 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   (`secretKey`, `SECRET_KEY_BASE`): after a quoted name (`{"secret_key": "…"}`), unquoted with `=`, `:`, `=>`, `:=`,
   `?=` or `+=` (`secret_key=…`, `secretKey := "…"`), as a flag (`--secret-key …`, `--s3-secret-access-key …`), and as
   `aws configure set aws_secret_access_key …`. A quoted value of an unquoted name that nothing closes on its line masks
-  the rest of the text, so a PEM in a `.env` file stays masked. After a quoted name a bare number, `true`, `false`,
-  `null` or `none` shows as it is (`{"max_token": 4096, "secret": false}`, `{'password': None}`), and a quoted one
-  (`"4096"`) is masked; an unquoted `token: 120` is masked too. A value that begins with a flag, a key and its separator
-  (`--token …`, `password: …`, `Authorization: …`, `db.password=…`, `X-API-Key: …`) or a `Bearer` that ends its line is
-  left to the pattern that reads it, which masks its own secret; a value that has a name glued inside (`MyApiKey:…`) or
-  ends in `…token==` goes whole. The mask is no scanner: it has no pattern for `curl -u user:pass`, `mysql -p…`,
-  `.netrc`, a `Cookie:` header, `glpat-` tokens, a PEM key or a JWT on its own, and it misses a key written in a form it
-  does not read (an escaped JSON key in a shell string, `d["password"] = …`, an XML element such as `<secretKey>`,
-  Azure's `AccountKey=`), a value on the next line or in a YAML block (`private_key: |`) after an unquoted name, a typed
-  default (`secret_key: str = "…"`), the default in `os.environ.get('SECRET_KEY', '…')`, a number-shaped secret after a
-  quoted name (a digit PIN, `"token": 01234567`, hex such as `8e54632190`: it shows as a number does), all but the first
-  part of a Digest or AWS4 credential, and a token whose first letter a crafted escape sequence takes. It over-masks in
-  known cases: a name that ends in `Bearer` (`JwtBearer`) masks the word after it, two code spans around
-  `Authorization:` mask the prose between them, the closing quote after the value of an Authorization header, whatever
-  its scheme (`: 'Authorization: Token …'` reads `: 'Authorization: •••`), goes with the token, the `;` after a bare
-  value goes with it (`password=abc; next` reads `password=••• next`), prose that has a key's name in it (`grep -rn
-  "password": src/` masks `src/`, `Authorization: required for all` reads `••• all`, `{"pwd": path}`, a name in
-  backticks such as `` `token`: ``, a name in curly quotes) masks the word after it, a quote or a backtick after a
-  `_key` name that nothing closes on its line hides the rest of the text (prose such as ``Set `secret_key:` in
-  config``), and `set aws_secret_access_key in the file` reads `••• the file`. Section 4.7 of the design spec (in
-  Russian, linked from the [docs](https://github.com/philarete173/claude_mods/blob/main/docs/README.md) page) has the
-  full list.
+  the rest of the text, so a PEM in a `.env` file stays masked. After a quoted name a bare `true`, `false`, `null` or
+  `none` shows as it is (`{"secret": false}`, `{'password': None}`), and so does a bare number after a counter's name
+  (`max_token` or `min_token`, with `_`, `-` or nothing between the words: `{"max_token": 4096}`); any other bare number
+  is masked (`{"token": 482913}`, `"password": 123456`), as a quoted one (`"4096"`) and an unquoted `token: 120` are. A
+  value that begins with a flag, a key and its separator (`--token …`, `password: …`, `Authorization: …`,
+  `db.password=…`, `X-API-Key: …`) or a `Bearer` that ends its line is left to the pattern that reads it, which masks
+  its own secret (a value that begins with a key and `?=` or `+=` after a quoted name, `"password": pwd+=VAL`, is read
+  by no pattern and shows); a value that has a name glued inside (`MyApiKey:…`) or ends in `…token==` goes whole. The
+  mask is no scanner: it has no pattern for `curl -u user:pass`, `mysql -p…`, `.netrc`, a `Cookie:` header, `glpat-`
+  tokens, a PEM key or a JWT on its own, and it misses a key written in a form it does not read (an escaped JSON key in
+  a shell string, `d["password"] = …`, an XML element such as `<secretKey>`, Azure's `AccountKey=`), a value on the next
+  line or in a YAML block (`private_key: |`) after an unquoted name, a typed default (`secret_key: str = "…"`), the
+  default in `os.environ.get('SECRET_KEY', '…')`, a number under a counter's name (`{"max_token": 482913}`, also behind
+  a malformed key such as `{" "max_token": 482913}`, where the closing quote of `" "` passes for the key's opening
+  quote), a bare value on the line after a quoted name (`"token":` and `482913` on the next line), all but the first
+  part of a Digest or AWS4 credential, and a token whose first letter a crafted escape sequence takes. A tag's name that
+  has a secret's shape with no known prefix (`<glpat-…>` at the start of a prompt) shows as the line of an `engine`
+  turn, live and restored. It over-masks in known cases: a name that ends in `Bearer` (`JwtBearer`) masks the word after
+  it, two code spans around `Authorization:` mask the prose between them, the closing quote after the value of an
+  Authorization header, whatever its scheme (`: 'Authorization: Token …'` reads `: 'Authorization: •••`), goes with the
+  token, the `;` after a bare value goes with it (`password=abc; next` reads `password=••• next`), prose that has a
+  key's name in it (`grep -rn "password": src/` masks `src/`, `Authorization: required for all` reads `••• all`,
+  `{"pwd": path}`, a name in backticks such as `` `token`: ``, a name in curly quotes) masks the word after it, a quote
+  or a backtick after a `_key` name that nothing closes on its line hides the rest of the text (prose such as ``Set
+  `secret_key:` in config``), a counter of another shape (`{"max_new_token": 5}`) has its number masked, and `set
+  aws_secret_access_key in the file` reads `••• the file`. Section 4.7 of the design spec (in Russian, linked from the
+  [docs](https://github.com/philarete173/claude_mods/blob/main/docs/README.md) page) has the full list.
 
 ## What a reopen restores
 
 - When: at `session.start`, when Subagents, Tasks and the Log are all empty: a new process (the desktop app reopened,
   `claude --resume`, the mod enabled mid-session). A hot reload keeps the state and restores nothing. After an
   in-process `/resume` (a terminal's REPL) it restores at the first turn of the main agent, without that turn's own
-  rows. Not after `/clear`, and a `/clear` after a `/resume` cancels the restore that the resume left due.
+  rows. Not after `/clear`, and a `/clear` after a `/resume` cancels the restore that the resume left due. It also
+  restores at the first turn of the main agent, without that turn's own rows, when another plugin sent `session.start`
+  past the mod (the pane, its command and its timer start there too), unless something was drawn before that turn (a
+  subagent the engine resumed), which keeps the restore out as a hot reload's state does. To keep the mod off, disable
+  it.
 - What: from the newest 4096 rows of the main conversation, walked from the latest compaction summary on. Subagents:
   every Agent call that has an agent id, `done` or `failed` by its result, `done`, `failed` or `stopped` by a task
   notice or a `TaskStop`, else `running` when the engine still lists it alive, or `ended`. Tasks: the background calls,
-  closed by notices or `TaskStop`, else `ended`. The Log: prompts, other agents' messages, task notices, subagent and
-  task lines, and the main agent's tool calls with `✓` or `✗`; the newest 200 are kept, and the header counts all.
+  closed by notices or `TaskStop`, else `ended`. The Log: prompts, other agents' messages, the turns the engine opened,
+  as live (`engine › task-notification`, a `!` command or a skill's command that the model answered; a local command
+  that asks the model nothing has no line), task notices, subagent and task lines, and the main agent's tool calls with
+  `✓` or `✗`; the newest 200 are kept, and the header counts all.
 - How it looks: a Log line has no clock time (a dim `—`). A restored tool call has its `✓` or `✗` and no time (`→
   background` if it started a task, and none if it was still running when the transcript was read). An end line has a
   time only where the call or the notice gave one (a foreground Agent's `durationMs`, a notice's `<duration_ms>`):
-  without one, a subagent's end line keeps its `✓` or `✗` and a task's has no outcome, and a stop has none. A restored
-  subagent or task has no known start, so it is listed after the live rows of its group, newest first.
+  without one, a subagent's end line keeps its `✓` or `✗` and a task's has no outcome, and a stop has none. An end line
+  has no answer when the notice says, in the engine's own sentence, that the agent ended without a report or that its
+  report came as a message (an answer that holds such a sentence loses its text); a notice that says the agent has not
+  reported yet closes nothing. A restored subagent or task has no known start, so it is listed after the live rows of
+  its group, newest first.
 - Live rows win on an id, and restored lines are older than live ones.
-- Not restored: subagents' own tool calls; prompts, notices and other agents' messages (hand-backs among them)
+- Not restored: subagents' own tool calls; subagents' hand-backs, which the engine keeps out of the messages (so a
+  subagent that reported between turns and has no notice row is `ended`); prompts, notices and other agents' messages
   that arrived mid-turn, which are not rows; tool times, denials and interruptions (a denied or interrupted call reads
   `✗`); Turn stats (`No completed turn yet` until a new turn); the `compacted` and `resumed` lines; costs before the
   restore; rows before the latest compaction after a restart. A task that was restored while it still ran stays `ended`
   when its notice comes, and a task that the engine's own notice after a reopen names (`failed` or `stopped`, with a
-  note) stays `ended` too. A prompt that starts with the summary's phrase hides the rows before it, and a notice that
-  another plugin forges can close a restored row (display only).
+  note) stays `ended` too. A notice that is typed, pasted or sent through the SDK, or that another plugin forges, can
+  close a restored row (display only), and a prompt that starts with the summary's phrase hides the rows before it.
 
 ## How costs are measured
 
@@ -237,11 +259,13 @@ With subagents running at once the split is approximate: steps that overlap can 
 request. The same subagent was measured at $0.100 beside a parallel review and $0.046 alone. The totals stay exact:
 Total = Session + Subagents.
 
-After the app restarts (a reopened session) the pane is rebuilt from the session's messages, which carry no costs:
-what the subagents were charged before the restore is not known. While a restored subagent is listed and the Total is
-known, the split reads `Subagents $Y+` (Y the sum of the known costs, a lower bound) and Session is not shown. Before
-0.6.0 the pane started over, and the cost of the subagents that ran before counted as Session: Subagents fell from
-$4.80 to $0.008 in a live check. Total is right.
+After the app restarts (a reopened session) the pane is rebuilt from the session's messages, which carry no costs: what
+the subagents were charged before the restore is not known. While a restored subagent is listed and the Total is known,
+the split reads `Subagents $Y+` (Y the sum of the known costs, a lower bound) and Session is not shown. A subagent
+resumed with no row in the pane (one from before a reopen or a `/clear`) is listed with its cost since the resume and a
+`+`, so the split reads `Subagents $Y+` then too, with or without a reopen. Before 0.6.0 the pane started over, and the
+cost of the subagents that ran before counted as Session: Subagents fell from $4.80 to $0.008 in a live check. Total is
+right.
 
 ## What the mod does not do
 
@@ -282,8 +306,8 @@ $4.80 to $0.008 in a live check. Total is right.
   another one does not reset it.
 - The mod reads no file itself: git counts the lines.
 - To rebuild the pane it reads the session's transcript through the engine (`$.session.messages()`), tool results
-  included. It draws only prompts, call labels (commands, paths, queries), subagent descriptions and answers, and task
-  descriptions, masked best-effort as live lines are, and never tool output, file contents, the prompts given to
-  subagents, error texts or the compaction summary. Nothing from the transcript is written to disk or sent; it stays in
-  session plugin state, which other plugins can read, as live lines do. A reopen shows earlier prompts and commands
-  again.
+  included. It draws only prompts, call labels (commands, paths, queries), subagent descriptions and answers, task
+  descriptions, and the name of the tag that opened a turn (not its body or attributes), masked best-effort as live
+  lines are, and never tool output, file contents, the prompts given to subagents, error texts or the compaction
+  summary. Nothing from the transcript is written to disk or sent; it stays in session plugin state, which other plugins
+  can read, as live lines do. A reopen shows earlier prompts and commands again.

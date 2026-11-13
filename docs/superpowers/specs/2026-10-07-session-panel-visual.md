@@ -1687,10 +1687,23 @@ Checks for the 0.6.0 release (the restore, §5 of the 0.4–0.6 spec; engine 2.1
 42. **A resume in a terminal.** `/resume` to another session in a terminal: the pane shows that session after its first
     turn, and the turn's prompt is logged once.
 43. **The prompt rule.** The first prompt after a reopen is logged `you`; a subagent's hand-back is logged
-    `engine › peer`.
+    `engine › agent-message`, and after a reopen it is not restored.
 44. **A resume in a new process.** Start `claude --resume` (a new CLI process) on a session with subagents and tasks,
     once with no prompt and once with an initial prompt (`claude --resume <id> "…"`): the pane restores, and the
     initial prompt is logged once.
+
+Checks for the 0.6.1 release (the live check of 0.6.0, `docs/live-check-2026-11-13-0.6.0.md`; engine 2.1.321 or later):
+
+45. **A subagent woken by SendMessage.** A background subagent that ended and is woken by SendMessage keeps its row and
+    its cost, logs `resumed · type: …` and no second `spawned`.
+46. **The engine's turns after a reopen.** After a reopen, a `!` command that the model answered shows
+    `engine › bash-stdout`, a skill's slash command shows `engine › command-message`, and `/model` has no line.
+47. **A subagent that ended without a report.** After a reopen, a subagent that ended without a report shows `done` and
+    no engine note.
+48. **The mask (0.6.1).** `{"token": 482913}` and `"password": 123456` show `•••`; `{"max_token": 4096}` shows as
+    typed.
+49. **A resume with a prompt (a terminal).** `claude --resume <id> "…"`: the pane restores, and the prompt is logged
+    once (as check 44).
 
 Results of the live renders (2026-10-07, 2026-10-08, 2026-10-09, 2026-10-12 and 2026-10-13):
 

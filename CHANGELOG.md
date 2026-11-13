@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.6.1 — 2026-11-13
+
+- A subagent that the engine resumes keeps its row. From engine 2.1.308 a resume (SendMessage to a subagent that
+  stopped, the engine waking a parked one) raises the spawn again, with `resume`. The pane rebuilt the row: the subagent
+  lost its start and its cost (which moved to Session), and the Log said `spawned`. The row now runs again with its
+  start and its cost, and the Log says `resumed · type: …`. A subagent with no row (one from before the restore's rows)
+  is listed with `restored: true` and its cost since the resume (`$x+`), logged `resumed` too.
+- The restore draws the engine's turns as live does. A turn that the engine opened is logged `engine › <tag>` live
+  (`task-notification`, a `!` command's `bash-stdout`, a skill's slash command `command-message`); after a reopen it has
+  the same line now, when the assistant's row comes next and does not follow tool results. A local command that asks the
+  model nothing (`/model`) has no line. A subagent's hand-back, and any message another agent sends with SendMessage,
+  opens its turn with `<agent-message from="…">` (`engine › agent-message` live); its row is one that
+  `$.session.messages()` never returns, so it is not restored. The `peer` rule, which reads the engine's frame of such a
+  message (`Another Claude session sent a message:`, or `… while you were working:`), stays as a fail-safe.
+- A restored end line shows no engine note as the answer. When the result of a subagent's notice is the engine's own
+  sentence (the subagent ended without a report, or its report came as a message), the end line has no answer; a notice
+  that says the agent has not reported yet closes nothing, and a later notice closes it.
+- The pane starts when another plugin keeps `session.start` from the mod. The restore, the `/session-panel` command, the
+  cost baseline, the timer and the pane on a desktop all hung on that event, and with it gone the pane stayed empty with
+  no sign. The first turn of the main agent starts them now, and the restore leaves out that turn's own rows. A row
+  written before that turn (a subagent the engine resumed) keeps the restore out, as a hot reload's state does.
+- Behaviour change of 0.5.2's rule, made after the security review of the live check: after a quoted name a bare number
+  is masked, except after a counter's name (`max` or `min`, then `_`, `-` or nothing, then `token`: `{"max_token":
+  4096}`). `{"token": 482913}`, `"password": 123456` and `"DB_PASSWORD": 12345678` showed since 0.5.2 and are masked
+  now. `true`, `false`, `null` and `none` still show after every name.
+- Docs: the README and the specs record what a hand-back is (`<agent-message from="…">`, a row the engine keeps out of
+  the messages, so it is never restored and a subagent that reported between turns is `ended`), the new limits of the
+  mask (a number under a counter's name, also behind a malformed key such as `{" "max_token": 482913}`; a value that
+  begins with a key and `?=` or `+=` after a quoted name; a tag's name of a secret's shape with no known prefix, which
+  shows as the line of an `engine` turn) and that a notice that is typed, pasted or sent through the SDK can close a
+  restored row (display only). The visual spec has the checks 45 to 49.
+
 ## 0.6.0 — 2026-10-27
 
 - The pane restores itself. At `session.start`, when Subagents, Tasks and the Log are all empty (a new process: the
