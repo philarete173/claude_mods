@@ -76,6 +76,12 @@ export type TaskRow = {
 export type LogKind = 'info' | 'ok' | 'error'
 // `at` is null for a line whose time is not known (a restored line).
 export type LogEntry = { at: number | null; who: string; text: string; kind: LogKind; outcome?: string }
+export type StationId = 'model' | 'files' | 'shell' | 'web' | 'agents' | 'mcp' | 'skills' | 'you'
+export type ToolStationId = Exclude<StationId, 'model'>
+export type StationTally = { calls: number; failedThisTurn: number; lastCallAt: number | null }
+export type StationsState = Record<StationId, StationTally>
+export type InFlightCall = { station: ToolStationId; agentId: string | null; at: number; label: string }
+export type StationMs = Record<StationId, number>
 
 export type PanelRateLimit = { kind: string; percentUsed: number; resetsAt?: number }
 export type PanelUsage = {
