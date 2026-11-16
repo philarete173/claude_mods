@@ -58,6 +58,10 @@ export type AgentRow = {
   // the cost since.
   restored?: true
 }
+// A turn of the main agent: when it started, and when it ended (null while it runs).
+export type MainTurn = { start: number; end: number | null }
+// How many of the latest main turns the state keeps.
+export const MAIN_TURNS_MAX = 6
 export type TaskKind = 'shell' | 'monitor' | 'workflow'
 // `ended`: the task is over, and how it ended is not known.
 export type TaskStatus = 'running' | 'done' | 'failed' | 'stopped' | 'ended'

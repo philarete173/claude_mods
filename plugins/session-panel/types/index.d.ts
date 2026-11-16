@@ -57,6 +57,8 @@ export type AgentRow = {
   // the cost since.
   restored?: true
 }
+// A turn of the main agent: when it started, and when it ended (null while it runs).
+export type MainTurn = { start: number; end: number | null }
 export type TaskKind = 'shell' | 'monitor' | 'workflow'
 // `ended`: the task is over, and how it ended is not known.
 export type TaskStatus = 'running' | 'done' | 'failed' | 'stopped' | 'ended'
@@ -141,6 +143,16 @@ declare module 'claude-code' {
       // Every line put on the log since it was last emptied (a /clear or a resume); `log` keeps the newest 200.
       logCount: number
       collapsed: Record<string, boolean>
+      // Each station's calls, failures this turn and last call; a /clear or a resume empties them.
+      stations: StationsState
+      // The calls that the model has begun to write and whose tool.call has not run, by call id; 64 at most.
+      inFlight: Record<string, InFlightCall>
+      // The model of the main loop, as its last step named it; null before one.
+      mainModel: string | null
+      // How many compactions of the main conversation stood.
+      compactions: number
+      // The latest 6 turns of the main agent, oldest first.
+      mainTurns: MainTurn[]
     }
   }
 }

@@ -3,8 +3,10 @@ import type { Engine, MockClock, Plugin } from 'claude-code/testing'
 import type { On, PluginState, PromptOrigin, RenderPropsOf, RenderSurface, SessionMessage, UiPane } from 'claude-code'
 
 import { restoreFromMessages } from './restore'
+import { emptyStationsState } from './stations'
+import type { InFlightCall, StationsState } from './stations'
 import { HANDBACK_TOOL, LOG_MAX } from './stats'
-import type { AgentRow, LogEntry, TaskRow, TurnAcc, TurnStats } from './stats'
+import type { AgentRow, LogEntry, MainTurn, TaskRow, TurnAcc, TurnStats } from './stats'
 
 type State = PluginState['session-panel']
 
@@ -16,7 +18,10 @@ const mirrorsStats: [
   Same<State['agents'], Record<string, AgentRow>>,
   Same<State['tasks'], Record<string, TaskRow>>,
   Same<State['log'], LogEntry[]>,
-] = [true, true, true, true, true]
+  Same<State['stations'], StationsState>,
+  Same<State['inFlight'], Record<string, InFlightCall>>,
+  Same<State['mainTurns'], MainTurn[]>,
+] = [true, true, true, true, true, true, true, true]
 
 const ROOT = '/work/online_shop'
 const START = { cwd: ROOT, surface: 'desktop', isInteractive: true } as const
@@ -90,6 +95,11 @@ const READER: Plugin = {
         log: (await $.state.get({ plugin: 'session-panel', key: 'log' } as const)).value,
         logCount: (await $.state.get({ plugin: 'session-panel', key: 'logCount' } as const)).value,
         collapsed: (await $.state.get({ plugin: 'session-panel', key: 'collapsed' } as const)).value,
+        stations: (await $.state.get({ plugin: 'session-panel', key: 'stations' } as const)).value,
+        inFlight: (await $.state.get({ plugin: 'session-panel', key: 'inFlight' } as const)).value,
+        mainModel: (await $.state.get({ plugin: 'session-panel', key: 'mainModel' } as const)).value,
+        compactions: (await $.state.get({ plugin: 'session-panel', key: 'compactions' } as const)).value,
+        mainTurns: (await $.state.get({ plugin: 'session-panel', key: 'mainTurns' } as const)).value,
       }
 
       return { text: JSON.stringify(state) }
@@ -441,7 +451,23 @@ const CLOCK_SPOILER: Plugin = {
     })
   },
 }
+// A plugin above the mod's that answers a Bash itself, as a hook above may, and the mod's hook never runs: one whose
+// command starts with `answer-deny` is denied, one that starts with `answer-ok` ends well. Like any plugin of a test it
+// closes over nothing of this file.
+const ANSWERER: Plugin = {
+  name: 'answerer',
+  tier: 'prepend',
+  register(on) {
+    on('tool.call', (_$, e, next) => {
+      if (e.tool === 'Bash' && e.command.startsWith('answer-deny')) return { deny: 'no' }
+      if (e.tool === 'Bash' && e.command.startsWith('answer-ok')) return { result: 'ok' }
+
+      return next(e)
+    })
+  },
+}
 const WITH_ABANDONER = { plugins: [READER, ABANDONER], timeoutMs: 30_000 }
+const WITH_ANSWERER = { plugins: [READER, ANSWERER], timeoutMs: 30_000 }
 const WITH_INTERRUPTER = { plugins: [READER, INTERRUPTER], timeoutMs: 30_000 }
 const WITH_FRACTIONAL_CLOCK = { plugins: [READER, FRACTIONAL_CLOCK], timeoutMs: 30_000 }
 const WITH_STORE = { plugins: [READER, OTHER_SESSION], timeoutMs: 30_000 }
@@ -547,6 +573,7 @@ type World = {
   root: string // what session.root() answers
   isReadOnly: boolean // core ran the next calls of tools read-only: their results say so
   listed: { id: string; status: string }[] // what $.agent.list() answers
+  toolChunks: { id: string; name: string }[] // the calls that the `tool` chunk of TOOL_STEP stands for, one chunk each
   listFails: boolean // $.agent.list() rejects
   lists: number // how many $.agent.list() calls were made
   messages: unknown // what $.session.messages() answers: the rows of the main conversation
@@ -638,6 +665,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     root: ROOT,
     isReadOnly: false,
     listed: [],
+    toolChunks: [{ id: 'u1', name: 'Bash' }],
     listFails: false,
     lists: 0,
     messages: [],
@@ -704,7 +732,8 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
       elapsed = at
       // The engine charges the request as it stops.
       if (chunk.kind === 'stop') w.usd += w.stepCost
-      yield chunk
+      if (chunk.kind !== 'tool') yield chunk
+      else for (const [i, { id, name }] of w.toolChunks.entries()) yield { ...chunk, index: chunk.index + i, id, name }
     }
 
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null } as never
@@ -889,7 +918,7 @@ const readCall = () => ({ tool: 'Read', file_path: `${ROOT}/a.ts` }) as const
 const runStep = async (
   $: Engine,
   clock: MockClock,
-  input: { turnId: string; index: number; agentId?: string },
+  input: { turnId: string; index: number; agentId?: string; model?: string },
 ): Promise<{ chunks: unknown[]; result: unknown }> => {
   const chunks: unknown[] = []
   const stream = $.turn.step({ model: 'claude-sonnet-5', messageCount: 1, ...input })
@@ -3361,6 +3390,284 @@ test('a step cut off mid-stream leaves the turn as it was and has passed on what
     await $.turn.complete({ answer: 'done', durationMs: 900, isAborted: false, turnId: 't1', reason: 'answer' })
     expect((await readState($)).lastTurn).toMatchObject({ steps: 1, modelMs: 700, ttftMs: 200, costUsd: 0.25 })
   })
+
+// The Session band's state (the 0.7.0 spec, §8). A scheduled write lands 1 ms after its chunk and reads the clock
+// then, so its time is the chunk's + 1: TOOL_STEP's first chunk comes 300 ms into the step, its `tool` chunk 500 ms in.
+test('a stopped model step counts a Model call for main and for a subagent; only main\'s sets the model', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await startTurn($)
+
+    await runStep($, clock, { turnId: 't0', index: 0 })
+    await clock.advance(10)
+    expect((await readState($)).stations.model.calls).toBe(1)
+    expect((await readState($)).mainModel).toBe('claude-sonnet-5')
+
+    await $.agent.spawn(SPAWN)
+    await runStep($, clock, { turnId: 't1', index: 1, agentId: 'a1', model: 'claude-haiku-4' })
+    await clock.advance(10)
+    expect((await readState($)).stations.model.calls).toBe(2)
+    expect((await readState($)).mainModel).toBe('claude-sonnet-5')
+  })
+
+test('a tool chunk marks its call in flight and pulses its station', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await startTurn($)
+
+  const now0 = clock.now()
+  await runStep($, clock, { turnId: 't0', index: 0 })
+  const state = await readState($)
+  expect(state.inFlight).toEqual({ u1: { station: 'shell', agentId: null, at: now0 + 501, label: 'Bash' } })
+  expect(state.stations.shell).toMatchObject({ calls: 0, lastCallAt: now0 + 501 })
+  expect(state.stations.model.lastCallAt).toBe(now0 + 301)
+})
+
+test('tool.call clears its call, counts its station and keeps the pulse', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await startTurn($)
+  const now0 = clock.now()
+  await runStep($, clock, { turnId: 't0', index: 0 })
+
+  await drive(clock, $.tool.call({ tool: 'Bash', command: 'ls', tool_use_id: 'u1' }))
+  let state = await readState($)
+  expect(state.inFlight).toEqual({})
+  expect(state.stations.shell).toMatchObject({ calls: 1, lastCallAt: now0 + 501 })
+
+  // A call with no id counts, and leaves the call in flight where it is.
+  w.toolChunks = [{ id: 'u2', name: 'Bash' }]
+  await runStep($, clock, { turnId: 't0', index: 0 })
+  await drive(clock, $.tool.call({ tool: 'Bash', command: 'ls' }))
+  state = await readState($)
+  expect(Object.keys(state.inFlight)).toEqual(['u2'])
+  expect(state.stations.shell.calls).toBe(2)
+})
+
+test('a call whose tool.call has run is never marked in flight later', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await startTurn($)
+
+  await drive(clock, $.tool.call({ tool: 'Bash', command: 'ls', tool_use_id: 'u1' }))
+  await runStep($, clock, { turnId: 't0', index: 0 })
+  expect((await readState($)).inFlight).toEqual({})
+
+  // The ids of the latest 256 calls are kept: 257 more push `u1` out, and a later step marks it again.
+  for (let i = 0; i <= 256; i += 1) await $.tool.call({ tool: 'Bash', command: 'deny', tool_use_id: `c${i}` })
+  await runStep($, clock, { turnId: 't0', index: 0 })
+  expect(Object.keys((await readState($)).inFlight)).toEqual(['u1'])
+})
+
+test('a call that a plugin above answers leaves no entry after its agent\'s next step', WITH_ANSWERER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await startTurn($)
+
+    for (const command of ['answer-deny x', 'answer-ok x']) {
+      await runStep($, clock, { turnId: 't0', index: 0 })
+      await $.tool.call({ tool: 'Bash', command, tool_use_id: 'u1' })
+      expect(Object.keys((await readState($)).inFlight)).toEqual(['u1'])
+      await runStep($, clock, { turnId: 't0', index: 1 })
+      expect((await readState($)).inFlight).toEqual({})
+    }
+
+    // A subagent's call in flight is its own: main's next step leaves it.
+    await $.agent.spawn(SPAWN)
+    w.toolChunks = [{ id: 'u7', name: 'Read' }]
+    await runStep($, clock, { turnId: 't1', index: 0, agentId: 'a1' })
+    await runStep($, clock, { turnId: 't0', index: 1 })
+    expect(Object.keys((await readState($)).inFlight)).toEqual(['u7'])
+  })
+
+test('a subagent\'s call is in flight under its id until its turn.complete', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+
+  w.toolChunks = [{ id: 'u7', name: 'Read' }]
+  await runStep($, clock, { turnId: 't1', index: 0, agentId: 'a1' })
+  expect((await readState($)).inFlight.u7).toMatchObject({ station: 'files', agentId: 'a1', label: 'Read' })
+
+  await finish($, 'a1')
+  expect((await readState($)).inFlight).toEqual({})
+})
+
+test('main\'s turn.complete clears main\'s calls in flight and leaves a subagent\'s', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await startTurn($)
+  await $.agent.spawn(SPAWN)
+
+  w.toolChunks = [{ id: 'u7', name: 'Read' }]
+  await runStep($, clock, { turnId: 't1', index: 0, agentId: 'a1' })
+  w.toolChunks = [{ id: 'u1', name: 'Bash' }]
+  await runStep($, clock, { turnId: 't0', index: 0 })
+  expect(Object.keys((await readState($)).inFlight).sort()).toEqual(['u1', 'u7'])
+
+  await endTurn($)
+  expect(Object.keys((await readState($)).inFlight)).toEqual(['u7'])
+})
+
+test('the flight keeps 64 entries, the oldest dropped', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await startTurn($)
+
+  w.toolChunks = Array.from({ length: 70 }, (_, i) => ({ id: `k${i}`, name: 'Bash' }))
+  await runStep($, clock, { turnId: 't0', index: 0 })
+  const ids = Object.keys((await readState($)).inFlight)
+  expect(ids).toHaveLength(64)
+  expect(ids.sort()).toEqual(Array.from({ length: 64 }, (_, i) => `k${i + 6}`).sort())
+})
+
+test('a sync that ends an agent drops its calls in flight', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await $.agent.spawn(SPAWN)
+  w.toolChunks = [{ id: 'u7', name: 'Read' }]
+  await runStep($, clock, { turnId: 't1', index: 0, agentId: 'a1' })
+  expect(Object.keys((await readState($)).inFlight)).toEqual(['u7'])
+
+  w.listed = [{ id: 'a1', status: 'completed' }]
+  await clock.advance(30_000)
+  const state = await readState($)
+  expect(state.agents.a1?.status).toBe('done')
+  expect(state.inFlight).toEqual({})
+})
+
+test('a failure counts against its station this turn; a denied, an abandoned and an unknown agent\'s call do not',
+  WITH_ABANDONER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    const shell = async () => (await readState($)).stations.shell
+
+    await $.tool.call({ tool: 'Bash', command: 'fail now' })
+    expect(await shell()).toMatchObject({ failedThisTurn: 1, calls: 1 })
+    await $.tool.call({ tool: 'Bash', command: 'deny it' })
+    expect(await shell()).toMatchObject({ failedThisTurn: 1, calls: 2 })
+    await $.tool.call({ tool: 'Bash', command: 'fail', agentId: 'zz' } as never)
+    expect(await shell()).toMatchObject({ failedThisTurn: 1, calls: 3 })
+
+    await startTurn($)
+    const { stations } = await readState($)
+    expect(Object.values(stations).map(tally => tally.failedThisTurn)).toEqual([0, 0, 0, 0, 0, 0, 0, 0])
+    expect(stations.shell.calls).toBe(3)
+
+    // An abandoned call that came back as an error: the call beneath ends 300 ms later, and the mod's hook counts it.
+    w.toolFailMs = 300
+    await $.tool.call({ tool: 'Bash', command: 'fail abandon it' })
+    await clock.advance(400)
+    expect(await shell()).toMatchObject({ failedThisTurn: 0, calls: 4 })
+  })
+
+test('the station write lands before a root read that fails', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await startTurn($)
+  await runStep($, clock, { turnId: 't0', index: 0 })
+
+  w.rootFailures = 1
+  await drive(clock, $.tool.call({ tool: 'Bash', command: 'fail now', tool_use_id: 'u1' }).catch(() => undefined))
+  const state = await readState($)
+  expect(state.stations.shell.calls).toBe(1)
+  expect(state.inFlight).toEqual({})
+})
+
+test('main\'s turns are kept, the latest 6: a start opens one, a complete ends it', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+
+  const starts: number[] = []
+  for (let i = 0; i < 7; i += 1) {
+    starts.push(clock.now())
+    await startTurn($, `t${i}`)
+    await clock.advance(1000)
+    await endTurn($, `t${i}`)
+    await clock.advance(1000)
+  }
+  let { mainTurns } = await readState($)
+  expect(mainTurns).toEqual(starts.slice(1).map(start => ({ start, end: start + 1000 })))
+
+  const lastStart = clock.now()
+  await startTurn($, 't7')
+  mainTurns = (await readState($)).mainTurns
+  expect(mainTurns).toHaveLength(6)
+  expect(mainTurns.at(-1)).toEqual({ start: lastStart, end: null })
+
+  // A subagent's turn.start and turn.complete are no main turn.
+  await $.turn.start({ text: 'agent prompt', turnId: 't9', agentId: 'a1' } as never)
+  await finish($, 'a1')
+  expect((await readState($)).mainTurns).toEqual(mainTurns)
+})
+
+test('a standing main compaction counts; a subagent\'s or a skipped one does not', WITH_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES })
+  expect((await readState($)).compactions).toBe(1)
+  await $.session.compact({ trigger: 'auto', agentId: 'a9', messages: MESSAGES })
+  w.compacted = { skip: 'off' }
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES })
+  expect((await readState($)).compactions).toBe(1)
+})
+
+test('a /clear and a resume reset the station state', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+
+  for (const reason of ['clear', 'resume'] as const) {
+    await startTurn($)
+    await runStep($, clock, { turnId: 't0', index: 0 })
+    await clock.advance(10)
+    await $.session.compact({ trigger: 'manual', messages: MESSAGES })
+    const before = await readState($)
+    expect(before.stations.model.calls).toBe(1)
+    expect(Object.keys(before.inFlight)).toEqual(['u1'])
+    expect(before.compactions).toBe(1)
+    expect(before.mainTurns).toHaveLength(1)
+
+    await endSession($, reason)
+    const state = await readState($)
+    expect(state.stations).toEqual(emptyStationsState())
+    expect(state.inFlight).toEqual({})
+    expect(state.mainModel).toBeNull()
+    expect(state.compactions).toBe(0)
+    expect(state.mainTurns).toEqual([])
+  }
+})
+
+test('session.start empties the calls in flight', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await startTurn($)
+  await runStep($, clock, { turnId: 't0', index: 0 })
+  expect(Object.keys((await readState($)).inFlight)).toEqual(['u1'])
+
+  await $.session.start(START)
+  expect((await readState($)).inFlight).toEqual({})
+})
 
 test('turn.start logs a prompt as you, redacted and cut to 512, and an engine turn by its tag', WITH_READER,
   async ($, on) => {

@@ -12,13 +12,15 @@ import type {
 
 import {
   addAgentCost, agentOutcome, attributeCost, computeTurnStats, endKind, engineLineText, finishTask, fmtDuration,
-  fmtTokens, HANDBACK_TOOL, LOG_MAX, logText, parseStatus, parseTaskNotification, promptKind, pushLog, shortType,
-  SPAWN_TOOLS, stripFormat, sumNumstat, TASK_END, taskFromCall, taskLine, toolLabel,
+  fmtTokens, HANDBACK_TOOL, LOG_MAX, logText, MAIN_TURNS_MAX, parseStatus, parseTaskNotification, promptKind, pushLog,
+  shortType, SPAWN_TOOLS, stripFormat, sumNumstat, TASK_END, taskFromCall, taskLine, toolLabel,
 } from './stats'
 import type {
   AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, TaskEndStatus, TaskRow, Usage,
 } from './stats'
 import { cutAtTurn, restoreFromMessages } from './restore'
+import { emptyStationsState, STATION_ORDER, stationOf } from './stations'
+import type { InFlightCall, StationsState } from './stations'
 import { renderPane } from './view'
 import type { PaneData, SectionId } from './view'
 
@@ -37,6 +39,12 @@ const tasksAtom = atom({ plugin: 'session-panel', key: 'tasks' } as const, {})
 const logAtom = atom({ plugin: 'session-panel', key: 'log' } as const, [])
 const logCountAtom = atom({ plugin: 'session-panel', key: 'logCount' } as const, 0)
 const collapsedAtom = atom({ plugin: 'session-panel', key: 'collapsed' } as const, {})
+// The Session band: the stations, the calls in flight, the main model, the compactions and the latest main turns.
+const stationsAtom = atom({ plugin: 'session-panel', key: 'stations' } as const, emptyStationsState())
+const inFlightAtom = atom({ plugin: 'session-panel', key: 'inFlight' } as const, {})
+const mainModelAtom = atom({ plugin: 'session-panel', key: 'mainModel' } as const, null)
+const compactionsAtom = atom({ plugin: 'session-panel', key: 'compactions' } as const, 0)
+const mainTurnsAtom = atom({ plugin: 'session-panel', key: 'mainTurns' } as const, [])
 
 const PANE = 'session-panel'
 const TICK_MS = 30_000
@@ -120,6 +128,15 @@ let lastUsd: number | null = null
 // reads its own. The input of that tool is not in the engine types: `{ message: string }` is the shape seen in every
 // hand-back so far, so a different shape only leaves the answer out. It is emptied with the ledger.
 const handbacks = new Map<string, string>()
+
+// The most calls in flight the state keeps: past it, the entries with the least `at` (then the first inserted) go.
+const IN_FLIGHT_MAX = 64
+
+// How many ids of calls whose tool.call has run doneCallIds keeps.
+const DONE_CALLS_MAX = 256
+
+// The ids of the latest DONE_CALLS_MAX calls whose tool.call has run, oldest first; emptied with the hand-backs.
+const doneCallIds = new Set<string>()
 
 // How many times a /clear or a resume has started since this module loaded. The reset raises it once, at its start,
 // before it writes any atom, and addLog takes it when it starts: a call that finds it changed when it counts began
@@ -642,17 +659,27 @@ function requestProjectLater($: EngineInterface, now: number): void {
 async function syncAgents($: EngineInterface): Promise<void> {
   const listed = await $.agent.list()
   const now = await $.clock.now()
+  // The ids that the sync moves off `running`. The update runs again when its write misses, so it fills them anew.
+  const ended = new Set<string | null>()
   await update($, agentsAtom, rows => {
     const synced = { ...rows }
+    ended.clear()
     for (const info of listed) {
       const row = synced[info.id]
       const status = LISTED_STATUS[info.status]
       // An outcome that an event has recorded stands, whatever the list says later.
-      if (row?.status === 'running' && status !== undefined) synced[info.id] = { ...row, status, endedAt: now }
+      if (row?.status === 'running' && status !== undefined) {
+        synced[info.id] = { ...row, status, endedAt: now }
+        ended.add(info.id)
+      }
     }
 
     return synced
   })
+  if (ended.size > 0) {
+    await update($, inFlightAtom, held =>
+      Object.fromEntries(Object.entries(held).filter(([, call]) => !ended.has(call.agentId))))
+  }
 }
 
 // A subagent that SendMessage has resumed keeps its id, and runs again: its row says so, and the log says it once.
@@ -710,6 +737,40 @@ function chargeCost($: EngineInterface, agentId: string | undefined): Promise<vo
   costQueue = charged.catch(() => undefined)
 
   return charged
+}
+
+// Marks a call that the model has begun to write as in flight, at the time it runs, and pulses its station. A call
+// whose tool.call has run already stays out.
+async function markInFlight($: EngineInterface, id: string, tool: string, agentId: string | null): Promise<void> {
+  const at = await $.clock.now()
+  if (doneCallIds.has(id)) return
+  const station = stationOf(tool)
+  const call: InFlightCall = { station, agentId, at, label: logText(tool) }
+  await update($, inFlightAtom, held => {
+    // Checked again here, atomic with the write: a tool.call that lands after the check above wins.
+    if (doneCallIds.has(id)) return held
+    const entries = Object.entries({ ...held, [id]: call })
+    // The sort is stable: of the entries with the same `at`, the first inserted goes first.
+    if (entries.length > IN_FLIGHT_MAX) entries.sort(([, a], [, b]) => a.at - b.at)
+
+    return Object.fromEntries(entries.slice(-IN_FLIGHT_MAX))
+  })
+  await update($, stationsAtom, held => ({ ...held, [station]: { ...held[station], lastCallAt: at } }))
+}
+
+// Pulses Model at the first chunk of a step, and drops the agent's calls in flight from before the step began: their
+// tool.call never reached the mod.
+async function pulseModel($: EngineInterface, agentId: string | null, tStart: number): Promise<void> {
+  const at = await $.clock.now()
+  await update($, stationsAtom, held => ({ ...held, model: { ...held.model, lastCallAt: at } }))
+  await update($, inFlightAtom, held =>
+    Object.fromEntries(Object.entries(held).filter(([, call]) => call.agentId !== agentId || call.at >= tStart)))
+}
+
+// Counts a model step that stopped. Main's step names the main model; `model` is null for a subagent's.
+async function countModelStep($: EngineInterface, model: string | null): Promise<void> {
+  await update($, stationsAtom, held => ({ ...held, model: { ...held.model, calls: held.model.calls + 1 } }))
+  if (model !== null && model !== (await read($, mainModelAtom))) await update($, mainModelAtom, () => model)
 }
 
 async function readAndCharge($: EngineInterface, agentId: string | undefined): Promise<void> {
@@ -786,6 +847,8 @@ async function startPane($: EngineInterface): Promise<void> {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    // A reload in the middle of a call leaves no call in flight behind.
+    await update($, inFlightAtom, () => ({}))
     // The restore is asked by the first start of this module, and by one that comes after a resume left a restore due
     // (it covers what the due in-process restore would: the two must not both run). A start after the turn fallback
     // has asked already: its rows are there.
@@ -826,6 +889,7 @@ export const register: Register = on => {
     if (e.reason === 'clear' || e.reason === 'resume') {
       lastUsd = null
       handbacks.clear()
+      doneCallIds.clear()
       // A message that waits (unfolded) must not hide the `you` line of the next conversation.
       unfolded = []
       // No turn that starts while the reset runs finds a restore due; a resume leaves one when its reset is over.
@@ -837,6 +901,11 @@ export const register: Register = on => {
         await update($, lastTurnAtom, () => lastTurnAtom.initial)
         await update($, agentsAtom, () => agentsAtom.initial)
         await update($, tasksAtom, () => tasksAtom.initial)
+        await update($, stationsAtom, () => stationsAtom.initial)
+        await update($, inFlightAtom, () => inFlightAtom.initial)
+        await update($, mainModelAtom, () => mainModelAtom.initial)
+        await update($, compactionsAtom, () => compactionsAtom.initial)
+        await update($, mainTurnsAtom, () => mainTurnsAtom.initial)
         await update($, logCountAtom, () => logCountAtom.initial)
         await update($, logAtom, () => logAtom.initial)
         await update($, usageAtom, held => ({ ...held, contextTokens: undefined, contextPct: undefined }))
@@ -925,6 +994,11 @@ export const register: Register = on => {
     await update($, turnAtom, () => ({
       turnId: e.turnId, startedAt: now, costAtStart: cost?.usd ?? null, steps: [], toolIntervals: [],
     }))
+    // A main turn starts the failures of every station over, and opens a main turn.
+    await update($, stationsAtom, held => Object.fromEntries(
+      STATION_ORDER.map(station => [station, { ...held[station], failedThisTurn: 0 }]),
+    ) as StationsState)
+    await update($, mainTurnsAtom, held => [...held, { start: now, end: null }].slice(-MAIN_TURNS_MAX))
     // A turn the engine started on its own opens with a hyphenated lowercase tag (promptKind, engineTag:
     // `<task-notification>`); its line is the name of the tag. Reminder blocks before the text are skipped, and a text
     // that is only such blocks, or a compaction summary, has no line. Any other prompt is the person's, one that opens
@@ -962,15 +1036,30 @@ export const register: Register = on => {
     if (agentId !== undefined) inBackground($, () => reviveAgent($, agentId))
     const stream = next(e)
     for await (const chunk of stream) {
-      // The first chunk of any kind is the start of the response, the engine's own chunks included.
-      if (tFirst === null) tFirst = await $.clock.now()
-      if (chunk.kind === 'tool') hasTool = true
+      // The first chunk of any kind is the start of the response, the engine's own chunks included. Model's pulse
+      // starts there, off the stream; the agent's calls of its step before are over by now (it sends a request only
+      // when they have all returned), so an entry older than this step is one whose tool.call never reached the mod.
+      if (tFirst === null) {
+        tFirst = await $.clock.now()
+        $.clock.after(1, () => {
+          pulseModel($, e.agentId ?? null, tStart).catch(() => undefined)
+        })
+      }
+      if (chunk.kind === 'tool') {
+        hasTool = true
+        // The model has begun to write a call: it is in flight until its tool.call, which may only write after next(e).
+        const { id, name } = chunk
+        $.clock.after(1, () => {
+          markInFlight($, id, name, e.agentId ?? null).catch(() => undefined)
+        })
+      }
       if (chunk.kind === 'text') hasText = true
       if (chunk.kind === 'stop') {
         tEnd = await $.clock.now()
         usage = chunk.usage ?? {}
         $.clock.after(1, () => {
           chargeCost($, e.agentId).catch(() => undefined)
+          countModelStep($, e.agentId === undefined ? logText(e.model) : null).catch(() => undefined)
         })
       }
       yield chunk
@@ -991,14 +1080,34 @@ export const register: Register = on => {
     // wait.
     const isAbandoned = ran.isError === true && next.signal.aborted
     const t1 = await $.clock.now()
-    // A call that may have changed a file asks for a read of the project, whatever its outcome (a command that failed
-    // may have changed some first); a denied one never ran. A call that core ran read-only (a Bash `ls`) changed no
-    // file, so it asks for none.
-    if (ran.deny === undefined && ran.isReadOnly !== true && WRITE_TOOLS.includes(e.tool)) requestProjectLater($, t1)
+    // The call's station, its flight and its turn are written first, before any read that can throw (a root). A
+    // failure is one whose Log line is an error with a mark: not denied, not abandoned, not of an agent with no row
+    // (the line's kind below).
+    const station = stationOf(e.tool)
+    const { who, isUnknown } = await whoIs($, e.agentId)
+    const isStationFailure = ran.isError === true && ran.deny === undefined && !isAbandoned && !isUnknown
+    await update($, stationsAtom, held => ({
+      ...held,
+      [station]: {
+        ...held[station], calls: held[station].calls + 1,
+        failedThisTurn: held[station].failedThisTurn + (isStationFailure ? 1 : 0),
+      },
+    }))
+    const callId = e.tool_use_id
+    if (callId !== undefined) {
+      doneCallIds.delete(callId)
+      doneCallIds.add(callId)
+      if (doneCallIds.size > DONE_CALLS_MAX) doneCallIds.delete(doneCallIds.values().next().value as string)
+      await update($, inFlightAtom, held => Object.fromEntries(Object.entries(held).filter(([key]) => key !== callId)))
+    }
     if (e.agentId === undefined) {
       const interval: Interval = [t0, t1]
       await update($, turnAtom, acc => acc && { ...acc, toolIntervals: [...acc.toolIntervals, interval] })
     }
+    // A call that may have changed a file asks for a read of the project, whatever its outcome (a command that failed
+    // may have changed some first); a denied one never ran. A call that core ran read-only (a Bash `ls`) changed no
+    // file, so it asks for none.
+    if (ran.deny === undefined && ran.isReadOnly !== true && WRITE_TOOLS.includes(e.tool)) requestProjectLater($, t1)
     const isFailed = ran.deny !== undefined || ran.isError === true
     // A subagent that reports through the hand-back tool (auto mode) says it in its `done` line: the message is kept
     // for it. The input is not typed, so only a string counts.
@@ -1022,7 +1131,6 @@ export const register: Register = on => {
       const took = fmtDuration(t1 - t0)
       const outcome = ran.deny !== undefined ? 'denied' : isAbandoned ? took : `${isFailed ? '✗' : '✓'} ${took}`
       const label = logText(toolLabel(e.tool, e, await $.session.root()))
-      const { who, isUnknown } = await whoIs($, e.agentId)
       // The engine's own forks and a workflow's agents carry ids that no agent.spawn announced, so the agents atom has
       // no row for them. Core refuses the tools of most forks, so a fork that tries one would show a red failure that
       // nobody caused (the 0.4.1 live check). The pane cannot tell a fork from a workflow's agent, whose failure is
@@ -1041,6 +1149,10 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const turns = mainTurns
     const done = await next(e)
+    // The agent's turn is over, and so are its calls: none of them is in flight any more.
+    const owner = e.agentId ?? null
+    await update($, inFlightAtom, held =>
+      Object.fromEntries(Object.entries(held).filter(([, call]) => call.agentId !== owner)))
     if (e.agentId === undefined) {
       // A turn of the main agent ends, and the loop is idle from this time, which is read here, after the chain
       // beneath has run: the engine takes a queued notice in only after every plugin's turn.complete and
@@ -1052,6 +1164,13 @@ export const register: Register = on => {
           if (turns === mainTurns) idleSince = now
         })
         .catch(() => undefined)
+      // The main turn that runs ends now.
+      const now = await $.clock.now()
+      await update($, mainTurnsAtom, held => {
+        const last = held.at(-1)
+
+        return last === undefined || last.end !== null ? held : [...held.slice(0, -1), { ...last, end: now }]
+      })
       const acc = await read($, turnAtom)
       if (acc !== null) {
         // A turn stopped before any response leaves the previous one shown: the spec shows the last completed turn.
@@ -1172,6 +1291,7 @@ export const register: Register = on => {
       e.agentId === undefined && compacted.skip === undefined && compacted.tokensBefore !== undefined &&
       compacted.tokensAfter !== undefined
     ) {
+      await update($, compactionsAtom, count => count + 1)
       const text = `compacted ${fmtTokens(compacted.tokensBefore)} → ${fmtTokens(compacted.tokensAfter)}`
       await addLog($, await $.clock.now(), 'main', text, 'info')
       inBackground($, () => refreshUsage($))
