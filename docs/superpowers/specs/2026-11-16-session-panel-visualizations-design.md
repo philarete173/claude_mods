@@ -2,14 +2,15 @@
 
 ## 1. Status, summary, goals
 
-Date: 2026-11-16. Status: approved by the owner, round by round (rulings R1–R17) and section by section (technical
+Date: 2026-11-16. Status: approved by the owner, round by round (rulings R1–R19) and section by section (technical
 decisions T1–T6). Not implemented yet. This spec consolidates the design record; it adds no decision of its own.
 Whatever the record leaves open is in §15.
 
 The record, in rising precedence: the first visual spec, the r3 and r4 addenda, the rulings (a later R over an earlier
-one), the technical decisions. The rulings and the technical decisions live in this spec as R1–R17 and T1–T6.
+one), the technical decisions. The rulings and the technical decisions live in this spec as R1–R19 and T1–T6.
 Round 6 settled the first draft's open questions (R16 a–j, folded into their sections) and left three open (R17,
-§15).
+§15). Round 7 (R18) corrected the wide mode to stretched, which voids R16 a; R19 caps the band at
+4096 px on wider bodies.
 
 This spec adds to the main spec (`2026-10-07-session-panel-design.md`) and the visual spec
 (`2026-10-07-session-panel-visual.md`, "the base spec" below). Where it is silent, they stand: cells and `CELL_PX`,
@@ -22,8 +23,9 @@ Code references are into `plugins/session-panel/` as of main 453c46d (0.6.1).
 0.7.0 adds three visual blocks to the pane:
 
 - **The Session band.** The context ring becomes the core of a band, with eight tool "stations" around it: four on
-  each side (layout A2), each fed by a line from the core. A pulse runs from the core to a station when the station
-  is called. The band replaces the Context label row and the meter row.
+  each side (layout A2), each fed by a line from the core. On a wide pane the two sides reach the band's edges. A
+  pulse runs from the core to a station when the station is called. The band replaces the Context label row and
+  the meter row.
 - **The turn ribbon.** One bar per turn, one segment per model call and per tool call, each in its station's hue. It
   replaces the Turn stats table; the table stays behind a closed `details` fold.
 - **Activity.** One lane per subagent, task and the main agent on a shared time axis. It replaces the Subagents and
@@ -34,8 +36,8 @@ Code references are into `plugins/session-panel/` as of main 453c46d (0.6.1).
 - One colour system: each of the eight stations has one hue, and every mark in the ribbon and the lanes is drawn in
   the hue of its station, at full strength. States show by shape (R5).
 - Every new element works at every pane width, from 300 px to a pane maximized on a 21:9 monitor (≈ 3400 px), and in
-  the terminal from 40 to ≈ 200 columns (R8). Circles do not grow without limit, the band does not look empty, and no
-  element grows with the session.
+  the terminal from 40 to ≈ 200 columns (R8). Circles do not grow without limit, the band fills its width (R18),
+  and no element grows with the session.
 - Bounded state and bounded drawing: nothing grows with the session's length (T1, T2).
 
 ### 1.3 Non-goals
@@ -248,15 +250,17 @@ Activity header    <path d="M1.5 3.5h6M4.5 7h8M2.5 10.5h4.5"/>
   redrawn to the grid.
 - The Activity header icon is `NEUTRAL`, like every section icon. Turn stats keeps its bar-chart icon.
 
-## 4. The Session band (A2, centred; R11, R13)
+## 4. The Session band (A2, stretched; R11, R13, R18)
 
 The core sits in the middle of the band. Left of it, from the core outward: **Model, Files, Shell, Web**. Right of
 it, outward: **Agents, MCP, Skills, You**. Each side is fed by its own trunk from the core, and pulses go both ways.
 On a narrow pane each side is two rows of two on a forked trunk; on a wide pane each side is one row of four on a
-straight rail. On a wide pane the pitch is capped at 72 px and the whole group sits in the band's centre.
+straight rail. On every pane the core stays at the band's centre and each side's stations reach the band's edge:
+the pitch grows with the width, the circles keep r 11, and only the gaps grow (R18, over R13's pick).
 
-One `Svg`, `G` px wide, inside `<Box height={5}>` (two rows per side) or `<Box height={4}>` (one row), with
-`overflow="hidden"` and `justifyContent="center"`. The centring is the Box's, so it does not depend on `CELL_PX`.
+One `Svg` inside `<Box height={5}>` (two rows per side) or `<Box height={4}>` (one row), with `overflow="hidden"`.
+While the pitch is ≤ 72 the Svg is `G = W` px wide. Above that it is `W − 8` px wide and left-aligned: one cell of
+slack, so an over-estimate of `W` never clips the outer label.
 
 ### 4.1 Geometry
 
@@ -267,9 +271,9 @@ One `Svg`, `G` px wide, inside `<Box height={5}>` (two rows per side) or `<Box h
 | two rows per side | **5 rows = 95 px** | 47.5 | 25.5 and 68.5 |
 | one row per side | **4 rows = 76 px** | 33 | 33 (the rail is the core's centre line) |
 
-- `Xc = G/2`, the core's x inside the Svg. Each side's area `S = (W − 64)/2 − 8`, where `W` = body px = `cols × 8`.
-- `k` = 2 (two rows per side) or 4 (one row). Pitch `P = min(S / k, 72)`.
-- Group width `G = 64 + 2(8 + k·P)`.
+- `Xc = W/2`, the core's x, where `W` = body px = `cols × 8`. Each side's area `S = (W − 64)/2 − 8`.
+- `k` = 2 (two rows per side) or 4 (one row). Pitch `P = S / k`, with no cap.
+- Group width `G = 64 + 2(8 + k·P)`, which equals `W`.
 - Right `cx = Xc + 40 + P(i + 0.5)`; left `cx = Xc − 40 − P(i + 0.5)`; `i` counts from the core outward.
 - Two rows per side: row 1 holds the first two from the core (left: Model inner, Files outer; right: Agents inner,
   MCP outer); row 2 the next two (left: Shell, Web; right: Skills, You).
@@ -321,6 +325,10 @@ No two texts touch at any width:
 
 ### 4.3 Worked geometry
 
+Up to `W = 368` (a pane of ≈ 400 px) the two-row pitch stays ≤ 72, so the stretched band is the same as one with a
+capped pitch; the 300 and 360 px examples hold in both. The modes part from `W > 368` (two rows) and `W > 656`
+(one row).
+
 **360 px pane (W 328): two rows per side, band 95 px.** `G = 328`, `Xc = 164`, core `(164, 47.5)`; `S = 124`,
 `P = 62`. Text 10px inline.
 
@@ -351,40 +359,53 @@ Edge checks: Web's disc left edge is 17.5 and its text slot 1…61; You's badge 
 ≈ 43.5 ≤ `P − 2`). The outer slots span 1…267; Web's disc left edge is 10; the branch from each fork
 to the inner circle is 16.5 px.
 
-**900 px pane (W 868): one row of four per side, band 76 px.** `P = 72` (the cap), `G = 656`, so the Svg sits
-`(868 − 656)/2 = 106` px from the body's left edge. In the band's coordinates the core is at `(434, 33)`; inside the
-Svg, at `(328, 33)`.
+**450 px pane (W 418): two rows per side, band 95 px.** `P = 84.5`, the Svg 410 px wide; core `(209, 47.5)`, ring
+edges 183 / 235, forks at 173 and 245. Left cx 126.75 (Model, Shell) and 42.25 (Files, Web); right cx 291.25
+(Agents, Skills) and 375.75 (MCP, You). Rails `M167 25.5H42.25`, `M167 68.5H42.25`, `M251 25.5H375.75`,
+`M251 68.5H375.75`. Pulse lengths 61.1–146.6 px, all 0.6 s. Text 10px inline.
 
-| | Band x | Svg x |
+**900 px pane (W 868): one row of four per side, band 76 px.** `P = 98.5`, the Svg 860 px wide; core `(434, 33)`,
+ring edges 408 / 460. Text 10px stacked.
+
+| Side | cx, from the core outward | Rail = every pulse path |
 |---|---|---|
-| Ring edges | 408 / 460 | 302 / 354 |
-| Left cx (Model, Files, Shell, Web) | 358, 286, 214, 142 | 252, 180, 108, 36 |
-| Right cx (Agents, MCP, Skills, You) | 510, 582, 654, 726 | 404, 476, 548, 620 |
-| Rails = pulse paths (in the Svg) | — | `M302 33H36` / `M354 33H620`; pulses end at `cx ± 11` |
+| left (Model, Files, Shell, Web) | 344.75, 246.25, 147.75, 49.25 | `M408 33H49.25`; pulses end `H{cx+11}` |
+| right (Agents, MCP, Skills, You) | 523.25, 621.75, 720.25, 818.75 | `M460 33H818.75`; pulses end `H{cx−11}` |
 
-Pulse lengths 39, 111, 183 and 255 px: 0.6 s, except Web and You at 0.62 s. Text 10px stacked.
+Pulse lengths, from the core outward on either side: 52.3, 150.8, 249.3, 347.8 px; durations 0.6, 0.6, 0.61, 0.72 s.
+
+**≈ 3400 px pane (W 3368): one row of four per side,** below R19's 4096 px cap (§4.4). `P = 411`, the Svg
+3360 px wide; core `(1684, 33)`, ring edges 1658 / 1710.
+
+| Side | cx, from the core outward | Rail = every pulse path |
+|---|---|---|
+| left (Model, Files, Shell, Web) | 1438.5, 1027.5, 616.5, 205.5 | `M1658 33H205.5`; pulses end `H{cx+11}` |
+| right (Agents, MCP, Skills, You) | 1929.5, 2340.5, 2751.5, 3162.5 | `M1710 33H3162.5`; pulses end `H{cx−11}` |
+
+Pulse lengths, from the core outward on either side: 208.5, 619.5, 1030.5, 1441.5 px; durations 0.6, 0.96, 1.24, 1.4 s.
 
 **At the breakpoint** (W 464, P 48, stacked 10px; `Agents` ≈ 37 ≤ 46): the outer texts span 1…463 ≤ 464.
 
 ### 4.4 Widths, 300 to ≈ 3400 px
 
 The pane's rule (base §5.1, §6.2, §9): a row's bar parts stretch to the edge, and the marks and text keep their size.
-Images stop at 4096 px (base §12 item 8). The band's group does not stretch: its pitch is capped and the group is
-centred, so it stays one compact instrument, every count within a glance of the core.
+Images stop at 4096 px (base §12 item 8). The band follows the same rule: the core stays at the centre, the sides
+reach the edges, and the circles and text keep their size; only the gaps grow (R18).
 
-| Pane / W | Rows per side | P | Text | Band rows | G |
+| Pane / W | Rows per side | P | Text | Band rows | Svg width |
 |---|---|---|---|---|---|
 | 300 / 268 | 2 | 47 | 9px inline | 5 | 268 |
 | 360 / 328 | 2 | 62 | 10px inline | 5 | 328 |
-| 450 / 418 | 2 | 72 (cap) | 10px inline | 5 | 368 |
+| 450 / 418 | 2 | 84.5 | 10px inline | 5 | 410 |
 | ≈ 496 / 464 (breakpoint) | 1 | 48 | 10px stacked | 4 | 464 |
-| 900 / 868 | 1 | 72 (cap) | 10px stacked | 4 | 656 |
-| ≈ 3400 / 3368 | 1 | 72 (cap) | 10px stacked | 4 | 656 |
+| 900 / 868 | 1 | 98.5 | 10px stacked | 4 | 860 |
+| ≈ 3400 / 3368 | 1 | 411 | 10px stacked | 4 | 3360 |
 
 - The minimum gap between circles is `P − 22` (≥ 25 at every width here).
-- `G ≤ 4096` at every width; the largest group is 656 px.
+- **Wider than 4096 px** (R19): on a body wider than 4096 px (`SVG_MAX_PX`) the band is drawn 4096 px wide, its
+  stretched layout is computed for that width (`W = 4096` in the formulas above), and it is centred in the body. Its
+  stations are never clipped. The ≈ 3400 px example is below this cap.
 - The ribbon and the lanes stretch like the meters (§5.5, §6.6).
-- On a wide pane the band's sides stay blank: the owner chose the centred group knowing this (R13, R16 a).
 
 ### 4.5 Trunk, forks and rails (R10)
 
@@ -441,8 +462,8 @@ A pulse runs from the core to a station when the station gets a call (a model st
 - Timing: `keyPoints="0;1" keyTimes="0;1" calcMode="spline" keySplines=".2 .6 .35 1"`.
 - **Duration rule:** `dur = clamp(0.6 × √(L / 240), 0.6, 1.4)` s, where `L` is the path's length in px. Short paths
   keep 600 ms; longer ones slow down gently. `L` for a two-row path is
-  `4 + 9.42 + (|cy − cy0| − 12) + 9.42 + the branch-and-rail run`. In centred A2 the longest path is 255 px
-  (0.62 s).
+  `4 + 9.42 + (|cy − cy0| − 12) + 9.42 + the branch-and-rail run`. Long paths fly longer (R18): at 900 px the
+  outer paths take 0.72 s; at ≈ 3400 px they run 1441.5 px and take the 1.4 s cap.
 - The fade and the arrival flash follow at `begin + dur` (§7).
 - **Lifetime** (R16 g): a pulse is drawn while its age is below its travel duration + 150 ms of fade + 300 ms of
   flash, so the whole one-shot sequence is covered, each part with its own phase offset.
@@ -850,7 +871,7 @@ All SMIL, inside the Svgs; nothing animates in the terminal.
 | Live end cap (ribbon, lanes) | `opacity` | 1 → 0.3 → 1 | 1.6 s | spline `.45 0 .55 1` | indefinite |
 | Ribbon live segment growth | `width`, cap `x` | linear to the ceiling | ceiling − elapsed | linear | once, freeze |
 | Glow | `opacity` | 0.12 → 0.24 → 0.12, both themes (R16 h) | 2.4 s | as the cap | indefinite |
-| Pulse (new call) | 3 dots, motion | core → station edge (§4.8) | §4.8 | spline `.2 .6 .35 1` | once |
+| Pulse (new call) | 3 dots, motion | core → station edge | 0.6–1.4 s (§4.8) | spline `.2 .6 .35 1` | once |
 | Pulse fade | dots `opacity` | 1 → 0 | 150 ms after arrival | linear | once |
 | Arrival flash | station `stroke-width` | 1.25 → 2.25 → 1.25 | 300 ms after arrival | ease-out | once |
 
@@ -1017,6 +1038,8 @@ pulses and the glows' breathing and makes the caps static.
   - The type tag follows R15.
 - **Edge cases:**
   - counts ≥ 1000 read `1.2k`;
+  - on a body wider than 4096 px the band is drawn 4096 px wide, laid out for that width and centred; no station is
+    clipped (R19);
   - running counts above 9 read `×9+`;
   - lanes past 8 go into `+N more`;
   - steps past N merge;
@@ -1068,7 +1091,7 @@ The rules for each result:
   - compactions;
   - the in-flight clamp.
 - **Restore:** counts and compactions from the history; dashed lanes.
-- **Drawing,** at pane widths 300, 360, 496 (A2's switch to one row per side), 900 and 3400, in the centred layout:
+- **Drawing,** at pane widths 300, 360, 496 (A2's switch to one row per side), 900 and 3400, stretched (R18):
   - the trunk lies on the ring's centre line;
   - no two text or mark boxes overlap;
   - the element counts are fixed;
@@ -1104,7 +1127,7 @@ The rules for each result:
 ### 13.2 The design reference page
 
 `docs/design/session-panel-visualizations.html` is the approved mockup (R2, R6, R12 as narrowed by R13): two
-columns, Today | A2 in the centred layout, each with its terminal pane under it. It draws the worked example of
+columns, Today | A2 in the stretched layout, each with its terminal pane under it. It draws the worked example of
 §2.3. The page itself, not the pane, has:
 
 - controls for the pane width (`300 | 360 | 450 | 900 | Full`), the terminal width (`40 | 44 | 60 | 120`) and the
@@ -1135,10 +1158,9 @@ columns, Today | A2 in the centred layout, each with its terminal pane under it.
 - **Six stations:** Skills and You tools had no station of their own; R7 maps every tool to one of eight.
 - **Layout B** (the core as a text line over one row of eight): the ring loses its size and its compaction ticks, and
   below a ~305 px pane the station labels drop to icons and counts; dropped in round 4.
-- **A1** (the core on the left): the owner picked A2 (R13). A1's one-row paths run up to 543 px (≈ 0.9 s), against
-  A2's 255 px.
-- **The stretched mode** (the pitch grows to reach the band's edges): eight 22 px circles spread up to 412 px apart,
-  the sparse look R8 asked to avoid, with pulses up to 1.4 s across a 21:9 pane (R13).
+- **A1** (the core on the left): the owner picked A2 (R13).
+- **The centred mode** (the pitch capped at 72 px, the group in the band's centre): the owner chose the stretched
+  mode, which fills the band's width (R18).
 - **The fixed 12 steps** in the ribbon: replaced by R14's N, so the detail follows the bar's width.
 - **Badges beside the circles on the rail line** (to save the band's fifth row): they would cover the pulses' path.
 

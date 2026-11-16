@@ -125,7 +125,7 @@
     <div class="pane term"><div class="pane-head"><span>Session</span><span aria-hidden="true">✕</span></div><div class="pane-body" id="today-t"></div></div>
   </section>
   <section class="col" id="col-new">
-    <div class="colhead"><h2>Visualized pane</h2><p class="cap">The Session block holds the context core with eight stations, four on each side: Model, Files, Shell and Web to the left; Agents, MCP, Skills and You to the right. A pulse runs from the core to the station of each new call. Under a ~500 px pane each side forks into two rows of two; wider, one row of four, centred at a capped spacing. The turn ribbon replaces the Turn stats table (the table stays behind ‘details’), and the Activity lanes replace the Subagents and Tasks lists; every colour in them is a station colour from the Session block. Context sources stays.</p></div>
+    <div class="colhead"><h2>Visualized pane</h2><p class="cap">The Session block holds the context core with eight stations, four on each side: Model, Files, Shell and Web to the left; Agents, MCP, Skills and You to the right. A pulse runs from the core to the station of each new call. Under a ~500 px pane each side forks into two rows of two; wider, one row of four; on a wide pane the core stays in the middle and each side’s stations reach the band’s edge. The turn ribbon replaces the Turn stats table (the table stays behind ‘details’), and the Activity lanes replace the Subagents and Tasks lists; every colour in them is a station colour from the Session block. Context sources stays.</p></div>
     <div class="pane desk"><div class="pane-head"><span>Session</span><span aria-hidden="true">⤢&nbsp;&nbsp;&nbsp;✕</span></div><div class="pane-body" id="new-d"></div></div>
     <div class="tlabel"></div>
     <div class="pane term"><div class="pane-head"><span>Session</span><span aria-hidden="true">✕</span></div><div class="pane-body" id="new-t"></div></div>
@@ -475,8 +475,8 @@
 
   // ==== The band: the core in the middle, a trunk each way, branches and stations ===============================
   // Layout as data, from the body width W. Each side has four stations, in two rows of two on its own forked trunk
-  // under a 464 px body, else one row of four on a straight rail. The pitch fills the side up to a cap of 72 px, and
-  // the whole group sits in the band's centre.
+  // under a 464 px body, else one row of four on a straight rail. The pitch fills the side, with no cap: on a wide pane
+  // the core stays in the middle and each side's stations reach the band's edge (circles keep r 11; the gaps grow).
   const ARC = 6, ARC_LEN = Math.PI * ARC / 2; // the r 6 quarter arcs of the fork (and of the pulse's T junction)
   const SIDES = [['model', 'files', 'shell', 'web'], ['agents', 'mcp', 'skills', 'you']]; // from the core outward
   const byId = id => STATIONS.find(s => s.id === id);
@@ -484,13 +484,17 @@
   const labelW = (t, s) => [...t].reduce((n, ch) => n + (ch >= 'A' && ch <= 'Z' ? 0.72 : 0.6) * s, 0);
   const countText = n => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
   const countW = (t, s) => [...t].reduce((n, ch) => n + (ch === '.' ? 0.3 : 0.62) * (s + 1), 0);
-  function bandGeometry(W) {
+  function bandGeometry(bodyW) {
+    // A body wider than SVG_MAX gets a band SVG_MAX wide, laid out for that width and centred in the body.
+    const isCapped = bodyW > SVG_MAX;
+    const W = Math.min(bodyW, SVG_MAX);
     const twoRows = W < 464; // where the one-row pitch would fall below 48
     const k = twoRows ? 2 : 4; // stations on one rail
-    const P = Math.min(((W - 64) / 2 - 8) / k, 72);
-    const G = 64 + 2 * (8 + k * P);
-    const width = Math.min(G, SVG_MAX);
-    const Xc = G / 2;
+    const P = ((W - 64) / 2 - 8) / k;
+    const G = 64 + 2 * (8 + k * P); // = W
+    // Past a 72 px pitch the Svg is a cell short of the body, so a body measured high never clips the outer text.
+    const width = isCapped ? SVG_MAX : P > 72 ? W - 8 : G;
+    const Xc = W / 2;
     const cy0 = twoRows ? 47.5 : 33; // the core's centre line: the trunks leave the ring on it
     const rowsY = twoRows ? [25.5, 68.5] : [33];
     const sides = [[SIDES[0], -1], [SIDES[1], 1]].map(([ids, d]) => {
@@ -532,7 +536,7 @@
       return (twoRows ? lw + 3 + cw : Math.max(lw, cw)) <= P - 2;
     });
     const textSize = fits(10) ? 10 : fits(9) ? 9 : 0;
-    return { twoRows, P, G, width, height: twoRows ? 95 : 76, Xc, cy0, sides, all, textSize };
+    return { twoRows, P, G, width, height: twoRows ? 95 : 76, Xc, cy0, sides, all, textSize, isCapped };
   }
 
   function coreSvg(P, Xc, cy0) {
@@ -598,8 +602,8 @@
     // Z-order: core, trunk/fork/rails, pulses, glows, circles, icons, badges and discs, text.
     const svg = `<svg class="band" data-cy0="${g.cy0}" width="${f2(g.width)}" height="${g.height}" viewBox="0 0 ${f2(g.width)} ${g.height}" role="img" aria-label="${esc(alt)}">` +
       `${coreSvg(P, g.Xc, g.cy0)}${rails}${pulses}${layers.glows}${layers.circles}${layers.icons}${layers.badges}${layers.text}</svg>`;
-    // The group in a Box that centres it, so the centring does not depend on CELL_PX.
-    return `<div data-new><div style="height:${g.height}px;overflow:hidden;display:flex;justify-content:center">${svg}</div></div>`;
+    // The Svg from the left of the body, the core at the body's middle; a capped band is centred in the body.
+    return `<div data-new><div style="height:${g.height}px;overflow:hidden${g.isCapped ? ';display:flex;justify-content:center' : ''}">${svg}</div></div>`;
   }
 
   // ==== Activity lanes: the label column and the bar area from the width; a state shows by shape ==================
