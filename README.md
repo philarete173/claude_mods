@@ -112,6 +112,8 @@ Parts of the mod follow these MIT-licensed projects, and the borrowed code is ma
   `redact` applies last, as they were copied, and the session-log design.
 - Desktop Statusline by George Liu ([centminmod/claude-plugins](https://github.com/centminmod/claude-plugins)): the
   SVG meter, its colours and thresholds, and the countdown format.
+- [lot-map](https://github.com/alexeyw/lot-map) (© 2026 Aleksei Volodin): the station map of the Session block,
+  its stations and three of their icons, and its SVG motion and theme techniques.
 
 Their license notices are in [THIRD_PARTY_NOTICES.md](plugins/session-panel/THIRD_PARTY_NOTICES.md).
 

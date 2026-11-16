@@ -1,0 +1,1000 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>session-panel: the visualized pane</title>
+<style>
+  /* ---- Page ------------------------------------------------------------------------------------------------ */
+  :root {
+    --ui-font: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+    --mono-font: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  }
+  [data-theme=dark] {
+    --page-bg: #141413; --page-fg: #d6d4cc; --page-h: #f2f0e9; --page-cap: #8d8a82;
+    --tg-border: #3a3936; --tg-active: #2e2d2b; --accent: #e1ac6e; color-scheme: dark;
+  }
+  [data-theme=light] {
+    --page-bg: #f3f1ea; --page-fg: #3a3934; --page-h: #1d1c1a; --page-cap: #77756e;
+    --tg-border: #d4d1c7; --tg-active: #ffffff; --accent: #b8762a; color-scheme: light;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--page-bg); }
+  body { margin: 0; padding: 40px; color: var(--page-fg); font: 14px/1.55 var(--ui-font); }
+  .hrow { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; }
+  h1 { margin: 0; font-size: 21px; font-weight: 650; color: var(--page-h); letter-spacing: -0.01em; }
+  .lede { margin: 6px 0 0; max-width: 1144px; color: var(--page-cap); }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+  .ccap { font: 12px/1.4 var(--ui-font); color: var(--page-cap); }
+  .ccap:not(:first-child) { margin-left: 10px; }
+  .seg { display: inline-flex; height: 28px; border: 1px solid var(--tg-border); border-radius: 6px; overflow: hidden; flex: none; }
+  .seg button { all: unset; cursor: pointer; padding: 0 11px; font: 500 12px/26px var(--ui-font); color: var(--page-cap); }
+  .seg button + button { border-left: 1px solid var(--tg-border); }
+  .seg button[aria-pressed=true] { background: var(--tg-active); color: var(--page-h); }
+  .seg button:focus-visible { outline: 2px solid #5b9cf0; outline-offset: -2px; }
+
+  .cols { display: flex; flex-wrap: wrap; gap: 32px; align-items: flex-start; margin-top: 28px; }
+  .cols.stack { flex-direction: column; gap: 48px; }
+  .col { position: relative; width: max-content; flex: none; }
+  .col h2 { margin: 0 0 4px; font-size: 15px; font-weight: 650; color: var(--page-h); }
+  .cap { margin: 0 0 14px; font: 12px/1.4 var(--ui-font); color: var(--page-cap); max-width: 360px; }
+  .cap code { font: 11.5px var(--mono-font); }
+  .tlabel { margin: 16px 0 6px; font: 12px/1.4 var(--ui-font); color: var(--page-cap); }
+
+  /* The new-block marker: outside the pane, so the pane stays as it would ship. */
+  .marker { position: absolute; left: -11px; width: 3px; border-radius: 1.5px; background: var(--accent); }
+  .marker span {
+    position: absolute; right: 6px; top: 50%; transform: translateY(-50%) rotate(180deg); writing-mode: vertical-rl;
+    font: 600 10px/1 var(--ui-font); color: var(--accent); letter-spacing: .04em;
+  }
+
+  /* ---- Pane themes (as docs/design/session-panel-preview.html) ------------------------------------------------ */
+  [data-theme=dark] .desk { --bg: #262624; --edge: #3a3936; --fg: #ecebe6; --dim: #9c9a93; --success: #5bb56c; --warning: #e0a030; --error: #ef5f63; --focus: #5b9cf0; --chrome: #8f8d86; }
+  [data-theme=light] .desk { --bg: #fbfaf7; --edge: #dad8cf; --fg: #1d1c1a; --dim: #6f6d66; --success: #2e8540; --warning: #a86500; --error: #c8363c; --focus: #2f7de1; --chrome: #77756e; }
+  [data-theme=dark] .term { --bg: #17171a; --edge: #34343a; --fg: #d8d8d8; --dim: #7f7f87; --success: #6cc36c; --warning: #e5c07b; --error: #e06c75; --focus: #5b9cf0; --chrome: #7f7f87; }
+  [data-theme=light] .term { --bg: #fbfbf9; --edge: #d6d6d2; --fg: #1f1f1f; --dim: #8a8a8a; --success: #2e8540; --warning: #a86500; --error: #c8363c; --focus: #2f7de1; --chrome: #8a8a8a; }
+
+  /* The pane frame belongs to the app. Body = pane − 2 × (1 border + 15 padding). */
+  .pane { background: var(--bg); color: var(--fg); border: 1px solid var(--edge); border-radius: 10px; overflow: hidden; }
+  .pane-head { display: flex; align-items: center; justify-content: space-between; height: 38px; padding: 0 14px 0 15px; color: var(--chrome); font: 13px var(--ui-font); user-select: none; }
+  .desk .pane-body { padding: 2px 15px 18px; font: 13px/19px var(--ui-font); }
+  .term { font: 13px/17px var(--mono-font); }
+  .term .pane-head { height: 30px; font: 13px var(--mono-font); padding: 0 1ch; }
+  .term .pane-body { padding: 0 1ch 1ch; }
+
+  /* ---- Desktop element kit: rows of whole cells (8 px), as view.tsx lays them out --------------------------- */
+  .r { display: flex; align-items: center; height: 19px; column-gap: 8px; min-width: 0; }
+  .r.g2 { column-gap: 16px; }
+  .r.sb { justify-content: space-between; }
+  .r.wrap { flex-wrap: wrap; height: auto; }
+  .slot { display: flex; align-items: center; width: 16px; flex: none; }
+  svg { display: block; flex: none; }
+  .fx { flex: none; white-space: pre; }
+  .sh { display: flex; flex: 0 1 auto; min-width: 0; overflow: hidden; }
+  .gr { display: flex; flex: 1 1 auto; min-width: 0; overflow: hidden; }
+  .end { justify-content: flex-end; }
+  .cell { display: flex; flex: none; overflow: hidden; }
+  .ct { white-space: pre; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .dim { color: var(--dim); } .ok { color: var(--success); } .err { color: var(--error); }
+  .b { font-weight: 650; }
+  .rule { display: flex; align-items: center; height: 19px; }
+  .rule i { display: block; flex: 1; height: 1px; background: rgba(128, 128, 128, .35); }
+  .btn { all: unset; cursor: pointer; color: var(--fg); border-radius: 3px; padding: 0 1px; white-space: pre; flex: none; }
+  .btn.dim { color: var(--dim); }
+  .btn:hover { color: var(--fg); }
+  .btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+  /* ---- Terminal kit: one row = one line of at most `cols` columns ------------------------------------------- */
+  .tr { height: 17px; white-space: pre; overflow: hidden; }
+  .tr .bo { font-weight: 700; }
+  .tbtn { all: unset; cursor: pointer; color: var(--dim); }
+  .tbtn:hover { color: var(--fg); }
+  .tbtn:focus-visible { outline: 2px solid var(--focus); }
+</style>
+</head>
+<body>
+<header>
+  <div class="hrow">
+    <h1>session-panel: the visualized pane</h1>
+    <div class="controls">
+      <span class="ccap" id="cap-pane">Pane</span>
+      <div class="seg" role="group" aria-labelledby="cap-pane">
+        <button type="button" data-pane="300">300</button><button type="button" data-pane="360">360</button><button type="button" data-pane="450">450</button><button type="button" data-pane="900">900</button><button type="button" data-pane="full">Full</button>
+      </div>
+      <span class="ccap" id="cap-term">Terminal</span>
+      <div class="seg" role="group" aria-labelledby="cap-term">
+        <button type="button" data-term="40">40</button><button type="button" data-term="44">44</button><button type="button" data-term="60">60</button><button type="button" data-term="120">120</button>
+      </div>
+      <span class="ccap" id="cap-theme">Theme</span>
+      <div class="seg" role="group" aria-labelledby="cap-theme">
+        <button type="button" data-set-theme="dark">Dark</button><button type="button" data-set-theme="light">Light</button>
+      </div>
+    </div>
+  </div>
+  <p class="lede">The same session in two panes: 0.6.1 as shipped, and the visualized pane. Pulses replay every few
+    seconds to show the motion; in the pane they fire on real calls. Use the Pane and Terminal controls to see every
+    width. Hover a station, a ribbon segment or a lane to read what its alt text says; the pane shows these as tooltips
+    only if the first live check enables interactive images.</p>
+</header>
+
+<main class="cols" id="cols">
+  <section class="col" id="col-today">
+    <div class="colhead"><h2>Today</h2><p class="cap">0.6.1 as shipped. Reference.</p></div>
+    <div class="pane desk"><div class="pane-head"><span>Session</span><span aria-hidden="true">⤢&nbsp;&nbsp;&nbsp;✕</span></div><div class="pane-body" id="today-d"></div></div>
+    <div class="tlabel"></div>
+    <div class="pane term"><div class="pane-head"><span>Session</span><span aria-hidden="true">✕</span></div><div class="pane-body" id="today-t"></div></div>
+  </section>
+  <section class="col" id="col-new">
+    <div class="colhead"><h2>Visualized pane</h2><p class="cap">The Session block holds the context core with eight stations, four on each side: Model, Files, Shell and Web to the left; Agents, MCP, Skills and You to the right. A pulse runs from the core to the station of each new call. Under a ~500 px pane each side forks into two rows of two; wider, one row of four, centred at a capped spacing. The turn ribbon replaces the Turn stats table (the table stays behind ‘details’), and the Activity lanes replace the Subagents and Tasks lists; every colour in them is a station colour from the Session block. Context sources stays.</p></div>
+    <div class="pane desk"><div class="pane-head"><span>Session</span><span aria-hidden="true">⤢&nbsp;&nbsp;&nbsp;✕</span></div><div class="pane-body" id="new-d"></div></div>
+    <div class="tlabel"></div>
+    <div class="pane term"><div class="pane-head"><span>Session</span><span aria-hidden="true">✕</span></div><div class="pane-body" id="new-t"></div></div>
+  </section>
+</main>
+
+<script>
+(() => {
+  'use strict';
+
+  // ==== Tokens ================================================================================================
+  // Raw SVG colours of view.tsx: the same in both themes.
+  const BLUE = '#2f7de1', AMBER = '#e0a030', RED = '#e5484d', NEUTRAL = '#8a8a8a', GREEN = '#2ea043';
+  const FONT = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
+  const SVG_MAX = 4096; // the engine refuses a wider or taller Svg
+  const CELL = 8;
+  // The new SVG surfaces, and the eight station hues: every mark in the band, the ribbon and the lanes uses them.
+  const PAL = {
+    dark: {
+      raised: '#2e2d2b', line: '#45443f', rail: '#3a3936', bone: '#ecebe6', ash: '#9c9a93', fail: RED, glow: [0.14, 0.28],
+      st: { model: '#e1ac6e', files: '#5fc2b5', shell: '#a48cf0', web: '#93aac4', agents: '#e58fae', mcp: '#a3c47a', skills: '#d9c95a', you: '#d48ae0' },
+    },
+    light: {
+      raised: '#ffffff', line: '#d4d1c7', rail: '#e2dfd6', bone: '#1d1c1a', ash: '#6f6d66', fail: RED, glow: [0.10, 0.20],
+      st: { model: '#b8762a', files: '#1c8c81', shell: '#6c4fc0', web: '#4f6b8a', agents: '#b44a74', mcp: '#5b822f', skills: '#8c7a00', you: '#9a48b0' },
+    },
+  };
+  const EASE = '.45 0 .55 1';
+  const EASE_OUT = '.2 .6 .35 1';
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const f2 = n => Number(n.toFixed(2));
+
+  // ==== The session (formats as stats.ts writes them) ============================================================
+  const S_DATA = {
+    total: '$4.97',
+    split: 'Subagents $1.77+', // a restored row (Plan critique) turns the split into a lower bound (view.tsx topBlock)
+    ctx: { pct: 56, pctText: '56.0%', note: '112k / 200k' },
+    project: { name: 'claude_mods', branch: 'session-panel-0.6.1', files: '3 files changed', added: '+120', removed: '−34' },
+    limits: [['5-hour', 41, '↻ 2h 10m'], ['Weekly', 18, '↻ 4d 3h']],
+    rate: '~42 tok/s',
+    turnRows: [
+      ['Response', '~42 tok/s'], ['Elapsed', '2m 14s'], ['Model time', '1m 18s'], ['Tool time', '56.0s'],
+      ['Average TTFT', '1.2s'], ['Steps', '6'], ['Tokens', '18.4k ↑ · 2.1k ↓'], ['Cache', '94%', 'ok'], ['Cost', '$0.420'],
+    ],
+    agents: [
+      ['running', 'Review the diff', '@code-reviewer', '$0.310'],
+      ['running', 'Plan critique', '@plan-critic', '$0.410+'],
+      ['done', 'Map the mask', '@explorer', '$0.120'],
+      ['failed', 'Repro check', '@general-purpo…', '$0.050'],
+      ['done', 'Engine facts', '@general-purpo…', '$0.880'],
+    ],
+    tasks: [
+      ['running', 'npm test', '@bash', '3m 40s'],
+      ['done', 'claude plugin test', '@bash', '18.2s'],
+      ['stopped', 'dev server', '@bash', '4m 00s'],
+    ],
+    mcp: ['codebase-memory', 'jira-lite'],
+    skills: 42,
+    logCount: 64,
+    log: [
+      ['12:04:00', 'main', 'codebase-memory:search_graph', '✓ 2.1s'],
+      ['12:03:42', 'main', 'TodoWrite', '✓ 0.2s'],
+      ['12:03:34', 'explorer', 'done — mask mapped', '✓ 22.3s'],
+      ['12:03:11', 'main', 'spawned · explorer: Map the mask', ''],
+      ['12:02:26', 'main', 'Bash tsc --noEmit', '✗ 31.0s', 'error'],
+      ['12:02:15', 'main', 'Read view.tsx', '✓ 0.3s'],
+      ['12:02:15', 'main', 'Read stats.ts', '✓ 0.1s'],
+      ['12:02:06', 'you', 'Проверь на чём ты остановился', ''],
+    ],
+  };
+  // The eight stations, in their one order.
+  const STATIONS = [
+    { id: 'model', label: 'Model', short: 'Model', count: 31, running: 3, failed: 0, unit: 'steps' },
+    { id: 'files', label: 'Files', short: 'Files', count: 12, running: 0, failed: 0 },
+    { id: 'shell', label: 'Shell', short: 'Shell', count: 4, running: 1, failed: 1 },
+    { id: 'web', label: 'Web', short: 'Web', count: 1, running: 0, failed: 0 },
+    { id: 'agents', label: 'Agents', short: 'Agent', count: 5, running: 2, failed: 0 },
+    { id: 'mcp', label: 'MCP', short: 'MCP', count: 3, running: 0, failed: 0 },
+    { id: 'skills', label: 'Skills', short: 'Skill', count: 6, running: 0, failed: 0 },
+    { id: 'you', label: 'You', short: 'You', count: 3, running: 0, failed: 0 },
+  ];
+  const stationTip = s => [`${s.label} · ${s.count} ${s.unit || (s.count === 1 ? 'call' : 'calls')}`,
+    ...(s.running ? [`${s.running} running`] : []), ...(s.failed ? [`${s.failed} failed this turn`] : [])].join(' · ');
+  const STATIONS_ALT = STATIONS.map(s => [`${s.label} ${s.count}`, ...(s.running ? [`${s.running} running`] : []),
+    ...(s.failed ? [`${s.failed} failed this turn`] : [])].join(', ')).join('; ') + '.';
+  // The running turn: 6 model calls and 5 tool steps. `k` is the station; times in seconds.
+  const TURN = [
+    { k: 'model', t: 9, tip: 'Model · 9s' },
+    { k: 'files', t: 0.4, tip: 'Read ×2 (stats.ts, view.tsx) · Files · 0.4s' },
+    { k: 'model', t: 11, tip: 'Model · 11s' },
+    { k: 'shell', t: 31, tip: 'Bash tsc --noEmit · Shell · 31s · failed', failed: true },
+    { k: 'model', t: 14, tip: 'Model · 14s' },
+    { k: 'agents', t: 22.3, tip: 'Agent → explorer: Map the mask · Agents · 22.3s' },
+    { k: 'model', t: 8, tip: 'Model · 8s' },
+    { k: 'you', t: 0.2, tip: 'TodoWrite · You · 0.2s' },
+    { k: 'model', t: 18, tip: 'Model · 18s' },
+    { k: 'mcp', t: 2.1, tip: 'codebase-memory:search_graph · MCP · 2.1s' },
+    { k: 'model', t: 18, tip: 'Model · 18s · running', live: true },
+  ];
+  const ELAPSED = 134, CEILING = 180; // 2m 14s on the 3 m ceiling
+  // Activity lanes. Ages in seconds before now; the axis is −12:00 → now.
+  const NOW_S = 12 * 3600 + 4 * 60 + 20, SPAN = 720;
+  const LANES = [
+    { label: 'main', hue: 'model', strong: true, value: '$3.20', alt: 'main, running, 2 minutes 14 seconds',
+      spans: [{ a: 750, b: 530, tip: 'main · turn 11:51:50–11:55:30 · 3m 40s' },
+        { a: 380, b: 220, tip: 'main · turn 11:58:00–12:00:40 · 2m 40s' },
+        { a: 134, b: 0, live: true, tip: 'main · turn running 2m 14s · $3.20' }] },
+    { label: 'Review the diff', tag: '@code-reviewer', hue: 'agents', strong: true, value: '$0.310', alt: 'Review the diff, @code-reviewer, running, 6 minutes',
+      spans: [{ a: 360, b: 0, live: true, tip: 'Review the diff · @code-reviewer · running 6m · $0.310' }] },
+    { label: 'npm test', tag: '@bash', hue: 'shell', strong: true, value: '3m 40s', alt: 'npm test, @bash, running, 3 minutes 40 seconds',
+      spans: [{ a: 220, b: 0, live: true, tip: 'npm test · @bash · running 3m 40s' }] },
+    { label: 'Plan critique', tag: '@plan-critic', hue: 'agents', strong: true, value: '$0.410+', alt: 'Plan critique, @plan-critic, running, start unknown',
+      unknown: 'Plan critique · @plan-critic · running, start unknown (restored) · $0.410+', spans: [] },
+    { label: 'Map the mask', tag: '@explorer', hue: 'agents', value: '$0.120', end: 'done', alt: 'Map the mask, @explorer, done, 23 seconds',
+      spans: [{ a: 69, b: 46, tip: 'Map the mask · @explorer · done in 23s · $0.120' }] },
+    { label: 'Repro check', tag: '@general-purpo…', hue: 'agents', value: '$0.050', end: 'failed', alt: 'Repro check, @general-purpose, failed, 1 minute',
+      spans: [{ a: 240, b: 180, tip: 'Repro check · @general-purpose · failed after 1m · $0.050' }] },
+    { label: 'Engine facts', tag: '@general-purpo…', hue: 'agents', value: '$0.880', end: 'done', alt: 'Engine facts, @general-purpose, done, 8 minutes',
+      spans: [{ a: 720, b: 240, tip: 'Engine facts · @general-purpose · done in 8m · $0.880' }] },
+    { label: 'dev server', tag: '@bash', hue: 'shell', value: '4m 00s', end: 'stopped', alt: 'dev server, @bash, stopped, 4 minutes',
+      spans: [{ a: 600, b: 360, tip: 'dev server · @bash · stopped after 4m 00s' }] },
+  ];
+  const clock = s => `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor(s / 60) % 60).padStart(2, '0')}`;
+  // The axis tick step: the least of 1, 2, 5, 10, 15, 30, 60, 120, 240… minutes whose spacing reaches `minGap` units.
+  function tickStep(axisUnits, minGap) {
+    const steps = [1, 2, 5, 10, 15, 30, 60];
+    for (let i = 0; ; i++) {
+      const s = i < steps.length ? steps[i] : 60 * 2 ** (i - steps.length + 1);
+      if (s * axisUnits / (SPAN / 60) >= minGap) return s;
+    }
+  }
+  const ticksOf = step => {
+    const out = [];
+    for (let t = Math.ceil((NOW_S - SPAN) / (step * 60)) * step * 60; t <= NOW_S; t += step * 60) out.push(t);
+    return out;
+  };
+
+  // ==== Icons (view.tsx ICON, STATUS_SVG, ringSvg, meterSvg; the station icons in the house style) ==============
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const iconAttrs = stroke => `fill="none" stroke="${stroke}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"`;
+  const dot = cy => `<circle cx="2.25" cy="${cy}" r=".9" fill="${NEUTRAL}" stroke="none"/>`;
+  const ICON = {
+    usage: '<circle cx="7" cy="8" r="4.75"/><path d="M5.5 1.5h3M7 1.5v1.75M7 8V5.75"/>',
+    turn: '<path d="M3.5 11.5v-4M7 11.5v-9M10.5 11.5v-6"/>',
+    agents: '<rect x="2.5" y="4.75" width="9" height="7" rx="2"/><path d="M7 4.75V2.5H5M5.25 7.75v1.25M8.75 7.75v1.25"/>',
+    tasks: '<rect x="1.5" y="2.5" width="11" height="9" rx="1.75"/><path d="M4.25 5.5 6 7l-1.75 1.5M7.25 8.5h2.5"/>',
+    mcp: '<path d="M5.25 1.5v3M8.75 1.5v3M7 10.25v2.25"/><path d="M3.5 4.5h7v2.75a3 3 0 0 1-3 3h-1a3 3 0 0 1-3-3z"/>',
+    sources: '<path d="M7 1.5 12.5 4.25 7 7 1.5 4.25z"/><path d="M1.5 7 7 9.75 12.5 7M1.5 9.75 7 12.5 12.5 9.75"/>',
+    log: `<path d="M5 3.5h7M5 7h7M5 10.5h7"/>${dot(3.5)}${dot(7)}${dot(10.5)}`,
+    branch: '<path d="M4 1.75v7.5"/><circle cx="4" cy="11" r="1.75"/><circle cx="10" cy="3.5" r="1.75"/><path d="M10 5.25c0 2.75-2.25 3.75-4.6 4.4"/>',
+    changes: '<path d="M5.5 12.5H4A1.5 1.5 0 0 1 2.5 11V3A1.5 1.5 0 0 1 4 1.5h3.5l3 3v1M7.5 1.5v2a1 1 0 0 0 1 1h2"/><path d="M6.25 11.5l-.5 1.75 1.75-.5 4-4a1.06 1.06 0 0 0-1.25-1.25z"/>',
+    activity: '<path d="M1.5 3.5h6M4.5 7h8M2.5 10.5h4.5"/>',
+  };
+  const ST_ICON = {
+    model: '<rect x="3.5" y="3.5" width="7" height="7" rx="1.2"/><path d="M5.5 1.5v2M8.5 1.5v2M5.5 10.5v2M8.5 10.5v2M1.5 5.5h2M1.5 8.5h2M10.5 5.5h2M10.5 8.5h2"/>',
+    files: '<path d="M3.5 1.5h4.25L10.5 4.25v8.25h-7z"/><path d="M7.75 1.5v2.75h2.75"/>',
+    shell: '<path d="M2.5 4l3 3-3 3M7 10.5h4.5"/>',
+    web: '<circle cx="7" cy="7" r="5.5"/><path d="M1.5 7h11M7 1.5c-2.2 2.2-2.2 8.8 0 11M7 1.5c2.2 2.2 2.2 8.8 0 11"/>',
+    agents: '<circle cx="7" cy="3.25" r="1.6"/><circle cx="3.25" cy="10.75" r="1.6"/><circle cx="10.75" cy="10.75" r="1.6"/><path d="M7 4.85V7.2M7 7.2 4.4 9.6M7 7.2l2.6 2.4"/>',
+    mcp: ICON.mcp,
+    skills: '<path d="M8.1 .9L3 7.7h3.3L5.2 13.1l5.4-7.05H7.35z"/>',
+    you: '<circle cx="7" cy="4.75" r="2.75"/><path d="M1.75 12.5c0-3.1 2.35-4.9 5.25-4.9s5.25 1.8 5.25 4.9"/>',
+  };
+  const svg14 = (inner, alt) => `<svg width="14" height="14" viewBox="0 0 14 14" role="img" aria-label="${esc(alt)}">${inner}</svg>`;
+  const icon = (id, alt) => svg14(`<g ${iconAttrs(NEUTRAL)}>${ICON[id]}</g>`, alt);
+  const statusIcon = (color, inner) => `<circle cx="7" cy="7" r="5.5" fill="none" stroke="${color}" stroke-width="1.4"/>${inner}`;
+  const STATUS_SVG = {
+    running: statusIcon(BLUE, `<path d="M7 3.5a3.5 3.5 0 0 1 0 7z" fill="${BLUE}"/>`),
+    done: statusIcon(GREEN, `<path d="M4.6 7.2l1.7 1.7 3.2-3.5" fill="none" stroke="${GREEN}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>`),
+    failed: statusIcon(RED, `<path d="M5.1 5.1l3.8 3.8M8.9 5.1l-3.8 3.8" fill="none" stroke="${RED}" stroke-width="1.4" stroke-linecap="round"/>`),
+    stopped: statusIcon(NEUTRAL, `<rect x="5" y="5" width="4" height="4" rx=".75" fill="${NEUTRAL}"/>`),
+  };
+  const meterColor = p => (p >= 95 ? RED : p >= 80 ? AMBER : BLUE);
+  function ringSvg(pct) {
+    const c = 2 * Math.PI * 5.5;
+    return svg14(`<circle cx="7" cy="7" r="5.5" fill="none" stroke="#808080" stroke-opacity="0.3" stroke-width="2"/>` +
+      `<circle cx="7" cy="7" r="5.5" fill="none" stroke="${meterColor(pct)}" stroke-width="2" stroke-dasharray="${(pct / 100 * c).toFixed(2)} ${c.toFixed(2)}" transform="rotate(-90 7 7)"/>`, 'Context');
+  }
+  function meterSvg(pct, w, alt) {
+    return `<svg width="${w}" height="8" viewBox="0 0 ${w} 8" role="img" aria-label="${esc(alt)}">` +
+      `<rect width="${w}" height="8" rx="4" fill="#808080" fill-opacity="0.3"/>` +
+      `<rect width="${Math.round(pct * w / 100)}" height="8" rx="4" fill="${meterColor(pct)}"/></svg>`;
+  }
+  const textAttrs = (size, weight, fill, tab) =>
+    `font-size="${size}" font-weight="${weight}" fill="${fill}"${tab ? ' style="font-variant-numeric:tabular-nums"' : ''}`;
+  const svgText = (x, y, size, weight, fill, text, anchor = 'middle', tab = true) =>
+    `<text x="${f2(x)}" y="${y}" text-anchor="${anchor}" font-family="${FONT}" ${textAttrs(size, weight, fill, tab)}>${esc(text)}</text>`;
+  // A pulsing live end: opacity 1 → 0.3 → 1, 1.6 s, from its resting value 1.
+  const capAnim = `<animate attributeName="opacity" values="1;0.3;1" keyTimes="0;0.5;1" calcMode="spline" keySplines="${EASE};${EASE}" dur="1.6s" repeatCount="indefinite"/>`;
+
+  // ==== Fold state ==============================================================================================
+  // folds['a-d:usage'] = true when folded; for `details` true means open (its default is closed).
+  const folds = {};
+  const isOpen = (key, id) => (id === 'details' ? folds[`${key}:${id}`] === true : folds[`${key}:${id}`] !== true);
+
+  // ==== Desktop kit (view.tsx Box/Text/Button/Svg as HTML; 1 cell = 8 px) ======================================
+  // `c` = { key, P (palette), W (body px), cols (whole cells of the body) }.
+  const row = (inner, cls = '') => `<div class="r ${cls}">${inner}</div>`;
+  const slot = svg => `<span class="slot">${svg}</span>`;
+  const fixT = (t, cls = '') => `<span class="fx ${cls}">${esc(t)}</span>`;
+  const shrinkT = (t, cls = '') => `<span class="sh"><span class="ct ${cls}">${esc(t)}</span></span>`;
+  const growT = (t, cls = '') => `<span class="gr"><span class="ct ${cls}">${esc(t)}</span></span>`;
+  const endT = (t, cls = '') => `<span class="gr end">${t === '' ? '' : `<span class="ct ${cls}">${esc(t)}</span>`}</span>`;
+  const cellT = (t, cells, cls = '', right = false) =>
+    `<span class="cell${right ? ' end' : ''}" style="width:${cells * CELL}px"><span class="ct ${cls}">${esc(t)}</span></span>`;
+  const dRule = () => '<div class="rule"><i></i></div>';
+  const chevron = (key, id, title) => {
+    const open = isOpen(key, id);
+    return `<button type="button" class="btn dim" data-fold="${key}:${id}" aria-expanded="${open}" aria-label="${open ? 'Fold' : 'Unfold'} ${esc(title)}">${open ? '▾' : '▸'}</button>`;
+  };
+  const labelValue = (label, value, cls = '') => row(`${shrinkT(label)}${fixT(value, cls)}`, 'g2 sb');
+  // A section: the rule, the header row (icon, bold title, chevron, dim summary), the body unless folded. `isNew`
+  // wraps the header and body for the page's new-block marker.
+  function dSection(key, id, iconId, title, summary, body, isNew = false) {
+    const header = row(`${slot(icon(iconId, title))}${fixT(title, 'b')}${chevron(key, id, title)}${endT(summary, 'dim')}`);
+    const inner = header + (isOpen(key, id) ? body : '');
+    return dRule() + (isNew ? `<div data-new>${inner}</div>` : inner);
+  }
+
+  // ---- Shared desktop blocks (0.6.1, laid out for the body's width as view.tsx does) --------------------------
+  const dSessionRow = () => row(`${fixT('Session', 'b')}${fixT(S_DATA.total)}`, 'g2 sb');
+  const dSplit = () => row(shrinkT(S_DATA.split, 'dim'));
+  function dContext(c) {
+    const { pct, pctText, note } = S_DATA.ctx;
+    const meterPx = Math.min(SVG_MAX, Math.max(48, (c.cols - 7) * CELL)); // contextMeterWidth
+    return row(`${slot(ringSvg(pct))}${fixT('Context')}${endT(note, 'dim')}`) +
+      row(`<span class="sh">${meterSvg(pct, meterPx, `Context ${pctText}`)}</span>${cellT(pctText, 6, '', true)}`, 'sb');
+  }
+  function dProject() {
+    const p = S_DATA.project;
+    return dRule() +
+      row(`${fixT('Project', 'b')}${endT(p.name, 'dim')}`) +
+      row(`${slot(icon('branch', 'Branch'))}${shrinkT(p.branch)}`) +
+      row(`${slot(icon('changes', 'Changes'))}${growT(p.files)}<span class="fx"><span class="ok">${p.added}</span><span class="dim">&nbsp;/&nbsp;</span><span class="err">${p.removed}</span></span>`);
+  }
+  function dUsage(c) {
+    const meterPx = Math.min(SVG_MAX, Math.max(40, (c.cols - 25) * CELL)); // limitMeterWidth
+    const rows = S_DATA.limits.map(([label, pct, reset]) =>
+      row(`${cellT(label, 7)}<span class="sh">${meterSvg(pct, meterPx, `${label} ${pct}%`)}</span>${cellT(`${pct}%`, 5, '', true)}${endT(reset, 'dim')}`));
+    return dSection(c.key, 'usage', 'usage', 'Usage', '5-hour 41%', rows.join(''));
+  }
+  const dTurnRows = () => S_DATA.turnRows.map(([l, v, cls]) => labelValue(l, v, cls || '')).join('');
+  // Subagents and Tasks: mark slot, a group (description grows, tag column), value column (view.tsx statusRow). The
+  // tag leaves every row when the description would keep fewer than 12 cells.
+  function dStatus(c, id, title, items, tagCells, valueCells) {
+    const running = items.filter(i => i[0] === 'running').length;
+    const hasTag = c.cols - 2 - tagCells - valueCells - 3 >= 12;
+    const rows = items.map(([status, desc, tag, value]) =>
+      row(`${slot(svg14(STATUS_SVG[status], status))}<span class="gr" style="column-gap:8px">${growT(desc)}${hasTag ? cellT(tag, tagCells, 'dim') : ''}</span>${cellT(value, valueCells, '', true)}`));
+    return dSection(c.key, id, id, title, `${running}/${items.length}`, rows.join(''));
+  }
+  const dAgents = c => dStatus(c, 'agents', 'Subagents', S_DATA.agents, 15, 8);
+  const dTasks = c => dStatus(c, 'tasks', 'Tasks', S_DATA.tasks, 10, 8);
+  function dMcp(c) {
+    const chips = S_DATA.mcp.map(n => `<span class="sh"><span class="fx ok">●&nbsp;</span>${shrinkT(n)}</span>`).join('');
+    return dSection(c.key, 'mcp', 'mcp', 'MCP', String(S_DATA.mcp.length), row(chips, 'g2 wrap'));
+  }
+  const dSources = c => dSection(c.key, 'sources', 'sources', 'Context sources', `${S_DATA.skills} skills · ${S_DATA.mcp.length} MCP`,
+    labelValue('Skills', String(S_DATA.skills)) + labelValue('MCP servers', String(S_DATA.mcp.length)));
+
+  // The Log's layout for `cols`: [time, who, text, outcome], then without `who`, then [time, text] (view.tsx
+  // logParts). Shared by both surfaces; `whoCells` and `outCells` differ by surface.
+  function logLayout(cols, whoCells, outCells) {
+    const textCells = (w, o) => cols - 8 - (w ? whoCells : 0) - (o ? outCells : 0) - (1 + Number(w) + Number(o));
+    const hasWho = textCells(true, true) >= 8;
+    const hasOut = hasWho || textCells(false, true) >= 8;
+    const textOf = ([, who, text, out]) => `${hasOut || !out ? '' : `${out} `}${!hasWho && (who === 'you' || who === 'engine') ? `${who} › ` : ''}${text}`;
+    return { hasWho, hasOut, textOnly: !hasWho && !hasOut, textCells: textCells(hasWho, hasOut), textOf };
+  }
+  function dLog(c) {
+    const outCells = Math.max(...S_DATA.log.map(l => [...l[3]].length)) + 1;
+    const lay = logLayout(c.cols, 13, outCells);
+    const rows = S_DATA.log.map(line => {
+      const [time, who, , out, kind] = line;
+      const cls = kind === 'error' ? 'err' : 'dim';
+      return row(`${cellT(time, 8, 'dim')}${lay.hasWho ? cellT(who, 13, cls) : ''}${growT(lay.textOf(line), lay.textOnly && kind === 'error' ? 'err' : '')}${lay.hasOut ? cellT(out, outCells, cls, true) : ''}`);
+    });
+    const more = `<div class="r" style="padding-left:24px">${fixT(`+${S_DATA.logCount - S_DATA.log.length} more`, 'dim')}</div>`;
+    return dSection(c.key, 'log', 'log', 'Log', String(S_DATA.logCount), rows.join('') + more);
+  }
+
+  // ==== The turn ribbon: solid station hues; the bar area is min(W − 64, 4096) ===================================
+  const RIBBON_ALT = 'Turn 2m 14s: model 58%, tools 42%, 6 steps, 1 failed call';
+  // The steps drawn one by one: one per 20 px of bar on average, 6 to 60, so the bar never turns into a barcode.
+  const detailSteps = barPx => clamp(Math.floor(barPx / 20), 6, 60);
+  // The ribbon's parts: the latest `n` steps (a step is a model call and the tool calls after it) a segment each;
+  // the older steps merged into one part per station, in station order, joined with no gap between them.
+  function ribbonParts(n) {
+    const starts = TURN.flatMap((s, i) => (s.k === 'model' ? [i] : []));
+    const cutAt = starts.length > n ? starts[starts.length - n] : 0;
+    const old = TURN.slice(0, cutAt);
+    const merged = STATIONS.filter(st => old.some(s => s.k === st.id)).map((st, j) => {
+      const mine = old.filter(s => s.k === st.id);
+      const t = mine.reduce((sum, s) => sum + s.t, 0);
+      return { k: st.id, t, joined: j > 0, failed: mine.some(s => s.failed), tip: `Earlier steps · ${st.label} · ${f2(t)}s` };
+    });
+    return [...merged, ...TURN.slice(cutAt)];
+  }
+  // Self-check on the mock turn: keeping 3 of its 6 steps merges the first 3 into Model, Files, Shell and Agents.
+  {
+    const parts = ribbonParts(3);
+    console.assert(Math.abs(parts.reduce((sum, s) => sum + s.t, 0) - ELAPSED) < 1e-9, 'ribbon merge keeps the time');
+    console.assert(parts.filter(s => s.joined !== undefined).map(s => s.k).join() === 'model,files,shell,agents',
+      'ribbon merge: one part per station, in station order');
+    console.assert(ribbonParts(6).length === TURN.length, 'ribbon: 6 steps kept means nothing merges');
+  }
+  // Segment px for an area: boundaries at round(cumulative time × px/s), a 1 px gap after each segment (none between
+  // merged parts), and a tool segment at least 2 px (the room comes out of the model segment after it).
+  function ribbonGeometry(area) {
+    const k = area / CEILING;
+    let cum = 0, prevEnd = -1;
+    return ribbonParts(detailSteps(area)).map((s, i) => {
+      cum += s.t;
+      const start = i === 0 ? 0 : prevEnd + (s.joined ? 0 : 1);
+      const end = Math.max(Math.round(cum * k), start + (s.k === 'model' ? 1 : 2));
+      prevEnd = end;
+      return { ...s, x: start, w: end - start };
+    });
+  }
+  function ribbonSvg(P, uid, area) {
+    const segs = ribbonGeometry(area);
+    const END = segs[segs.length - 1].x + segs[segs.length - 1].w;
+    let body = '', marks = '';
+    for (const s of segs) {
+      body += `<rect x="${s.x}" y="3" width="${s.w}" height="10" fill="${P.st[s.k]}"><title>${esc(s.tip)}</title></rect>`;
+      if (s.failed) marks += `<rect x="${s.x}" y="14" width="${s.w}" height="2" fill="${P.fail}"><title>${esc(s.tip)}</title></rect>`;
+    }
+    return `<svg width="${area}" height="16" viewBox="0 0 ${area} 16" role="img" aria-label="${RIBBON_ALT}">` +
+      `<defs><clipPath id="clip-${uid}"><rect x="0" y="3" width="${END}" height="10" rx="3"/></clipPath></defs>` +
+      `<g clip-path="url(#clip-${uid})">${body}</g>${marks}` +
+      `<line x1="${END + 2}" y1="8.5" x2="${area}" y2="8.5" stroke="${P.ash}" stroke-dasharray="1 3"/>` +
+      `<rect x="${area - 1}" y="5" width="1" height="6" fill="${P.ash}"/>` +
+      `<rect x="${END - 1}" y="1" width="2" height="14" fill="${P.st.model}">${capAnim}<title>Model · 18s · running</title></rect></svg>`;
+  }
+  function dRibbon(c) {
+    const area = Math.min(c.W - 64, SVG_MAX);
+    const swatch = `<span class="cell" style="width:8px"><svg width="8" height="8" viewBox="0 0 8 8" role="img" aria-label="Model"><rect width="8" height="8" rx="1.5" fill="${c.P.st.model}"/></svg></span>`;
+    // Whole items leave a narrow pane: TTFT below 36 cells, steps below 30.
+    const legend = `<span class="sh"><span class="ct"><span class="dim">Model</span> 58%<span class="dim"> · Tools</span> 42%` +
+      `${c.cols >= 30 ? '<span class="dim"> · </span>6 steps' : ''}${c.cols >= 36 ? '<span class="dim"> · TTFT</span> 1.2s' : ''}</span></span>`;
+    const open = isOpen(c.key, 'details');
+    const details = `<button type="button" class="btn dim" data-fold="${c.key}:details" aria-expanded="${open}">${open ? '▾' : '▸'} details</button>`;
+    const body = row(`<span class="gr">${ribbonSvg(c.P, c.key, area)}</span>${cellT('2m 14s', 7, '', true)}`) +
+      row(swatch + legend) + row(details) + (open ? dTurnRows() : '');
+    return dSection(c.key, 'turn', 'turn', 'Turn stats', S_DATA.rate, body, true);
+  }
+
+  // ==== The band: the core in the middle, a trunk each way, branches and stations ===============================
+  // Layout as data, from the body width W. Each side has four stations, in two rows of two on its own forked trunk
+  // under a 464 px body, else one row of four on a straight rail. The pitch fills the side up to a cap of 72 px, and
+  // the whole group sits in the band's centre.
+  const ARC = 6, ARC_LEN = Math.PI * ARC / 2; // the r 6 quarter arcs of the fork (and of the pulse's T junction)
+  const SIDES = [['model', 'files', 'shell', 'web'], ['agents', 'mcp', 'skills', 'you']]; // from the core outward
+  const byId = id => STATIONS.find(s => s.id === id);
+  // Text widths by per-character estimates: a capital 0.72 em, another letter 0.6 em, a digit 0.62 em.
+  const labelW = (t, s) => [...t].reduce((n, ch) => n + (ch >= 'A' && ch <= 'Z' ? 0.72 : 0.6) * s, 0);
+  const countText = n => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+  const countW = (t, s) => [...t].reduce((n, ch) => n + (ch === '.' ? 0.3 : 0.62) * (s + 1), 0);
+  function bandGeometry(W) {
+    const twoRows = W < 464; // where the one-row pitch would fall below 48
+    const k = twoRows ? 2 : 4; // stations on one rail
+    const P = Math.min(((W - 64) / 2 - 8) / k, 72);
+    const G = 64 + 2 * (8 + k * P);
+    const width = Math.min(G, SVG_MAX);
+    const Xc = G / 2;
+    const cy0 = twoRows ? 47.5 : 33; // the core's centre line: the trunks leave the ring on it
+    const rowsY = twoRows ? [25.5, 68.5] : [33];
+    const sides = [[SIDES[0], -1], [SIDES[1], 1]].map(([ids, d]) => {
+      const edge = Xc + 26 * d, xf = Xc + 36 * d;
+      const stations = ids.map((id, n) => {
+        const row = twoRows ? Math.floor(n / k) : 0, i = n % k;
+        const cx = Xc + d * (40 + P * (i + 0.5)), cy = rowsY[row];
+        const end = cx - 11 * d;
+        let path, len;
+        if (!twoRows) {
+          path = `M${f2(edge)} ${cy0}H${f2(end)}`;
+          len = Math.abs(end - edge);
+        } else {
+          // Trunk, the rounded T into the fork, the fork, the arc into the row, the rail.
+          const s = Math.sign(cy - cy0);
+          path = `M${f2(edge)} ${cy0}H${f2(xf - ARC * d)}Q${f2(xf)} ${cy0} ${f2(xf)} ${cy0 + ARC * s}` +
+            `V${cy - ARC * s}Q${f2(xf)} ${cy} ${f2(xf + ARC * d)} ${cy}H${f2(end)}`;
+          len = (10 - ARC) + ARC_LEN + (Math.abs(cy - cy0) - 2 * ARC) + ARC_LEN + Math.abs(end - (xf + ARC * d));
+        }
+        const dur = clamp(0.6 * Math.sqrt(len / 240), 0.6, 1.4);
+        return { st: byId(id), cx, cy, path, len, dur };
+      });
+      // The rails: the trunk, then (two rows) the fork and one rail per row, out to the row's outermost station.
+      const outer = cy => stations.filter(x => x.cy === cy).reduce((m, x) => (d > 0 ? Math.max(m, x.cx) : Math.min(m, x.cx)), xf);
+      let rails;
+      if (!twoRows) rails = [`M${f2(edge)} ${cy0}H${f2(outer(cy0))}`];
+      else {
+        const [y1, y2] = rowsY;
+        rails = [`M${f2(edge)} ${cy0}H${f2(xf)}`,
+          `M${f2(xf + ARC * d)} ${y1}Q${f2(xf)} ${y1} ${f2(xf)} ${y1 + ARC}V${y2 - ARC}Q${f2(xf)} ${y2} ${f2(xf + ARC * d)} ${y2}`,
+          ...rowsY.map(y => `M${f2(xf + ARC * d)} ${y}H${f2(outer(y))}`)];
+      }
+      return { d, stations, rails };
+    });
+    const all = sides.flatMap(sd => sd.stations);
+    // One text size for all: the largest of 10 and 9 px at which every station's text fits P − 2; else counts only.
+    const fits = s => all.every(({ st }) => {
+      const lw = labelW(st.label, s), cw = countW(countText(st.count), s);
+      return (twoRows ? lw + 3 + cw : Math.max(lw, cw)) <= P - 2;
+    });
+    const textSize = fits(10) ? 10 : fits(9) ? 9 : 0;
+    return { twoRows, P, G, width, height: twoRows ? 95 : 76, Xc, cy0, sides, all, textSize };
+  }
+
+  function coreSvg(P, Xc, cy0) {
+    const rad = -Math.PI / 2; // the first compaction tick, at 12 o'clock
+    return `<g class="core"><title>Context 56.0% · 112k / 200k · opus 5.5 · 1 compaction</title>` +
+      `<circle cx="${f2(Xc)}" cy="${cy0}" r="24" fill="none" stroke="#808080" stroke-opacity="0.3" stroke-width="4"/>` +
+      `<circle cx="${f2(Xc)}" cy="${cy0}" r="24" fill="none" stroke="${meterColor(56)}" stroke-width="4" pathLength="100" stroke-dasharray="56 100" transform="rotate(-90 ${f2(Xc)} ${cy0})"/>` +
+      `<line x1="${f2(Xc)}" y1="${f2(cy0 + 27.5 * Math.sin(rad))}" x2="${f2(Xc)}" y2="${f2(cy0 + 31 * Math.sin(rad))}" stroke="${P.ash}" stroke-width="1.5" stroke-linecap="round"/>` +
+      svgText(Xc, cy0 + 4, 15, 600, P.bone, '56%') + svgText(Xc, cy0 + 14, 9, 400, P.ash, 'opus 5.5', 'middle', false) +
+      svgText(Xc, cy0 + 39, 10, 400, P.ash, '112k / 200k') + '</g>';
+  }
+  // One pulse: three dots ride the station's path (animateMotion), the trailing two 40 and 80 ms later, each fading
+  // in 150 ms on arrival. Hidden (opacity 0) until the demo loop begins them.
+  function pulseDots(P, x) {
+    const hue = P.st[x.st.id];
+    const dur = f2(x.dur);
+    return [[1.75, 1, 0], [1.25, 0.6, 0.04], [1, 0.35, 0.08]].map(([r, op, delay]) =>
+      `<g opacity="${op}"><circle r="${r}" fill="${hue}" opacity="0">` +
+      `<animateMotion data-move="${x.st.id}" data-delay="${delay}" path="${x.path}" keyPoints="0;1" keyTimes="0;1" calcMode="spline" keySplines="${EASE_OUT}" dur="${dur}s" begin="indefinite" fill="freeze"/>` +
+      `<animate data-pulse="${x.st.id}" data-delay="${delay}" attributeName="opacity" values="1;1;0" keyTimes="0;${f2(dur / (dur + 0.15))};1" dur="${f2(dur + 0.15)}s" begin="indefinite"/>` +
+      '</circle></g>').join('');
+  }
+  function bandSvg(c) {
+    const P = c.P;
+    const g = bandGeometry(c.W);
+    const layers = { glows: '', circles: '', icons: '', badges: '', text: '' };
+    let pulses = '';
+    for (const x of g.all) {
+      const { st, cx, cy } = x;
+      const hue = P.st[st.id];
+      const active = st.running > 0 || st.failed > 0;
+      const stroke = st.failed > 0 ? P.fail : st.running > 0 ? hue : P.line;
+      const tip = `<title>${esc(stationTip(st))}</title>`;
+      pulses += pulseDots(P, x);
+      if (st.running > 0) {
+        const [lo, hi] = P.glow;
+        // Breathing from its mid: begin −0.6 s puts the max;min;max cycle at its middle.
+        layers.glows += `<circle cx="${f2(cx)}" cy="${cy}" r="14" fill="${hue}" opacity="${(lo + hi) / 2}"><animate attributeName="opacity" values="${hi};${lo};${hi}" keyTimes="0;0.5;1" calcMode="spline" keySplines="${EASE};${EASE}" dur="2.4s" begin="-0.6s" repeatCount="indefinite"/></circle>`;
+      }
+      layers.circles += `<circle class="mark" data-st="${st.id}" cx="${f2(cx)}" cy="${cy}" r="11" fill="${P.raised}" stroke="${stroke}" stroke-width="${active ? 1.5 : 1}">${tip}<animate data-flash="${st.id}" data-delay="${f2(x.dur)}" attributeName="stroke-width" values="1.25;2.25;1.25" keyTimes="0;0.5;1" calcMode="spline" keySplines="${EASE_OUT};${EASE_OUT}" dur="0.3s" begin="indefinite"/></circle>`;
+      layers.icons += `<g transform="translate(${f2(cx - 7)} ${cy - 7})" ${iconAttrs(hue)} opacity="${st.count ? 1 : 0.45}">${tip}${ST_ICON[st.id]}</g>`;
+      // Badge and disc keep their corners on both sides (no mirroring).
+      if (st.running >= 2) {
+        layers.badges += `<g class="mark" data-st="${st.id}" data-part="badge"><circle cx="${f2(cx + 8)}" cy="${cy - 8}" r="6" fill="${P.raised}" stroke="${hue}" stroke-width="1"/>` +
+          `${svgText(cx + 8, cy - 5, 8, 700, P.bone, st.running >= 10 ? '×9+' : `×${st.running}`)}</g>`;
+      }
+      if (st.failed > 0) {
+        layers.badges += `<g class="mark" data-st="${st.id}" data-part="disc"><circle cx="${f2(cx - 8)}" cy="${cy - 8}" r="5.5" fill="${P.fail}"/>` +
+          `${svgText(cx - 8, cy - 5, 8, 700, P.raised, st.failed >= 10 ? '9+' : String(st.failed))}</g>`;
+      }
+      const s = g.textSize, count = countText(st.count), labelFill = active ? P.bone : P.ash;
+      if (g.twoRows) {
+        layers.text += `<text class="mark" data-st="${st.id}" x="${f2(cx)}" y="${cy + 24}" text-anchor="middle" font-family="${FONT}">` +
+          `${s ? `<tspan ${textAttrs(s, 500, labelFill, false)}>${st.label}</tspan>` : ''}` +
+          `<tspan ${s ? 'dx="3" ' : ''}${textAttrs((s || 10) + 1, 600, P.bone, true)}>${count}</tspan></text>`;
+      } else {
+        if (s) layers.text += svgText(cx, cy + 24, s, 500, labelFill, st.label, 'middle', false).replace('<text ', `<text class="mark" data-st="${st.id}" `);
+        layers.text += svgText(cx, cy + 38, (s || 10) + 1, 600, P.bone, count).replace('<text ', `<text class="mark" data-st="${st.id}" `);
+      }
+    }
+    const rails = g.sides.flatMap(sd => sd.rails).map(d => `<path class="rail" d="${d}" fill="none" stroke="${P.rail}" stroke-width="1"/>`).join('');
+    const alt = `Context 56%, 112k of 200k, opus 5.5, 1 compaction. ${STATIONS_ALT}`;
+    // Z-order: core, trunk/fork/rails, pulses, glows, circles, icons, badges and discs, text.
+    const svg = `<svg class="band" data-cy0="${g.cy0}" width="${f2(g.width)}" height="${g.height}" viewBox="0 0 ${f2(g.width)} ${g.height}" role="img" aria-label="${esc(alt)}">` +
+      `${coreSvg(P, g.Xc, g.cy0)}${rails}${pulses}${layers.glows}${layers.circles}${layers.icons}${layers.badges}${layers.text}</svg>`;
+    // The group in a Box that centres it, so the centring does not depend on CELL_PX.
+    return `<div data-new><div style="height:${g.height}px;overflow:hidden;display:flex;justify-content:center">${svg}</div></div>`;
+  }
+
+  // ==== Activity lanes: the label column and the bar area from the width; a state shows by shape ==================
+  function endGlyph(kind, gx) {
+    const y = 9.5;
+    if (kind === 'done') {
+      // The house check (centre 7.05, 7.15 of the 14 grid), scaled ×1.6 to about 8 × 6 px.
+      return `<path d="M4.6 7.2l1.7 1.7 3.2-3.5" transform="translate(${f2(gx - 7.05 * 1.6)} ${f2(y - 7.15 * 1.6)}) scale(1.6)" fill="none" stroke="${GREEN}" stroke-width="1.4" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>`;
+    }
+    if (kind === 'failed') {
+      return `<path d="M${f2(gx - 3.25)} ${y - 3.25}l6.5 6.5M${f2(gx + 3.25)} ${y - 3.25}l-6.5 6.5" stroke="${RED}" stroke-width="1.4" stroke-linecap="round"/>`;
+    }
+    if (kind === 'stopped') return `<rect x="${f2(gx - 2.5)}" y="${y - 2.5}" width="5" height="5" rx="1" fill="${NEUTRAL}"/>`;
+    return `<circle cx="${f2(gx)}" cy="${y}" r="3.5" fill="none" stroke="${NEUTRAL}" stroke-width="1.4"/>`;
+  }
+  function laneSvg(P, lane, uid, area) {
+    const A = area - 12; // the last 12 px are the gutter
+    const ax = ago => A - ago * A / SPAN;
+    const hue = P.st[lane.hue];
+    let s = '', defs = '';
+    const cap = `<rect x="${A - 2}" y="4.5" width="2" height="10" fill="${hue}">${capAnim}</rect>`;
+    if (lane.unknown) {
+      s += `<g><title>${esc(lane.unknown)}</title><line x1="0" y1="9.5" x2="${A}" y2="9.5" stroke="${hue}" stroke-width="2" stroke-dasharray="3 3"/>${cap}</g>`;
+    }
+    lane.spans.forEach((sp, i) => {
+      const x0 = f2(Math.max(0, ax(sp.a))), x1 = f2(ax(sp.b));
+      // State by shape: a running span is 6 px (y 6.5–12.5), a finished one 3 px (y 8–11).
+      const [y, h] = sp.live ? [6.5, 6] : [8, 3];
+      let bar;
+      if (sp.a > SPAN) {
+        // Started before the axis: square left end, an 8 px fade-in, rounded right end.
+        const id = `fade-${uid}-${i}`, r = h / 2;
+        defs += `<linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="${x0}" y1="0" x2="${x0 + 8}" y2="0"><stop offset="0" stop-color="${hue}" stop-opacity="0"/><stop offset="1" stop-color="${hue}"/></linearGradient>`;
+        bar = `<path d="M${x0} ${y}H${f2(x1 - r)}A${r} ${r} 0 0 1 ${f2(x1 - r)} ${y + h}H${x0}Z" fill="url(#${id})"/>`;
+      } else {
+        const w = f2(x1 - x0);
+        bar = `<rect x="${x0}" y="${y}" width="${w}" height="${h}" rx="${Math.min(h / 2, w / 2)}" fill="${hue}"/>`;
+      }
+      const glyph = lane.end && i === lane.spans.length - 1 ? endGlyph(lane.end, x1 + 6) : '';
+      s += `<g><title>${esc(sp.tip)}</title>${bar}${sp.live ? cap : ''}${glyph}</g>`;
+    });
+    return `<svg width="${area}" height="19" viewBox="0 0 ${area} 19" role="img" aria-label="${esc(lane.alt)}">${defs ? `<defs>${defs}</defs>` : ''}${s}</svg>`;
+  }
+  function axisSvg(P, area) {
+    const A = area - 12;
+    const step = tickStep(A, 48);
+    const ticks = ticksOf(step).map(t => {
+      const x = f2(A - (NOW_S - t) * A / SPAN);
+      // A label closer than 36 px to `now` is left out; its tick stays.
+      return `<rect x="${f2(x - 0.5)}" y="1" width="1" height="4" fill="${P.ash}"/>` + (A - x >= 36 ? svgText(x, 14, 9, 400, P.ash, clock(t)) : '');
+    }).join('');
+    return `<svg width="${area}" height="16" viewBox="0 0 ${area} 16" role="img" aria-label="axis ${clock(NOW_S - SPAN)} to now">` +
+      `<rect x="0" y="2" width="${A}" height="1" fill="${P.rail}"/>${ticks}${svgText(A + 4, 14, 9, 400, P.ash, 'now', 'end')}</svg>`;
+  }
+  function dActivity(c) {
+    const L = clamp(Math.floor(c.cols * 0.3), 9, 32);
+    const area = Math.min(c.W - (L + 10) * CELL, SVG_MAX);
+    // The @type tag follows the label, dim, when the label column has 24 cells; else it is only in the alt.
+    const label = l => (L >= 24 && l.tag
+      ? `<span class="cell" style="width:${L * CELL}px"><span class="ct ${l.strong ? '' : 'dim'}">${esc(l.label)}<span class="dim"> ${esc(l.tag)}</span></span></span>`
+      : cellT(l.label, L, l.strong ? '' : 'dim'));
+    const lanes = LANES.map(l =>
+      row(`${label(l)}${laneSvg(c.P, l, `${c.key}-${l.label.replace(/\W/g, '')}`, area)}${cellT(l.value, 8, '', true)}`));
+    const axis = row(`<span class="cell" style="width:${L * CELL}px"></span>${axisSvg(c.P, area)}<span class="cell" style="width:64px"></span>`);
+    const more = row(fixT('+1 more', 'dim'));
+    return dSection(c.key, 'activity', 'activity', 'Activity', '3/8', lanes.join('') + axis + more, true);
+  }
+
+  // ==== Desktop panes ===========================================================================================
+  // Today: 0.6.1 as view.tsx draws it.
+  const deskToday = c => dSessionRow() + dContext(c) + dSplit() + dProject() + dUsage(c) +
+    dSection(c.key, 'turn', 'turn', 'Turn stats', S_DATA.rate, dTurnRows()) +
+    dAgents(c) + dTasks(c) + dMcp(c) + dSources(c) + dLog(c);
+  // The visualized pane: the band in place of the Context rows, the ribbon in place of the Turn stats table, Activity in
+  // place of Subagents and Tasks.
+  const deskNew = c => dSessionRow() + bandSvg(c) + dSplit() + dProject() + dUsage(c) + dRibbon(c) +
+    dActivity(c) + dMcp(c) + dSources(c) + dLog(c);
+
+  // ==== Terminal kit: a row is a list of segments; every row is ≤ `cols` columns ================================
+  // `t` = { key, P, cols }.
+  const seg = (text, c = 'fg', extra = {}) => ({ t: text, c, ...extra });
+  const colsOf = s => [...s].reduce((n, ch) => n + (ch.codePointAt(0) >= 0x1f000 ? 2 : 1), 0); // an emoji is 2 columns
+  const width = segs => segs.reduce((n, s) => n + colsOf(s.t), 0);
+  const padR = (s, n) => s + ' '.repeat(Math.max(0, n - colsOf(s)));
+  const padL = (s, n) => ' '.repeat(Math.max(0, n - colsOf(s))) + s;
+  const cut = (s, n) => ([...s].length > n ? `${[...s].slice(0, n - 1).join('')}…` : s);
+  const LR = (cols, left, right) => [...left, seg(' '.repeat(Math.max(0, cols - width(left) - width(right)))), ...right];
+  const THEME_KEYS = { fg: 'var(--fg)', dim: 'var(--dim)', ok: 'var(--success)', warn: 'var(--warning)', err: 'var(--error)' };
+  function tRow(segs) {
+    return `<div class="tr">${segs.map(s => {
+      if (s.btn) return `<button type="button" class="tbtn" data-fold="${s.btn}" aria-expanded="${s.open}" aria-label="${s.label}">${esc(s.t)}</button>`;
+      return `<span style="color:${THEME_KEYS[s.c] || s.c}"${s.b ? ' class="bo"' : ''}>${esc(s.t)}</span>`;
+    }).join('')}</div>`;
+  }
+  const tRule = t => tRow([seg('─'.repeat(t.cols), 'dim')]);
+  function tSection(t, id, title, summary, rows, isNew = false) {
+    const open = isOpen(t.key, id);
+    const chev = seg(open ? '▾' : '▸', 'dim', { btn: `${t.key}:${id}`, open, label: `${open ? 'Fold' : 'Unfold'} ${title}` });
+    const head = tRow(LR(t.cols, [seg(title, 'fg', { b: true }), seg(' '), chev], summary ? [seg(summary, 'dim')] : []));
+    const inner = head + (open ? rows.join('') : '');
+    return tRule(t) + (isNew ? `<div data-new>${inner}</div>` : inner);
+  }
+  const tMeter = pct => {
+    const filled = Math.round(pct * 10 / 100);
+    return [seg('▰'.repeat(filled), meterColor(pct)), seg('▱'.repeat(10 - filled), 'dim')];
+  };
+  const MARKS = { running: ['◐', BLUE], done: ['✓', 'ok'], failed: ['✗', 'err'], stopped: ['■', 'dim'], ended: ['○', 'dim'] };
+  // Split `total` cells over `weights`, each at least 1, by largest remainder.
+  function apportion(weights, total) {
+    const sum = weights.reduce((a, b) => a + b, 0);
+    const q = weights.map(w => w / sum * total);
+    const n = q.map(x => Math.max(1, Math.floor(x)));
+    const rem = i => q[i] - Math.floor(q[i]);
+    const idx = q.map((_, i) => i);
+    let diff = total - n.reduce((a, b) => a + b, 0);
+    for (const i of [...idx].sort((a, b) => rem(b) - rem(a))) if (diff > 0 && q[i] >= 1) { n[i]++; diff--; }
+    for (const i of [...idx].sort((a, b) => rem(a) - rem(b))) if (diff < 0 && n[i] > 1) { n[i]--; diff++; }
+    return n;
+  }
+
+  // ---- Shared terminal blocks (0.6.1) ----------------------------------------------------------------------
+  const tSessionRow = t => tRow(LR(t.cols, [seg('Session', 'fg', { b: true })], [seg(S_DATA.total)]));
+  const tContext = t => tRow(LR(t.cols, [seg('Context')], [seg(S_DATA.ctx.note, 'dim')])) +
+    tRow(LR(t.cols, tMeter(S_DATA.ctx.pct), [seg(S_DATA.ctx.pctText)]));
+  const tSplit = () => tRow([seg(S_DATA.split, 'dim')]);
+  function tProject(t) {
+    const p = S_DATA.project;
+    return tRule(t) + tRow(LR(t.cols, [seg('Project', 'fg', { b: true })], [seg(p.name, 'dim')])) +
+      tRow([seg(`🌿 ${p.branch}`)]) +
+      tRow(LR(t.cols, [seg(`📝 ${p.files}`)], [seg(p.added, 'ok'), seg(' / ', 'dim'), seg(p.removed, 'err')]));
+  }
+  const tUsage = t => tSection(t, 'usage', 'Usage', '5-hour 41%', S_DATA.limits.map(([l, pct, reset]) =>
+    tRow(LR(t.cols, [seg(padR(l, 7)), seg(' '), ...tMeter(pct), seg(' '), seg(padL(`${pct}%`, 5))], [seg(reset, 'dim')]))));
+  const tTurnRows = t => S_DATA.turnRows.map(([l, v, c]) => tRow(LR(t.cols, [seg(l)], [seg(v, c || 'fg')])));
+  // Subagents / Tasks: mark, description, tag (the longest drawn, up to its cap), value (view.tsx statusSection).
+  function tStatus(t, id, title, items, tagCap, valueCells) {
+    const tagCells = Math.min(tagCap, Math.max(...items.map(i => [...i[2]].length)));
+    const hasTag = t.cols - 1 - tagCells - valueCells - 3 >= 12;
+    const descCells = hasTag ? t.cols - 1 - tagCells - valueCells - 3 : t.cols - 1 - valueCells - 2;
+    const running = items.filter(i => i[0] === 'running').length;
+    const rows = items.map(([status, desc, tag, value]) => {
+      const [glyph, c] = MARKS[status];
+      return tRow([seg(glyph, c), seg(' '), seg(padR(cut(desc, descCells), descCells)), seg(' '),
+        ...(hasTag ? [seg(padR(cut(tag, tagCells), tagCells), 'dim'), seg(' ')] : []), seg(padL(value, valueCells))]);
+    });
+    return tSection(t, id, title, `${running}/${items.length}`, rows);
+  }
+  const tAgents = t => tStatus(t, 'agents', 'Subagents', S_DATA.agents, 15, 8);
+  const tTasks = t => tStatus(t, 'tasks', 'Tasks', S_DATA.tasks, 10, 8);
+  const tMcp = t => tSection(t, 'mcp', 'MCP', String(S_DATA.mcp.length),
+    [tRow(S_DATA.mcp.flatMap((n, i) => [...(i ? [seg('  ')] : []), seg('● ', 'ok'), seg(n)]))]);
+  const tSources = t => tSection(t, 'sources', 'Context sources', `${S_DATA.skills} skills · ${S_DATA.mcp.length} MCP`,
+    [tRow(LR(t.cols, [seg('Skills')], [seg(String(S_DATA.skills))])), tRow(LR(t.cols, [seg('MCP servers')], [seg(String(S_DATA.mcp.length))]))]);
+  function tLog(t) {
+    const whoCells = Math.min(14, Math.max(...S_DATA.log.map(l => l[1].length)));
+    const outCells = Math.max(...S_DATA.log.map(l => [...l[3]].length));
+    const lay = logLayout(t.cols, whoCells, outCells);
+    const rows = S_DATA.log.map(line => {
+      const [time, who, , out, kind] = line;
+      const c = kind === 'error' ? 'err' : 'dim';
+      return tRow([seg(time, 'dim'), seg(' '),
+        ...(lay.hasWho ? [seg(padR(cut(who, whoCells), whoCells), c), seg(' ')] : []),
+        seg(padR(cut(lay.textOf(line), lay.textCells), lay.textCells), lay.textOnly && kind === 'error' ? 'err' : 'fg'),
+        ...(lay.hasOut ? [seg(' '), seg(padL(out, outCells), c)] : [])]);
+    });
+    rows.push(tRow([seg(`  +${S_DATA.logCount - S_DATA.log.length} more`, 'dim')]));
+    return tSection(t, 'log', 'Log', String(S_DATA.logCount), rows);
+  }
+
+  // ---- Terminal ribbon: the bar is cols − 8 cells --------------------------------------------------------------
+  function tRibbon(t) {
+    const st = t.P.st;
+    const barCells = t.cols - 8;
+    const filled = Math.round(ELAPSED / CEILING * barCells);
+    // The steps drawn one by one follow the desktop's rule, a cell counted as 8 px.
+    const parts = ribbonParts(detailSteps(barCells * CELL));
+    const counts = apportion(parts.map(s => s.t), filled);
+    // Every cell in its segment's hue; a failed segment's last cell is a red ✗; no `hot` cell.
+    const bar = parts.flatMap((s, i) => (s.failed
+      ? [seg('█'.repeat(counts[i] - 1), st[s.k]), seg('✗', 'err')]
+      : [seg('█'.repeat(counts[i]), st[s.k])]));
+    const row1 = [...bar, seg('·'.repeat(barCells - filled), 'dim'), seg(' '), seg(padL('2m 14s', 7))];
+    const legend = [seg('Model', st.model), seg(' 58%'), seg(' · ', 'dim'), seg('Tools', 'dim'), seg(' 42%'),
+      ...(t.cols >= 34 ? [seg(' · ', 'dim'), seg('6 steps')] : []),
+      ...(t.cols >= 44 ? [seg(' · ', 'dim'), seg('TTFT', 'dim'), seg(' 1.2s')] : [])];
+    const open = isOpen(t.key, 'details');
+    const details = [seg(`${open ? '▾' : '▸'} details`, 'dim', { btn: `${t.key}:details`, open, label: 'details' })];
+    return tSection(t, 'turn', 'Turn stats', S_DATA.rate, [tRow(row1), tRow(legend), tRow(details), ...(open ? tTurnRows(t) : [])], true);
+  }
+
+  // ---- Terminal band: the core as a line, the stations in a grid ------------------------------------------------
+  function tBand(t) {
+    const P = t.P;
+    const row1 = tRow(LR(t.cols, [seg('opus 5.5'), seg('  '), ...tMeter(56), seg('  '), seg('56%')],
+      [seg('112k / 200k', 'dim'), ...(t.cols >= 44 ? [seg(' ↻1', 'dim')] : [])]));
+    const full = t.cols >= 59;
+    const perRow = t.cols >= 119 ? 8 : t.cols >= 43 ? 4 : 3;
+    const cell = s => {
+      const hue = P.st[s.id];
+      const mark = s.running > 0 ? seg('●', hue) : seg('·', 'dim');
+      const count = seg(padL(String(s.count), 3), s.count ? 'fg' : 'dim');
+      if (!full) {
+        // Compact, 10 cells: mark, label 5, count 3, badge 1 (N dropped).
+        const badge = s.failed ? seg('!', 'err') : s.running >= 2 ? seg('×', hue) : seg(' ');
+        return [mark, seg(padR(s.short, 5), hue), count, badge];
+      }
+      const badge = s.failed ? seg(`!${Math.min(9, s.failed)}`, 'err') : s.running >= 2 ? seg(`×${Math.min(9, s.running)}`, hue) : seg('  ');
+      return [mark, seg(' '), seg(padR(s.label, 6), hue), count, seg(' '), badge];
+    };
+    let rows = '';
+    for (let i = 0; i < STATIONS.length; i += perRow) {
+      rows += tRow(STATIONS.slice(i, i + perRow).flatMap((s, j) => [...(j ? [seg(' ')] : []), ...cell(s)]));
+    }
+    return `<div data-new>${row1}${rows}</div>`;
+  }
+
+  // ---- Terminal Activity: label L, bar = cols − L − 10, axis = bar − 1 -------------------------------------------
+  function tLaneBar(lane, hue, axisCells) {
+    const spc = SPAN / axisCells; // seconds a cell
+    const cells = Array(axisCells + 1).fill(null);
+    const fill = (from, to, ch, c) => { for (let i = from; i < to; i++) cells[i] = [ch, c]; };
+    if (lane.unknown) { fill(0, axisCells, '┄', hue); cells[axisCells] = ['◐', hue]; }
+    let lastEnd = 0;
+    for (const sp of lane.spans) {
+      const s = sp.a >= SPAN ? 0 : Math.round((SPAN - sp.a) / spc);
+      const e = Math.max(s + 1, Math.round((SPAN - sp.b) / spc));
+      fill(s, e, sp.live ? '━' : '─', hue);
+      if (sp.live) cells[axisCells] = ['◐', hue];
+      lastEnd = e;
+    }
+    if (lane.end) {
+      const [glyph, c] = { done: ['✓', 'ok'], failed: ['✗', 'err'], stopped: ['■', 'dim'] }[lane.end];
+      cells[Math.min(lastEnd, axisCells)] = [glyph, c];
+    }
+    // Merge runs of one colour into one segment.
+    const out = [];
+    for (const cell of cells) {
+      const [ch, c] = cell || [' ', 'fg'];
+      if (out.length && out[out.length - 1].c === c) out[out.length - 1].t += ch; else out.push(seg(ch, c));
+    }
+    return out;
+  }
+  function tAxis(axisCells) {
+    const bar = axisCells + 1, spc = SPAN / axisCells;
+    const chars = Array(bar).fill(' ');
+    const nowStart = bar - 3;
+    'now'.split('').forEach((ch, i) => { chars[nowStart + i] = ch; });
+    let free = 0; // the first cell a label may take
+    for (const tk of ticksOf(tickStep(axisCells, 8))) {
+      const start = Math.round((tk - (NOW_S - SPAN)) / spc - 2);
+      if (start < free || start + 5 > nowStart - 1) continue;
+      clock(tk).split('').forEach((ch, i) => { chars[start + i] = ch; });
+      free = start + 6;
+    }
+    return chars.join('');
+  }
+  function tActivity(t) {
+    const st = t.P.st;
+    const L = clamp(Math.floor(t.cols * 0.3), 9, 32);
+    const barCells = t.cols - L - 10;
+    const axisCells = barCells - 1;
+    // The @type tag follows the label, dim, when the label column has 24 cells.
+    const labelSegs = l => {
+      if (L < 24 || !l.tag) return [seg(padR(cut(l.label, L), L), l.strong ? 'fg' : 'dim')];
+      const text = [...cut(`${l.label} ${l.tag}`, L)], head = Math.min(l.label.length, text.length);
+      return [seg(text.slice(0, head).join(''), l.strong ? 'fg' : 'dim'), seg(padR(text.slice(head).join(''), L - head), 'dim')];
+    };
+    const rows = LANES.map(l => tRow([...labelSegs(l), seg(' '),
+      ...tLaneBar(l, st[l.hue], axisCells), seg(' '), seg(padL(l.value, 8))]));
+    rows.push(tRow([seg(' '.repeat(L + 1)), seg(tAxis(axisCells).trimEnd(), 'dim')]));
+    rows.push(tRow([seg('+1 more', 'dim')]));
+    return tSection(t, 'activity', 'Activity', '3/8', rows, true);
+  }
+
+  // ==== Terminal panes ==========================================================================================
+  const termToday = t => tSessionRow(t) + tContext(t) + tSplit() + tProject(t) + tUsage(t) +
+    tSection(t, 'turn', 'Turn stats', S_DATA.rate, tTurnRows(t)) + tAgents(t) + tTasks(t) + tMcp(t) + tSources(t) + tLog(t);
+  const termNew = t => tSessionRow(t) + tBand(t) + tSplit() + tProject(t) + tUsage(t) + tRibbon(t) +
+    tActivity(t) + tMcp(t) + tSources(t) + tLog(t);
+
+  // ==== Mounting, controls, folds, markers, motion ==============================================================
+  const PANES = {
+    'today-d': deskToday, 'new-d': deskNew,
+    'today-t': termToday, 'new-t': termNew,
+  };
+  const mqDark = matchMedia('(prefers-color-scheme: dark)');
+  const mqReduce = matchMedia('(prefers-reduced-motion: reduce)');
+  const state = { theme: mqDark.matches ? 'dark' : 'light', pane: '360', term: 44 };
+  // Full = the page content width (the viewport less the body's 40 px margins).
+  const paneWidth = () => (state.pane === 'full' ? document.documentElement.clientWidth - 80 : Number(state.pane));
+
+  // The marker: a 3 px accent bar 8 px left of the pane, spanning each new block, with a rotated `new`.
+  function placeMarkers(col) {
+    col.querySelectorAll('.marker').forEach(m => m.remove());
+    const top = col.getBoundingClientRect().top;
+    col.querySelectorAll('[data-new]').forEach(block => {
+      const r = block.getBoundingClientRect();
+      const m = document.createElement('div');
+      m.className = 'marker';
+      m.setAttribute('aria-hidden', 'true');
+      m.style.top = `${r.top - top}px`;
+      m.style.height = `${r.height}px`;
+      m.innerHTML = '<span>new</span>';
+      col.append(m);
+    });
+  }
+  // Reduced motion: every SVG paused at time 0, where caps rest at 1 and glows at their mid.
+  function applyMotion(root) {
+    root.querySelectorAll('svg').forEach(svg => {
+      if (typeof svg.pauseAnimations !== 'function') return;
+      if (mqReduce.matches) { svg.pauseAnimations(); svg.setCurrentTime(0); } else svg.unpauseAnimations();
+    });
+  }
+  function renderPane(key) {
+    const el = document.getElementById(key);
+    const P = PAL[state.theme];
+    if (key.endsWith('-d')) {
+      const pw = paneWidth();
+      const W = pw - 32; // 1 px border and 15 px padding each side
+      el.parentElement.style.width = `${pw}px`;
+      el.innerHTML = PANES[key]({ key, P, W, cols: Math.floor(W / CELL) });
+    } else {
+      el.parentElement.style.width = `calc(${state.term + 2}ch + 2px)`;
+      el.parentElement.previousElementSibling.textContent = `Terminal · ${state.term} columns`;
+      el.innerHTML = PANES[key]({ key, P, cols: state.term });
+    }
+    applyMotion(el);
+  }
+  // Side by side, the panes line up under captions of one height; stacked, each caption keeps its own.
+  function layout() {
+    const heads = [...document.querySelectorAll('.colhead')];
+    heads.forEach(h => { h.style.minHeight = ''; });
+    if (!document.getElementById('cols').classList.contains('stack')) {
+      const tallest = Math.max(...heads.map(h => h.offsetHeight));
+      heads.forEach(h => { h.style.minHeight = `${tallest}px`; });
+    }
+    document.querySelectorAll('.col').forEach(placeMarkers);
+  }
+  function renderAll() {
+    document.documentElement.dataset.theme = state.theme;
+    const press = (attr, value) => document.querySelectorAll(`[${attr}]`).forEach(b =>
+      b.setAttribute('aria-pressed', String(b.getAttribute(attr) === String(value))));
+    press('data-set-theme', state.theme); press('data-pane', state.pane); press('data-term', state.term);
+    document.getElementById('cols').classList.toggle('stack', state.pane === '900' || state.pane === 'full');
+    Object.keys(PANES).forEach(renderPane);
+    layout();
+  }
+
+  document.addEventListener('click', e => {
+    const b = e.target.closest('[data-set-theme], [data-pane], [data-term]');
+    if (b) {
+      if (b.dataset.setTheme) state.theme = b.dataset.setTheme;
+      if (b.dataset.pane) state.pane = b.dataset.pane;
+      if (b.dataset.term) state.term = Number(b.dataset.term);
+      renderAll();
+      return;
+    }
+    const f = e.target.closest('[data-fold]');
+    if (!f) return;
+    const foldKey = f.dataset.fold;
+    folds[foldKey] = !folds[foldKey];
+    const paneKey = foldKey.split(':')[0];
+    renderPane(paneKey);
+    placeMarkers(document.getElementById(paneKey).closest('.col'));
+    document.getElementById(paneKey).querySelector(`[data-fold="${foldKey}"]`)?.focus();
+  });
+  let resizeFrame = 0;
+  addEventListener('resize', () => {
+    cancelAnimationFrame(resizeFrame);
+    resizeFrame = requestAnimationFrame(() => (state.pane === 'full' ? renderAll() : layout()));
+  });
+
+  // The page-only pulse demo: one pulse every 2.4 s, in the turn's station order; each rides its station's path for
+  // dur = clamp(0.6 × √(length / 240), 0.6, 1.4) s.
+  const PULSE_ORDER = TURN.map(s => s.k);
+  let pulseIndex = 0, pulseTimer = null, firstTimer = null;
+  function firePulse() {
+    const id = PULSE_ORDER[pulseIndex++ % PULSE_ORDER.length];
+    document.querySelectorAll('svg.band').forEach(svg => {
+      svg.querySelectorAll(`[data-move="${id}"], [data-pulse="${id}"], [data-flash="${id}"]`)
+        .forEach(a => a.beginElementAt(Number(a.dataset.delay)));
+    });
+  }
+  function syncLoop() {
+    clearTimeout(firstTimer); clearInterval(pulseTimer); firstTimer = pulseTimer = null;
+    if (mqReduce.matches) return;
+    firstTimer = setTimeout(() => { firePulse(); pulseTimer = setInterval(firePulse, 2400); }, 800);
+  }
+  mqReduce.addEventListener('change', () => { applyMotion(document); syncLoop(); });
+
+  renderAll();
+  syncLoop();
+  // Fonts settle after the first layout; heads and markers measure again then.
+  addEventListener('load', layout);
+})();
+</script>
+</body>
+</html>

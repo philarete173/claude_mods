@@ -1,6 +1,6 @@
 # Third-party notices
 
-session-panel builds on three MIT-licensed projects. Their license notices follow.
+session-panel builds on four MIT-licensed projects. Their license notices follow.
 
 ## claude-flightdeck
 
@@ -75,6 +75,39 @@ SOFTWARE.
 MIT License
 
 Copyright (c) 2026 George Liu
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## lot-map
+
+- **URL:** https://github.com/alexeyw/lot-map
+- **Revision:** commit a616402
+- **Used:** the station map of the Session block and its set of stations, adapted; the Agents, Skills and You icons,
+  redrawn onto the 14 px grid from `hooks/setup.ts`; and the SVG techniques of `hooks/draw.ts` and
+  `hooks/palette.ts`: animations phase-locked by negative `begin` offsets, and light-theme rules under
+  `prefers-color-scheme`.
+
+```text
+MIT License
+
+Copyright (c) 2026 Aleksei Volodin
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
