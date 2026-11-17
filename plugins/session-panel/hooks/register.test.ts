@@ -7402,6 +7402,43 @@ test('a session that starts with an empty pane rebuilds it from the messages, un
     expect(state.logCount).toBe(held.logCount + restored.logCount)
   })
 
+// The restore adds the station counts and the compactions of the rows to what is live, and empties the calls in flight
+// (the restore knows nothing of a call that runs). The root takes 1500 ms, so the restore lands after the whole of the
+// model step: the step's last chunk comes 1000 ms in and its writes 1 ms after, and the `tool` chunk, 500 ms in, has
+// marked `u1` in flight by then.
+test('a restore adds the counts and the compactions, and empties the calls in flight', WITH_RESTORER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    const rows = [
+      { role: 'user', text: 'This session is being continued from a previous conversation. Summary: …', toolUses: [] },
+      ...ROWS,
+      { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'u9', tool: 'Read', input: {}, result: {} }] },
+    ]
+    w.messages = rows
+    w.rootLag = 1500
+    await $.session.start(START)
+    await startTurn($)
+    await runStep($, clock, { turnId: 't0', index: 0 })
+    await clock.advance(10)
+    const live = await readState($)
+    expect(Object.keys(live.inFlight)).toEqual(['u1']) // the step has run to its end, and the restore has not landed
+    expect(live.stations.model.calls).toBe(1)
+    expect(Object.keys(live.agents ?? {})).toEqual([])
+
+    await clock.advance(2000)
+    const restored = restoreFromMessages(rows, new Set(), ROOT)
+    expect(restored.stationCalls).toMatchObject({ model: 2, files: 1, shell: 1, agents: 2 })
+    const state = await readState($)
+    for (const id of Object.keys(live.stations) as (keyof typeof live.stations)[]) {
+      const was = live.stations[id]
+      expect(state.stations[id], id).toEqual({ ...was, calls: was.calls + restored.stationCalls[id] })
+    }
+    expect(state.compactions).toBe((live.compactions ?? 0) + restored.compactions) // none written before the restore
+    expect(restored.compactions).toBe(1)
+    expect(state.inFlight).toEqual({})
+  })
+
 test('a session that starts with something in the pane restores nothing', SLOW_READER, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = bottom(on, clock)

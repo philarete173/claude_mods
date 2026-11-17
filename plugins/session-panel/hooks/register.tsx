@@ -312,6 +312,12 @@ async function restorePane(
   await update($, tasksAtom, held => (isCurrent() ? { ...restored.tasks, ...held } : held))
   await update($, logAtom, held => (isCurrent() ? [...held, ...restored.log].slice(0, LOG_MAX) : held))
   await update($, logCountAtom, held => (isCurrent() ? held + restored.logCount : held))
+  // The restore adds to the live counts; it knows of no call that runs, so none stays in flight.
+  await update($, stationsAtom, held => (isCurrent() ? Object.fromEntries(STATION_ORDER.map(id => [
+    id, { ...held[id], calls: held[id].calls + restored.stationCalls[id] },
+  ])) as StationsState : held))
+  await update($, compactionsAtom, held => (isCurrent() ? held + restored.compactions : held))
+  await update($, inFlightAtom, held => (isCurrent() ? {} : held))
 }
 
 // Puts a line on top of the log, and counts it: the log keeps the newest 200 lines, the count every line since the log

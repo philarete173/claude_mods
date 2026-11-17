@@ -73,7 +73,35 @@ const taskRow = (id: string, status: TaskRow['status'], patch: Partial<TaskRow> 
 const DEV = { command: 'npm run dev', description: 'Start the dev server', run_in_background: true }
 
 test('an empty list gives an empty result', () => {
-  expect(restore(engineRows([]))).toEqual({ agents: {}, tasks: {}, log: [], logCount: 0 })
+  expect(restore(engineRows([]))).toEqual({
+    agents: {}, tasks: {}, log: [], logCount: 0, stationCalls: { ...NO_CALLS }, compactions: 0,
+  })
+})
+
+// The station counts of a restore: every station at 0 but what the rows hold.
+const NO_CALLS = { model: 0, files: 0, shell: 0, web: 0, agents: 0, mcp: 0, skills: 0, you: 0 }
+
+test('the restore counts each station\'s calls and Model\'s steps after the latest summary', () => {
+  const restored = restore([
+    assistant(read('a.ts')), results(), user(SUMMARY),
+    assistant(read('b.ts'), call('Bash', { command: 'ls' })), results(),
+    assistant(call('mcp__codebase-memory__search_graph', {})), results(), assistant(),
+  ])
+  expect(restored.stationCalls).toEqual({ ...NO_CALLS, model: 3, files: 1, shell: 1, mcp: 1 })
+  expect(restored.compactions).toBe(1)
+})
+
+test('compactions count every summary row of the whole history', () => {
+  const restored = restore([user(SUMMARY), assistant(), user(SUMMARY), assistant()])
+  expect(restored.compactions).toBe(2)
+  expect(restored.stationCalls.model).toBe(1)
+})
+
+test('a use whose tool is no string or is too long is not counted; an unknown tool is Shell', () => {
+  const restored = restore([
+    assistant({ tool_use_id: 'x', tool: 5 }, { tool_use_id: 'y', tool: 'x'.repeat(257) }, call('Frobnicate', {})),
+  ])
+  expect(restored.stationCalls).toEqual({ ...NO_CALLS, model: 1, shell: 1 })
 })
 
 test('a foreground agent that completed is done, with its time and its answer', () => {

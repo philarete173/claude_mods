@@ -7,6 +7,8 @@ import {
   agentOutcome, endKind, engineLineText, HANDBACK_TOOL, LOG_MAX, logText, parseTaskNotification, promptKind,
   shortType, SPAWN_TOOLS, stripFormat, tagText, TASK_END, taskFromCall, taskLine, toolLabel,
 } from './stats'
+import { STATION_ORDER, stationOf } from './stations'
+import type { StationId } from './stations'
 import type { AgentRow, LogEntry, LogKind, TaskEndStatus, TaskRow } from './stats'
 
 // The shape the walk reads from each row; the engine's SessionMessage fits it. Rows are untrusted: anything else is
@@ -21,6 +23,8 @@ export type Restored = {
   tasks: Record<string, TaskRow> // newest first
   log: LogEntry[] // newest first, at most LOG_MAX (200)
   logCount: number // all lines built
+  stationCalls: Record<StationId, number> // each station's calls, and Model's steps, since the latest summary
+  compactions: number // the summary rows of the whole history
 }
 
 // The longest model name a row keeps, in UTF-16 units: a longer one is no model's name.
@@ -37,6 +41,8 @@ const NO_ANSWER_NOTES = [
 // The engine's sentence for an agent that has stopped its turn but still waits on its own background work: its notice
 // is no end, and a later one closes it.
 const WAITING_NOTE = 'This agent has not reported yet:'
+const noCalls = (): Record<StationId, number> =>
+  Object.fromEntries(STATION_ORDER.map(id => [id, 0])) as Record<StationId, number>
 const answerOf = (text: string): string => (NO_ANSWER_NOTES.some(note => text.includes(note)) ? '' : text)
 
 // A value read as a record of fields, or as a string; a value of another type counts as absent.
@@ -56,6 +62,8 @@ export function restoreFromMessages(rows: readonly unknown[], alive: ReadonlySet
   const tasks = new Map<string, TaskRow>()
   const lines: (() => LogEntry)[] = []
   let isAfterResults = false
+  let stationCalls = noCalls()
+  let compactions = 0
 
   // An agent's end: its status (endedAt stays null) and its end line.
   const endAgent = (row: AgentRow, status: TaskEndStatus, durationMs: number | null, answer: string): void => {
@@ -87,6 +95,7 @@ export function restoreFromMessages(rows: readonly unknown[], alive: ReadonlySet
   const readCall = (use: Record<string, unknown>): void => {
     const tool = textOf(use.tool)
     if (tool === undefined || tool.length > TOOL_NAME_MAX) return
+    stationCalls[stationOf(tool)] += 1
     const input = fieldsOf(use.input)
     const got = fieldsOf(use.result)
     const isError = use.isError === true
@@ -153,6 +162,8 @@ export function restoreFromMessages(rows: readonly unknown[], alive: ReadonlySet
         agents.clear()
         tasks.clear()
         lines.length = 0
+        stationCalls = noCalls()
+        compactions += 1
       } else if (shown.kind === 'prompt') {
         // A prompt right after tool results is one of the engine's mid-turn rows (a skill body or note), not typed.
         if (!isAfterResults) lines.push(() => entry('you', logText(shown.text), 'info'))
@@ -174,6 +185,7 @@ export function restoreFromMessages(rows: readonly unknown[], alive: ReadonlySet
         }
       }
     } else if (role === 'assistant' && Array.isArray(toolUses)) {
+      stationCalls.model += 1
       for (const use of toolUses) readCall(fieldsOf(use))
     }
     isAfterResults = role === 'user' && hasResults
@@ -192,6 +204,8 @@ export function restoreFromMessages(rows: readonly unknown[], alive: ReadonlySet
     tasks: Object.fromEntries([...tasks].reverse()),
     log: lines.slice(-LOG_MAX).reverse().map(build => build()),
     logCount: lines.length,
+    stationCalls,
+    compactions,
   }
 }
 
