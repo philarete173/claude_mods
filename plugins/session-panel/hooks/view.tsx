@@ -13,6 +13,7 @@ import {
 } from './stats'
 import type { AgentRow, LogEntry, TaskRow, TaskStatus } from './stats'
 import type { Motion } from './stations'
+import { BAD, BLUE, clampPct, GREEN, meterColor, NEUTRAL, OK, pctColor, RED, SVG_MAX_PX } from './svg'
 
 export type SectionId = 'usage' | 'turn' | 'agents' | 'tasks' | 'mcp' | 'sources' | 'log'
 
@@ -84,11 +85,6 @@ const TYPE_CELLS_MAX = TYPE_MAX + 1 // terminal: the `@` and the longest type th
 // margin. The live check of the release measures it. The terminal's column is the longest kind drawn, up to this.
 const TASK_TYPE_CELLS = 10 // desktop: the `@kind` of a task
 const TEXT_METER_CELLS = 10
-// The engine refuses an Svg whose width or height prop is above this (2.1.288: "Svg width and height are pixels, at
-// most 4096"), and a refused tree makes it draw its own pane in place of this one. A pane wider than this (a 32:9
-// monitor at 100 % scale) gets a rule that ends short of its right edge, and meters that stop short: a gap before the
-// percent of the context meter, and before the countdown of a limit meter.
-const SVG_MAX_PX = 4096
 const RULE_PX = SVG_MAX_PX // the divider image; the Box around it cuts it to the pane
 // The rows that the Subagents and the Tasks show each; the rest of a list is counted in a line after its rows.
 const MAX_STATUS_ROWS = 8
@@ -119,17 +115,6 @@ const STATUS_GAP_CELLS = 1 // the gap between the cells of a subagent or task ro
 const STATUS_ROW_GAPS = 3 // the gaps of such a row that has its tag: two between its cells, one in its group
 const TEXT_MARK_CELLS = 1 // the mark of such a row where there is no icon slot
 
-// The meter, the ring and the icons are images, so their colours are raw and the same in both themes.
-const BLUE = '#2f7de1'
-const AMBER = '#e0a030'
-const RED = '#e5484d'
-const NEUTRAL = '#8a8a8a' // the grey of every section and row icon, readable on dark and on light
-const GREEN = '#2ea043' // the done icon: a theme key cannot reach an SVG
-// Everything else that is coloured uses theme keys, so that it follows the theme. If a surface does not know one, the
-// fix is to put a raw colour here.
-const OK = 'success'
-const WARN = 'warning'
-const BAD = 'error'
 // The dot of an MCP chip. The no-break space keeps the gap: a plain space at the end of a flex item may be dropped.
 const DOT = '●\u00a0'
 // The minus sign of the lines removed, not the hyphen.
@@ -150,10 +135,6 @@ const STATUS_MARKS: Record<TaskStatus, { glyph: string; color?: string; isDim?: 
   ended: { glyph: '○', isDim: true },
 }
 
-const clampPct = (pct: number): number => (Number.isFinite(pct) ? Math.min(Math.max(pct, 0), 100) : 0)
-const meterColor = (pct: number): string => (pct >= 95 ? RED : pct >= 80 ? AMBER : BLUE)
-// The percent is written in a theme colour from 80, plain below.
-const pctColor = (pct: number): string | undefined => (pct >= 95 ? BAD : pct >= 80 ? WARN : undefined)
 const orNull = (x: number | null, format: (n: number) => string): string | null => (x === null ? null : format(x))
 
 // ---- Images (§5.1, §7, §8) ----
