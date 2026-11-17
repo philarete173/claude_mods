@@ -189,6 +189,22 @@ test('the states of §4.6', () => {
   expect(svg).toContain(`[stroke="${STATION_HUES.shell.dark}"]{stroke:${STATION_HUES.shell.light}}`)
 })
 
+// The ring's arc (the Context ring's test before the band): a track, and an arc of the percent from 12 o'clock,
+// clockwise, in the colour of the meter; the track alone at 0 and below; held on the full circle past 100.
+test('the core ring: an arc of the percent from 12 o\'clock, the track alone at 0, held at 100', () => {
+  const ring = (pct: number): string[] =>
+    drawBand({ ...EXAMPLE, pct }, 328, FULL).svg.match(/<circle cx="164" cy="47\.5" r="24"[^>]*\/>/g) ?? []
+  const track = '<circle cx="164" cy="47.5" r="24" fill="none" stroke="#808080" stroke-opacity="0.3" stroke-width="4"/>'
+  const arc = (dash: string, colour: string): string =>
+    `<circle cx="164" cy="47.5" r="24" fill="none" stroke="${colour}" stroke-width="4" pathLength="100"` +
+    ` stroke-dasharray="${dash} 100" transform="rotate(-90 164 47.5)"/>`
+
+  // 12.8 of a path 100 long, turned a quarter back so it starts at the top.
+  expect(ring(12.8)).toEqual([track, arc('12.8', '#2f7de1')])
+  for (const pct of [0, -3]) expect(ring(pct), String(pct)).toEqual([track])
+  expect(ring(250)).toEqual([track, arc('100', '#e5484d')])
+})
+
 test('the alt of §4.9, and no titles', () => {
   const band = drawBand(EXAMPLE, 328, FULL)
   expect(band.alt).toBe(

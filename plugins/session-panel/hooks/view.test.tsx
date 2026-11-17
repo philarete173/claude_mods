@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock, Plugin } from 'claude-code/testing'
 import type { On, RenderPropsOf, RenderSurface, SessionRateLimit } from 'claude-code'
 
-import { chipRows, contextMeterWidth, limitMeterWidth, meterSvg, renderPane, ringSvg } from './view'
+import { chipRows, limitMeterWidth, meterSvg, renderPane, spanLine } from './view'
 import type { PaneData } from './view'
 import { restoreFromMessages } from './restore'
 import { emptyStationsState } from './stations'
@@ -281,6 +281,11 @@ const summaries = async (ui: Pane): Promise<Record<string, unknown>> =>
 
 // The meters of the pane: the Svg elements that say a percent. The icons and the rules carry the label of their row.
 const meters = async (ui: Pane) => (await ui.findAll({ type: 'Svg' })).filter(el => /%$/.test(String(el.props.alt)))
+// The Session band's image: the one whose alt starts with the context.
+const bandImage = async (ui: Pane) =>
+  (await ui.findAll({ type: 'Svg' })).find(el => /^Context (—|\d)/.test(String(el.props.alt)))
+// The band's alt for a pane with no reading and no call: the core reads —, and every station 0.
+const EMPTY_BAND_ALT = 'Context —. Model 0; Files 0; Shell 0; Web 0; Agents 0; MCP 0; Skills 0; You 0.'
 
 const STATUSES: string[] = ['running', 'done', 'failed', 'stopped', 'ended']
 // The glyphs of the terminal's status marks: a half circle, a check, a cross, a square, a ring.
@@ -300,9 +305,11 @@ const marksOf = (tree: unknown): Array<[mark: string, cells: unknown]> =>
 const markCells = async (ui: Pane): Promise<Array<[mark: string, cells: unknown]>> => marksOf(await ui.drawn())
 
 // The log rows as drawn: who, how many cells wide the columns of the time and of `who` are, how many cells the row
-// has, and its outcome cell, the fourth, when there is one.
+// has, and its outcome cell, the fourth, when there is one. A time cell is a column with a width: the `—` that leads
+// the terminal band's core line sits in a cell with none.
 const isTimeCell = (cell: Node | undefined): boolean =>
-  cell?.type === 'Box' && childrenOf(cell)[0]?.type === 'Text' && /^(\d\d:\d\d:\d\d|—)$/.test(textsOf(cell)[0] ?? '')
+  cell?.type === 'Box' && hasWidth(cell) && childrenOf(cell)[0]?.type === 'Text' &&
+  /^(\d\d:\d\d:\d\d|—)$/.test(textsOf(cell)[0] ?? '')
 type LogColumns = {
   who: string; timeCells: unknown; whoCells: unknown; cells: number; outcomeCell: Node | undefined
 }
@@ -520,13 +527,23 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
     // The brief's marks.
-    for (const text of ['Context', '12.8%', 'Turn stats', '~61 tok/s', '$0.02']) {
+    for (const text of ['Turn stats', '~61 tok/s', '$0.02']) {
       expect(await has(ui, text), `${surface}: ${text}`).toBe(true)
     }
-    // Top block: Total, the split and the context figures.
-    for (const text of ['$5.49', 'Session $5.44 · Subagents $0.050', '128k / 1M']) {
+    // Top block: Total and the split.
+    for (const text of ['$5.49', 'Session $5.44 · Subagents $0.050']) {
       expect(await has(ui, text), `${surface}: ${text}`).toBe(true)
     }
+    // The context figures are the Session band's: in its alt on the desktop, in its core line on the terminal. No row
+    // is labelled Context any more.
+    if (surface === 'desktop') {
+      expect(String((await bandImage(ui))?.props.alt), surface).toStartWith('Context 13%, 128k of 1M')
+    } else {
+      for (const text of ['13%', '128k / 1M']) {
+        expect(await ui.find({ type: 'Text', text }), `${surface}: ${text}`).toBeDefined()
+      }
+    }
+    expect(await ui.find({ type: 'Text', text: /^Context$/ }), surface).toBeUndefined()
     // Project block: the name beside its title, the branch, and the one file that git says is modified (+3 / −1). A row
     // is an icon and its text on the desktop, an emoji and its text on the terminal; the folder emoji is gone.
     const shown = await texts(ui)
@@ -584,8 +601,10 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
       expect(await has(ui, text), `${surface}: ${text}`).toBe(true)
     }
     // MCP and Context sources: every server is a green dot and a name in the plain colour; the app's own servers are
-    // neither listed nor counted, so both say 2.
-    expect((await ui.findAll({ type: 'Text', text: '●' })).map(el => [el.text, el.props.color]), surface).toEqual([
+    // neither listed nor counted, so both say 2. (A chip's dot is `●` and a no-break space: the terminal band's mark of
+    // a running station is a `●` alone.)
+    const dots = await ui.findAll({ type: 'Text', text: /^●\u{a0}$/u })
+    expect(dots.map(el => [el.text, el.props.color]), surface).toEqual([
       ['●\u00a0', 'success'], ['●\u00a0', 'success'],
     ])
     for (const name of ['codebase-memory', 'issue-hub']) {
@@ -699,28 +718,32 @@ test('with no rate limits (a third-party provider) there is no Usage section', S
   }
 })
 
-test('a pane with nothing to show draws the title, an empty Context and the turn placeholder', async ($, on) => {
+test('a pane with nothing to show draws the title, an empty Session band and the turn placeholder', async ($, on) => {
   bottom(on, mock.clock(on, { now: NOW }))
 
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
     expect((await ui.find({ type: 'Text', text: 'Session' }))?.props.bold).toBe(true)
-    expect(await ui.find({ type: 'Text', text: 'Context' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^—$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Context$/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: 'No completed turn yet' })).toBeDefined()
     // No data, so no Total, no project line, no meter, and every section but the turn is left out.
     expect(await headers(ui)).toEqual(['▾ Turn stats'])
     expect(await has(ui, '$')).toBe(false)
     expect(await has(ui, '📁')).toBe(false)
     expect(await meters(ui)).toEqual([])
-    expect(await has(ui, /[▰▱]/)).toBe(false)
-    // The desktop draws the empty ring, a track with no arc; the terminal draws no image at all.
+    expect(await has(ui, '▰')).toBe(false)
+    // The band reads —. The desktop draws it as an image, the ring a track with no arc; the terminal draws no image at
+    // all, and its core line is `—` for the model, the empty meter (10 dim ▱), `—` for the percent and for the tokens.
     const images = await ui.findAll({ type: 'Svg' })
     if (surface === 'desktop') {
-      expect(images.map(el => el.props.source)).toContain(ringSvg(undefined))
-      expect(String(ringSvg(undefined))).not.toContain('stroke-dasharray')
+      expect(images.map(el => el.props.alt)).toContain(EMPTY_BAND_ALT)
+      expect(String((await bandImage(ui))?.props.source)).not.toContain('pathLength="100"')
+      expect(await has(ui, '▱')).toBe(false)
     } else {
       expect(images).toEqual([])
+      expect(await ui.findAll({ type: 'Text', text: /^—$/ })).toHaveLength(3)
+      const empty = await ui.findAll({ type: 'Text', text: /^▱+$/ })
+      expect(empty.map(el => [el.text, el.props.dimColor])).toEqual([['▱'.repeat(10), true]])
     }
     await ui.unmount()
   }
@@ -730,15 +753,17 @@ test('a /clear empties the pane again: the context reads — until the next resp
   const clock = mock.clock(on, { now: NOW })
   await seed($, clock, bottom(on, clock))
   const ui = await mountPane($, 'desktop')
-  expect(await has(ui, '12.8%')).toBe(true)
+  expect(String((await bandImage(ui))?.props.alt)).toStartWith('Context 13%, 128k of 1M')
 
   await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
 
-  expect(await has(ui, '12.8%')).toBe(false)
-  expect(await ui.find({ type: 'Text', text: /^—$/ })).toBeDefined()
-  // The limits are the session's still: their two meters stay, the context has none, and its ring is empty.
+  // The band, the first image of the pane, reads — and shows no tokens; its ring is the track alone.
+  const band = await ui.find({ type: 'Svg' })
+  expect(String(band?.props.alt)).toStartWith('Context —')
+  expect(String(band?.props.alt)).not.toMatch(/%|128k/)
+  expect(String(band?.props.source)).not.toContain('pathLength="100"')
+  // The limits are the session's still: their two meters stay.
   expect((await meters(ui)).map(el => el.props.alt)).toEqual(['5-hour 3%', 'Weekly 24%'])
-  expect((await ui.find({ type: 'Svg' }))?.props.source).toBe(ringSvg(undefined))
   expect(await ui.find({ type: 'Text', text: 'No completed turn yet' })).toBeDefined()
   expect(await headers(ui)).toEqual(['▾ Usage', '▾ Turn stats', '▾ MCP', '▾ Context sources'])
   await ui.unmount()
@@ -750,13 +775,13 @@ test('the meter is an Svg on desktop and ▰▱ text on terminal', SLOW, async (
 
   const desktop = await mountPane($, 'desktop')
   const bars = await meters(desktop)
-  expect(bars.map(el => el.props.alt)).toEqual(['Context 12.8%', '5-hour 3%', 'Weekly 24%'])
-  // At 40 columns the context bar has the body less its percent, a limit bar the body less its label, percent and
-  // countdown.
-  expect(bars.map(el => [el.props.width, el.props.height])).toEqual([[264, 8], [120, 8], [120, 8]])
-  // 12.8% of 264 px, blue.
-  expect(bars[0]?.props.source).toBe(meterSvg(12.8, 264))
-  expect(String(bars[0]?.props.source)).toContain('<rect width="34" height="8" rx="4" fill="#2f7de1"/>')
+  // The meters are the limits': the context is the Session band's ring.
+  expect(bars.map(el => el.props.alt)).toEqual(['5-hour 3%', 'Weekly 24%'])
+  // At 40 columns a limit bar has the body less its label, percent and countdown.
+  expect(bars.map(el => [el.props.width, el.props.height])).toEqual([[120, 8], [120, 8]])
+  // 3% of 120 px, blue.
+  expect(bars[0]?.props.source).toBe(meterSvg(3, 120))
+  expect(String(bars[0]?.props.source)).toContain('<rect width="4" height="8" rx="4" fill="#2f7de1"/>')
   expect(await has(desktop, /[▰▱]/)).toBe(false)
   await desktop.unmount()
 
@@ -766,7 +791,7 @@ test('the meter is an Svg on desktop and ▰▱ text on terminal', SLOW, async (
   expect(await terminal.find({ type: 'Svg' })).toBeUndefined()
   const filled = await terminal.findAll({ type: 'Text', text: /^▰+$/ })
   const empty = await terminal.findAll({ type: 'Text', text: /^▱+$/ })
-  // Ten cells each: Context 12.8% fills one, 5-hour 3% none, Weekly 24% two.
+  // Ten cells each: the band's core line at 12.8% fills one, 5-hour 3% none, Weekly 24% two.
   expect(filled.map(el => el.text)).toEqual(['▰', '▰▰'])
   expect(filled.map(el => el.props.color)).toEqual(['#2f7de1', '#2f7de1'])
   expect(empty.map(el => el.text)).toEqual(['▱'.repeat(9), '▱'.repeat(10), '▱'.repeat(8)])
@@ -778,27 +803,25 @@ test('the meters take the width of the body: 8 px a cell, less the room of their
   const clock = mock.clock(on, { now: NOW })
   await seed($, clock, bottom(on, clock))
 
-  // The context bar shares its row with the percent: (columns - 7) cells, from 48 px up to 4096, the most the engine
-  // takes for an Svg.
-  expect([0, 12, 20, 25, 32, 40, 45, 80, 100, 390, 600].map(contextMeterWidth)).toEqual([
-    48, 48, 104, 144, 200, 264, 304, 584, 744, 3064, 4096,
-  ])
-  // A limit bar shares its row with a label, a percent and a countdown: (columns - 25) cells, from 40 px up to 4096.
+  // A limit bar shares its row with a label, a percent and a countdown: (columns - 25) cells, from 40 px up to 4096,
+  // the most the engine takes for an Svg.
   expect([0, 12, 25, 32, 40, 45, 55, 80, 100, 390, 600].map(limitMeterWidth)).toEqual([
     40, 40, 40, 56, 120, 160, 240, 440, 600, 2920, 4096,
   ])
 
   const ui = await mountPane($, 'desktop')
-  for (const [bodyColumns, context, limit] of [[40, 264, 120], [32, 200, 56], [12, 48, 40]] as const) {
+  // The Session band's image takes the whole body, 8 px a cell.
+  for (const [bodyColumns, band, limit] of [[40, 320, 120], [32, 256, 56], [12, 96, 40]] as const) {
     await ui.redraw({ ...PANE_PROPS, bodyColumns })
-    expect((await meters(ui)).map(el => el.props.width), `${bodyColumns} columns`).toEqual([context, limit, limit])
+    expect((await meters(ui)).map(el => el.props.width), `${bodyColumns} columns`).toEqual([limit, limit])
+    expect((await bandImage(ui))?.props.width, `${bodyColumns} columns`).toBe(band)
   }
   await ui.unmount()
 })
 
 // The engine refuses a tree that holds an Svg above 4096 px in width or height, and draws its own pane in place of
 // this one. A pane of 600 columns is 4800 px at 8 px a cell: the mount is the engine's own check, and it throws.
-test('a pane of 600 columns mounts: the rule and the meters stop at the 4096 px of an Svg', SLOW, async ($, on) => {
+test('a pane of 600 columns mounts: the rule, meters and band stop at the 4096 px of an Svg', SLOW, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   await seed($, clock, bottom(on, clock))
 
@@ -808,15 +831,19 @@ test('a pane of 600 columns mounts: the rule and the meters stop at the 4096 px 
   // No Svg of the tree is above the limit, in either size.
   const sizes = images.flatMap(el => [el.props.width, el.props.height])
   expect(sizes.filter(px => typeof px !== 'number' || px > 4096)).toEqual([])
-  // The context bar and the limit bars would be 4744 and 4600 px: they stop at 4096, and so does the rule.
-  expect((await meters(ui)).map(el => el.props.width)).toEqual([4096, 4096, 4096])
+  // The limit bars would be 4600 px: they stop at 4096, and so does the rule.
+  expect((await meters(ui)).map(el => el.props.width)).toEqual([4096, 4096])
   const rules = images.filter(el => el.props.alt === 'rule')
   expect(rules).not.toHaveLength(0)
   expect(rules.map(el => el.props.width)).toEqual(rules.map(() => 4096))
+  // The band is laid out for 4096 px, a cell short of it, and centred in its Box: no station is clipped.
+  const band = flat(await ui.drawn()).find(({ node }) => /^Context (—|\d)/.test(String(node.props?.alt)))
+  expect(band?.node.props).toMatchObject({ width: 4088, height: 76 })
+  expect(band?.parent?.props).toMatchObject({ height: 4, overflow: 'hidden', justifyContent: 'center' })
   await ui.unmount()
 })
 
-test('the percent, the meter and the ring turn amber from 80% and red from 95%', SLOW, async ($, on) => {
+test('the percent, the meter and the band\'s ring turn amber from 80% and red from 95%', SLOW, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   bottom(on, clock)
   await $.session.start(START)
@@ -830,22 +857,23 @@ test('the percent, the meter and the ring turn amber from 80% and red from 95%',
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
     for (const [tokens, text, color, fill] of [
-      [128_000, '12.8%', undefined, '#2f7de1'],
-      [850_000, '85.0%', 'warning', '#e0a030'],
-      [950_000, '95.0%', 'error', '#e5484d'],
+      [128_000, '13%', undefined, '#2f7de1'],
+      [850_000, '85%', 'warning', '#e0a030'],
+      [950_000, '95%', 'error', '#e5484d'],
     ] as const) {
       await measure($, tokens, limits)
-      const percent = await ui.find({ type: 'Text', text })
-      expect(percent, `${surface} ${text}`).toBeDefined()
-      expect(percent?.props.color, `${surface} ${text}`).toBe(color)
       if (surface === 'desktop') {
-        const [context] = await meters(ui)
-        expect(String(context?.props.source), `${surface} ${text}`).toContain(`fill="${fill}"/></svg>`)
-        // The ring beside the label is the first image of the pane, and its arc is the colour of the bar.
-        expect(String((await ui.find({ type: 'Svg' }))?.props.source), `${surface} ring ${text}`).toContain(
-          `stroke="${fill}"`,
+        // The band is the first image of the pane: its alt says the percent, and its ring's arc is in the colour.
+        const band = await ui.find({ type: 'Svg' })
+        expect(String(band?.props.alt), `${surface} ${text}`).toStartWith(`Context ${text}, `)
+        expect(String(band?.props.source), `${surface} ring ${text}`).toContain(
+          `stroke="${fill}" stroke-width="4" pathLength="100"`,
         )
       } else {
+        // The core line's percent is in the theme colour of its threshold, and its meter in the colour of the arc.
+        const percent = await ui.find({ type: 'Text', text })
+        expect(percent, `${surface} ${text}`).toBeDefined()
+        expect(percent?.props.color, `${surface} ${text}`).toBe(color)
         expect((await ui.find({ type: 'Text', text: /^▰/ }))?.props.color, `${surface} ${text}`).toBe(fill)
       }
     }
@@ -856,7 +884,7 @@ test('the percent, the meter and the ring turn amber from 80% and red from 95%',
     expect(await has(ui, /^Spend$/)).toBe(true)
     expect(await has(ui, '↻')).toBe(false) // no reset time was given: no countdown
     if (surface === 'desktop') {
-      const [, ...bars] = (await meters(ui)).map(el => String(el.props.source))
+      const bars = (await meters(ui)).map(el => String(el.props.source))
       // 79.9%, 80% and 120% of 120 px.
       expect(bars.map(source => source.split('<rect ')[2])).toEqual([
         'width="96" height="8" rx="4" fill="#2f7de1"/></svg>',
@@ -927,7 +955,7 @@ test('the subagent list shows 8 rows, the running ones first and the newest firs
     }
     // The newest one has finished: it goes below the running ones, though it started last.
     await endAgent($, 'a10', DONE)
-    await measure($, 128_000, []) // the context has a reading, so its dash is not counted below
+    await measure($, 128_000, [])
 
     for (const surface of SURFACES) {
       const ui = await mountPane($, surface)
@@ -938,8 +966,11 @@ test('the subagent list shows 8 rows, the running ones first and the newest firs
       expect(more?.node.props?.paddingLeft, surface).toBe(surface === 'desktop' ? 3 : 2)
       expect(await ui.find({ type: 'Text', text: '+2 more' }), surface).toBeDefined()
       expect((await summaries(ui)).agents, surface).toBe('9/10')
-      // No request has been charged to any of them: a dash where the cost goes, on each of the 8 rows.
-      expect(await ui.findAll({ type: 'Text', text: /^—$/ }), surface).toHaveLength(8)
+      // No request has been charged to any of them: a dash where the cost goes, on each of the 8 rows. (The terminal
+      // band's core line has a dash of its own, for the model: the dashes are counted in the section.)
+      const dashes = flat(sectionOf(await ui.drawn(), 'agents')).filter(({ node }) =>
+        node.type === 'Text' && textsOf(node)[0] === '—')
+      expect(dashes, surface).toHaveLength(8)
       await ui.unmount()
     }
   })
@@ -984,9 +1015,14 @@ test('a subagent shows its status as a shape and a colour: ✗ for failed, a dim
   })
 
 // A body that leaves the Log room for 20 of the 22 events below. Above the Log the mounted pane has the Session card
-// (2 rows: the context has no reading), the placeholder of Turn stats (3) and the one subagent (3), and the Log's rule
-// and header are 2 more: 10 rows. The 21 rows that are left are 20 lines and the line that counts the other 2.
-const BODY_FOR_20_LINES = { ...PANE_PROPS, scroll: { offset: 0, bodyRows: 31 } }
+// (the Session row and the band: at the 40 columns of the mount the band is 5 rows on the desktop, and the core line
+// and 3 grid rows on the terminal), the placeholder of Turn stats (3) and the one subagent (3), and the Log's rule and
+// header are 2 more: 14 rows on the desktop, 13 on the terminal. The 21 rows that are left are 20 lines and the line
+// that counts the other 2.
+const BODY_FOR_20_LINES: Record<Surface, RenderPropsOf['Pane']> = {
+  desktop: { ...PANE_PROPS, scroll: { offset: 0, bodyRows: 35 } },
+  terminal: { ...PANE_PROPS, scroll: { offset: 0, bodyRows: 34 } },
+}
 
 test('the log shows 20 lines, newest first, an error in red, and a long text cut to one line', SLOW, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
@@ -997,7 +1033,7 @@ test('the log shows 20 lines, newest first, an error in red, and a long text cut
   await endAgent($, 'a1', FAILED)
 
   for (const surface of SURFACES) {
-    const ui = await mountPane($, surface, BODY_FOR_20_LINES)
+    const ui = await mountPane($, surface, BODY_FOR_20_LINES[surface])
     const log = await texts(ui)
     // 'failed' (the subagent), then prompt 19 down to prompt 1: 20 lines in all, and `+2 more` for prompt 0 and the
     // spawn, which come after them.
@@ -1045,20 +1081,28 @@ test('the mounted pane splits its Log by the rows of its body, and draws one Box
     await $.session.start(START)
     for (let i = 0; i < 30; i += 1) await $.turn.start({ text: `prompt ${i}`, turnId: `t${i}` })
 
-    // [the rows of the body, the lines of the head, the lines of the tail, the events that `+N more` counts]. Above the
-    // Log are the Session card (2 rows) and the placeholder of Turn stats (3), and its rule and header are 2 more: the
-    // Log has the body's rows less 7. The log holds 30 events. When they all fit (a body of 37) they all show; when
+    // [the rows of the body, the lines of the head, the lines of the tail, the events that `+N more` counts], by the
+    // surface. Above the Log are the Session card (the Session row and the band: at the 40 columns of the mount 5 rows
+    // on the desktop, the core line and 3 grid rows on the terminal) and the placeholder of Turn stats (3), and its
+    // rule and header are 2 more: the Log has the body's rows less 11 on the desktop and less 10 on the terminal. The
+    // log holds 30 events. When they all fit (a body of 41 on the desktop, 40 on the terminal) they all show; when
     // they do not, a row goes to the `+N more` line, and the lines are never fewer than 8.
-    const cases = [
-      [20, 8, 4, 18], [12, 8, 0, 22], [9, 8, 0, 22], [8, 8, 0, 22], [5, 8, 0, 22], [36, 8, 20, 2],
-      [37, 8, 22, undefined], [40, 8, 22, undefined],
-    ] as const
+    const cases: Record<Surface, ReadonlyArray<readonly [number, number, number, number | undefined]>> = {
+      desktop: [
+        [20, 8, 0, 22], [12, 8, 0, 22], [9, 8, 0, 22], [8, 8, 0, 22], [5, 8, 0, 22], [36, 8, 16, 6], [37, 8, 17, 5],
+        [40, 8, 20, 2], [41, 8, 22, undefined],
+      ],
+      terminal: [
+        [20, 8, 1, 21], [12, 8, 0, 22], [9, 8, 0, 22], [8, 8, 0, 22], [5, 8, 0, 22], [36, 8, 17, 5], [37, 8, 18, 4],
+        [39, 8, 20, 2], [40, 8, 22, undefined],
+      ],
+    }
     const moreProps = (surface: Surface) => ({
       flexDirection: 'row', paddingLeft: surface === 'desktop' ? 3 : 2, flexShrink: 0,
     })
     for (const surface of SURFACES) {
       const ui = await mountPane($, surface)
-      for (const [bodyRows, head, tail, more] of cases) {
+      for (const [bodyRows, head, tail, more] of cases[surface]) {
         const where = `${surface} ${bodyRows} rows`
         // The engine hands the pane its next props when the body changes, and the root follows the body.
         await ui.redraw({ ...PANE_PROPS, scroll: { offset: 0, bodyRows } })
@@ -1106,7 +1150,14 @@ test('a window of 0 draws a dash for the context, never NaN or Infinity', SLOW, 
 
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
-    expect(await ui.find({ type: 'Text', text: /^—$/ }), surface).toBeDefined()
+    // The band reads —: in its alt on the desktop, with no tokens; in its core line on the terminal.
+    if (surface === 'desktop') {
+      const alt = String((await bandImage(ui))?.props.alt)
+      expect(alt, surface).toStartWith('Context —. ')
+      expect(alt, surface).not.toMatch(/NaN|Infinity|null|undefined|%/)
+    } else {
+      expect(await ui.find({ type: 'Text', text: /^—$/ }), surface).toBeDefined()
+    }
     expect(await has(ui, /NaN|Infinity|null|undefined|%/), surface).toBe(false)
     expect(await meters(ui), surface).toEqual([])
     await ui.unmount()
@@ -1114,26 +1165,30 @@ test('a window of 0 draws a dash for the context, never NaN or Infinity', SLOW, 
 })
 
 test('the view reads a percent that is not a finite number as no reading', () => {
-  const drawn = (contextPct: number | undefined): Node =>
-    draw({ ...EMPTY, usage: { rateLimits: [], contextTokens: 100, contextWindow: 0, contextPct } }, 40)
-  const meterAlts = (tree: Node): unknown[] =>
-    flat(tree)
-      .filter(({ node }) => node.type === 'Svg' && /%$/.test(String(node.props?.alt)))
-      .map(({ node }) => node.props?.alt)
+  const drawn = (contextPct: number | undefined, surface: Surface = 'desktop'): Node => draw(
+    onSurface({ ...EMPTY, usage: { rateLimits: [], contextTokens: 100, contextWindow: 0, contextPct } }, surface), 40,
+  )
+  // The band's image on the desktop; the core line's texts on the terminal, without its blank spans.
+  const bandOf = (tree: Node): Node | undefined => childrenOf(childrenOf(childrenOf(tree)[0])[1])[0]
+  const coreOf = (tree: Node): string[] =>
+    spanTexts(childrenOf(childrenOf(tree)[0])[1]).filter(text => text.trim() !== '')
 
-  // A finite percent is drawn, so the drawing here is not empty by mistake.
-  expect(textsOf(drawn(12.8))).toContain('12.8%')
-  expect(meterAlts(drawn(12.8))).toEqual(['Context 12.8%'])
+  // A finite percent is drawn, so the drawing here is not empty by mistake: the ring has its arc.
+  expect(String(bandOf(drawn(12.8))?.props?.alt)).toStartWith('Context 13%, 100 of 0. ')
+  expect(String(bandOf(drawn(12.8))?.props?.source)).toContain('pathLength="100"')
+  expect(coreOf(drawn(12.8, 'terminal'))).toEqual(['—', '▰', '▱'.repeat(9), '13%', '100 / 0'])
   // NaN and the infinities, and the null that a build before the guard may have left behind in the state.
   for (const contextPct of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, null as never]) {
     const tree = drawn(contextPct)
-    expect(textsOf(tree), String(contextPct)).toEqual([
-      'Session', 'Context', '—', 'Turn stats', 'No completed turn yet',
-    ])
-    // The ring is its track alone, and there is no meter.
-    expect(meterAlts(tree), String(contextPct)).toEqual([])
-    expect(JSON.stringify(tree), String(contextPct)).not.toMatch(/NaN|Infinity|null|undefined/)
-    expect(JSON.stringify(tree), String(contextPct)).toContain(JSON.stringify(ringSvg(undefined)))
+    const terminal = drawn(contextPct, 'terminal')
+    expect(textsOf(tree), String(contextPct)).toEqual(['Session', 'Turn stats', 'No completed turn yet'])
+    // The band reads —, its ring is the track alone, and with no reading it shows no tokens.
+    expect(bandOf(tree)?.props?.alt, String(contextPct)).toBe(EMPTY_BAND_ALT)
+    expect(String(bandOf(tree)?.props?.source), String(contextPct)).not.toContain('pathLength="100"')
+    expect(coreOf(terminal), String(contextPct)).toEqual(['—', '▱'.repeat(10), '—', '—'])
+    for (const surfaceTree of [tree, terminal]) {
+      expect(JSON.stringify(surfaceTree), String(contextPct)).not.toMatch(/NaN|Infinity|null|undefined/)
+    }
   }
 })
 
@@ -1259,9 +1314,10 @@ test('the texts that can overrun a row carry the truncation props; the values ne
     ]) {
       expect(cut, `${surface}: ${text}`).toContain(text)
     }
-    // A figure, a percent, a cost, the lines of the changes and a title are not cut.
+    // A figure, a percent (the terminal band's among them), a cost, the lines of the changes and a title are not cut.
     for (const text of [
-      '$148.59', '88.2%', '120%', '1m 18s', '$2.50', '+1204', SEP, `${MINUS}387`, 'Usage', 'Session', 'Project',
+      '$148.59', ...(isDesktop ? [] : ['88%']), '120%', '1m 18s', '$2.50', '+1204', SEP, `${MINUS}387`, 'Usage',
+      'Session', 'Project',
     ]) {
       const placed = textNode(tree, text)
       expect(placed, `${surface}: ${text}`).toBeDefined()
@@ -1286,9 +1342,15 @@ test('value columns hold their width and align right, so the figures line up on 
     const cellOf = (text: string): Node | undefined => textNode(tree, text)?.parent
     const widthOf = (cell: Node | undefined): number => Number(cell?.props?.width)
 
-    // The context percent has a cell wide enough for 100.0%.
-    expect(isRightAligned(cellOf('88.2%')), `${surface} context percent`).toBe(true)
-    expect(widthOf(cellOf('88.2%'))).toBeGreaterThanOrEqual('100.0%'.length)
+    // The context is the Session band's, and the band takes the body: on the desktop its image is the body's 360 px; on
+    // the terminal its core line is the body's 45 cells, so the tokens end at the right edge.
+    const band = childrenOf(childrenOf(tree)[0])[1]
+    if (surface === 'desktop') {
+      expect(childrenOf(band)[0]?.props?.width, `${surface} band`).toBe(45 * 8)
+    } else {
+      expect(spanTexts(band).join(''), `${surface} band`).toHaveLength(45)
+      expect(spanTexts(band).at(-1), `${surface} band`).toBe('529k / 600k')
+    }
     // The limits: one width for the labels, one for the percents (wide enough for 100%), so the rows line up.
     const labels = ['5-hour', 'Weekly', 'Spend', 'some_new_window'].map(cellOf)
     expect(new Set(labels.map(widthOf)).size, `${surface} limit labels`).toBe(1)
@@ -1524,9 +1586,8 @@ test('the outcome of a log line is a fixed column at the right edge: one width, 
 })
 
 test('with no outcome among the lines drawn the log has no outcome column: the three cells of a row, as before', () => {
-  // The 21st line has an outcome, but only 12 are drawn: of the body's 20 rows the Session card and the placeholder of
-  // Turn stats take 5 and the Log's rule and header 2, which leaves 13, and one of them is for `+9 more`. The 21st
-  // makes no column.
+  // The 21st line has an outcome, but only 12 are drawn: the body leaves the Log 13 rows below the Session card, the
+  // placeholder of Turn stats and its rule and header, and one of them is for `+9 more`. The 21st makes no column.
   const lines: LogEntry[] = [
     ...Array.from({ length: 20 }, (_, i): LogEntry => (
       { at: NOW - i * 1000, who: 'you', text: `prompt ${i}`, kind: 'info' }
@@ -1535,7 +1596,7 @@ test('with no outcome among the lines drawn the log has no outcome column: the t
   ]
 
   for (const surface of SURFACES) {
-    const tree = draw(onSurface({ ...EMPTY, log: lines }, surface))
+    const tree = draw(onSurface({ ...EMPTY, log: lines }, surface), 45, logBody(surface, 13))
     const rows = logColumns(tree)
     expect(rows.map(row => row.cells), surface).toEqual(Array(12).fill(3))
     expect(rows.every(row => row.outcomeCell === undefined), surface).toBe(true)
@@ -1836,19 +1897,26 @@ const rowsAbove = (tree: Node, columns: number, surface: RenderSurface): number 
 
   return sumOf(blocks.slice(0, at < 0 ? blocks.length : at - 1).map(block => rowsOf(block, columns, capital)))
 }
-// A pane of a Log and nothing else. Above the Log are the Session card (2 rows: the context has no reading) and the
-// placeholder of Turn stats (3), and the Log's rule and header make 2 more, so the Log has the body's rows less 7.
-// `count` is the events there have been: the number of the lines, unless a test says otherwise.
+// A pane of a Log and nothing else. Above the Log are the Session card (the Session row and the band) and the
+// placeholder of Turn stats (3), and the Log's rule and header make 2 more. `count` is the events there have been:
+// the number of the lines, unless a test says otherwise.
 const withLog = (log: LogEntry[], count = log.length): PaneData => ({ ...EMPTY, log, logCount: count })
+// The rows above the Log of such a pane, by the surface and the columns: 1 + 5 + 3 on the desktop (the band is 5 rows
+// below 464 px); on the terminal 1 + 4 + 3 at 20 columns (the core line and 3 grid rows) and 1 + 3 + 3 at 45 (2).
+const ABOVE_LOG: Record<Surface, Record<20 | 45, number>> = { desktop: { 20: 9, 45: 9 }, terminal: { 20: 8, 45: 7 } }
+// A body of `rows` for the Log at 45 columns: those above it, the Log's rule and header, and `rows`.
+const logBody = (surface: Surface, rows: number): number => ABOVE_LOG[surface][45] + 2 + rows
 
 test('the Log is a rule, a header, a head of 8, a tail and a `+N more`, children of a root as tall as the body', () => {
   for (const surface of SURFACES) {
-    // A body of 70 rows: the blocks above the Log take 46 (45 columns, FULL) and its rule and header 2, which leaves 22
-    // rows: 21 lines and the line that counts the other 116 of the 137 events.
-    const tree = draw(onSurface({ ...FULL, log: logLines(60) }, surface), 45, 70)
-    expect(rowsAbove(tree, 45, surface), surface).toBe(46)
+    // The blocks above the Log take 49 rows on the desktop and 47 on the terminal (45 columns, FULL: the band is 5 rows
+    // there, and the core line and 2 grid rows here), and its rule and header 2: a body of 73 rows, or 71, leaves 22
+    // rows, 21 lines and the line that counts the other 116 of the 137 events.
+    const [above, bodyRows] = surface === 'desktop' ? [49, 73] : [47, 71]
+    const tree = draw(onSurface({ ...FULL, log: logLines(60) }, surface), 45, bodyRows)
+    expect(rowsAbove(tree, 45, surface), surface).toBe(above)
     // The root is at least as tall as the body, and has no height of its own.
-    expect(tree.props, surface).toStrictEqual({ flexDirection: 'column', minHeight: 70 })
+    expect(tree.props, surface).toStrictEqual({ flexDirection: 'column', minHeight: bodyRows })
     // The Log's five parts are the last children of the root: no Box wraps them.
     expect(childrenOf(tree), surface).toHaveLength(1 + 1 + 5 + 5) // top block, Project, five sections, five Log parts
     const [rule, header, head, tail, more] = childrenOf(tree).slice(-5)
@@ -1895,16 +1963,18 @@ test('a body too short for the head keeps the 8 lines and has no tail: the pane 
 })
 
 test('the Log draws as many lines as fit under the blocks above it, 8 at least, and `+N more` counts the rest', () => {
-  // [the rows of the body, the lines drawn, the events that `+N more` counts] for 60 events, all of them in the log.
-  // The Log has the body's rows less 7. Where they are all 60 or more, all show and there is no such line. A row less,
-  // and a row goes to the line: 66 rows draw 58 lines and `+2 more`, not 59 and `+1 more`. Never fewer than 8 lines.
-  // A body that is a part of a row more than a number of them (40.5) shows the whole rows, as 40 does.
+  // [the rows the body leaves the Log below its rule and header, the lines drawn, the events that `+N more` counts]
+  // for 60 events, all of them in the log. Where the rows are all 60 or more, all show and there is no such line. A
+  // row less, and a row goes to the line: 59 rows draw 58 lines and `+2 more`, not 59 and `+1 more`. Never fewer than
+  // 8 lines, even in a body shorter than the blocks above the Log (less than 0 rows left). A body that is a part of a
+  // row more than a number of them (33.5) shows the whole rows, as 33 does.
   const cases = [
-    [1, 8, 52], [5, 8, 52], [8, 8, 52], [16, 8, 52], [17, 9, 51], [20, 12, 48], [40, 32, 28], [40.5, 32, 28],
-    [66, 58, 2], [67, 60, undefined], [100, 60, undefined],
+    [-6, 8, 52], [-2, 8, 52], [1, 8, 52], [9, 8, 52], [10, 9, 51], [13, 12, 48], [33, 32, 28], [33.5, 32, 28],
+    [59, 58, 2], [60, 60, undefined], [93, 60, undefined],
   ] as const
   for (const surface of SURFACES) {
-    for (const [bodyRows, drawn, more] of cases) {
+    for (const [rows, drawn, more] of cases) {
+      const bodyRows = logBody(surface, rows)
       const where = `${surface} ${bodyRows} rows`
       const tree = draw(onSurface(withLog(logLines(60)), surface), 45, bodyRows)
       const [head, tail] = logBoxes(tree)
@@ -2018,14 +2088,14 @@ test('a count behind the lines the log holds is taken up to them: the header and
     for (const count of [0, 5]) {
       const where = `${surface} count ${count}`
       const log = logLines(20)
-      // 80 rows leave the Log room for all 20 lines and the header counts them; 20 rows leave it 13: 12 lines, and the
-      // 8 that are not drawn are counted from 20, not from 5.
+      // 80 rows leave the Log room for all 20 lines and the header counts them; a body that leaves it 13 rows draws 12
+      // lines, and the 8 that are not drawn are counted from 20, not from 5.
       const tall = draw(onSurface(withLog(log, count), surface), 45, 80)
       expect(headerRows(tall).at(-1)?.summary, where).toBe('20')
       expect(logRows(tall), where).toHaveLength(20)
       expect(logMoreLine(tall), where).toBeUndefined()
 
-      const tight = draw(onSurface(withLog(log, count), surface), 45, 20)
+      const tight = draw(onSurface(withLog(log, count), surface), 45, logBody(surface, 13))
       expect(headerRows(tight).at(-1)?.summary, where).toBe('20')
       expect(logRows(tight), where).toHaveLength(12)
       expect(moreOf(tight), where).toBe(8)
@@ -2037,18 +2107,20 @@ test('a count behind the lines the log holds is taken up to them: the header and
 })
 
 test('the columns of the Log are worked out over every line drawn, the tail\'s as well as the head\'s', () => {
-  // Line 30 is the only one with the longest outcome and the longest `who`. It is drawn for a body of 40 rows, not 20.
+  // Line 30 is the only one with the longest outcome and the longest `who`. It is drawn where the Log has 33 rows, not
+  // where it has 13.
   const log = logLines(60, i => (i === 29 ? { who: 'minimal-change', outcome: '✗ 1m 12s' } : { outcome: '✓ 0.1s' }))
   for (const surface of SURFACES) {
     const isDesktop = surface === 'desktop'
-    // [the rows of the body, the lines drawn, the cells of the outcome column, the cells of the `who` column]. The Log
-    // has the body's rows less 7, and one of them is the `+N more` line's: 40 rows draw 32 lines, line 30 among them,
-    // and 20 rows draw 12. The outcome column is as wide as the longest outcome drawn (`✗ 1m 12s` is 8, `✓ 0.1s` is 6),
-    // a cell more on the desktop. The `who` column is the longest name on the terminal, 13 cells on the desktop.
+    // [the rows the body leaves the Log below its rule and header, the lines drawn, the cells of the outcome column,
+    // the cells of the `who` column]. One of the rows is the `+N more` line's: 33 rows draw 32 lines, line 30 among
+    // them, and 13 rows draw 12. The outcome column is as wide as the longest outcome drawn (`✗ 1m 12s` is 8, `✓ 0.1s`
+    // is 6), a cell more on the desktop. The `who` column is the longest name on the terminal, 13 cells on the desktop.
     const cases = [
-      [40, 32, isDesktop ? 9 : 8, isDesktop ? 13 : 14], [20, 12, isDesktop ? 7 : 6, isDesktop ? 13 : 3],
+      [33, 32, isDesktop ? 9 : 8, isDesktop ? 13 : 14], [13, 12, isDesktop ? 7 : 6, isDesktop ? 13 : 3],
     ] as const
-    for (const [bodyRows, drawn, outcomeCells, whoCells] of cases) {
+    for (const [rows, drawn, outcomeCells, whoCells] of cases) {
+      const bodyRows = logBody(surface, rows)
       const where = `${surface} ${bodyRows} rows`
       // One layout for every row, the head's and the tail's alike.
       const columns = logColumns(draw(onSurface(withLog(log), surface), 45, bodyRows))
@@ -2107,40 +2179,50 @@ const EVERY_STATUS: TaskStatus[] = ['running', 'done', 'failed', 'stopped', 'end
 const EACH_STATUS: TaskRow[] = EVERY_STATUS.map((status, i) => task(i + 1, status))
 const FOLDED_ABOVE = Object.fromEntries(SECTIONS.slice(0, 5).map(id => [id, true])) // the sections above the Log
 
+type Counts = [above: number, drawn: number, more: number]
 type Surrounding = [
-  name: string, patch: Partial<PaneData>, bodyColumns: number, bodyRows: number, above: number, drawn: number,
-  more: number,
+  name: string, patch: Partial<PaneData>, bodyColumns: number, bodyRows: number, desktop: Counts, terminal: Counts,
 ]
-// What each block gives the Log, by what changes in the blocks above it: the rows above, the lines drawn (the body's
-// rows less the rows above, less 2 for the Log's rule and header, less 1 for `+N more`; never fewer than 8) and the
-// events counted (137 less the lines).
+// What each block gives the Log, by what changes in the blocks above it, on each surface: the rows above, the lines
+// drawn (the body's rows less the rows above, less 2 for the Log's rule and header, less 1 for `+N more`; never fewer
+// than 8) and the events counted (137 less the lines). At 31 and 32 columns the Session band is 5 rows on the desktop
+// and 4 on the terminal (the core line and 3 grid rows), so the terminal has a row less above the Log.
 const SURROUNDINGS: Surrounding[] = [
-  ['every block, a body of 40: not even 8 lines fit', {}, 32, 40, 44, 8, 129],
-  ['every block, a body of 60', {}, 32, 60, 44, 13, 124],
-  ['every block, a body of 70', {}, 32, 70, 44, 23, 114],
-  ['the MCP chips in two rows', {}, 31, 60, 45, 12, 125],
-  ['eight subagents, so no `+N more` of theirs', { agents: agentsOf(AGENTS.slice(0, 8)) }, 32, 60, 43, 14, 123],
-  ['three subagents', { agents: agentsOf(AGENTS.slice(0, 3)) }, 32, 60, 38, 19, 118],
-  ['no subagents, and no cost split with them', { agents: {} }, 32, 60, 32, 25, 112],
-  // The Tasks block adds its rule, its header, its rows (8 at the most) and the line that counts the rest, to the 44.
-  ['one task: 3 rows more', { tasks: tasksOf(TEN.slice(0, 1)) }, 32, 70, 47, 20, 117],
-  ['three tasks: 5 rows more', { tasks: tasksOf(TEN.slice(0, 3)) }, 32, 70, 49, 18, 119],
-  ['ten tasks: 8 rows and `+2 more`, 11 rows more', { tasks: tasksOf(TEN) }, 32, 70, 55, 12, 125],
+  ['every block, a body of 40: not even 8 lines fit', {}, 32, 40, [47, 8, 129], [46, 8, 129]],
+  ['every block, a body of 60', {}, 32, 60, [47, 10, 127], [46, 11, 126]],
+  ['every block, a body of 70', {}, 32, 70, [47, 20, 117], [46, 21, 116]],
+  ['the MCP chips in two rows', {}, 31, 60, [48, 9, 128], [47, 10, 127]],
+  [
+    'eight subagents, so no `+N more` of theirs', { agents: agentsOf(AGENTS.slice(0, 8)) }, 32, 60,
+    [46, 11, 126], [45, 12, 125],
+  ],
+  ['three subagents', { agents: agentsOf(AGENTS.slice(0, 3)) }, 32, 60, [41, 16, 121], [40, 17, 120]],
+  ['no subagents, and no cost split with them', { agents: {} }, 32, 60, [35, 22, 115], [34, 23, 114]],
+  // The Tasks block adds its rule, its header, its rows (8 at the most) and the line that counts the rest, to the 47
+  // (46 on the terminal).
+  ['one task: 3 rows more', { tasks: tasksOf(TEN.slice(0, 1)) }, 32, 70, [50, 17, 120], [49, 18, 119]],
+  ['three tasks: 5 rows more', { tasks: tasksOf(TEN.slice(0, 3)) }, 32, 70, [52, 15, 122], [51, 16, 121]],
+  ['ten tasks: 8 rows and `+2 more`, 11 rows more', { tasks: tasksOf(TEN) }, 32, 70, [58, 9, 128], [57, 10, 127]],
   [
     'ten tasks, folded: their rule and header, 2 rows more',
-    { tasks: tasksOf(TEN), collapsed: { tasks: true } }, 32, 70, 46, 21, 116,
+    { tasks: tasksOf(TEN), collapsed: { tasks: true } }, 32, 70, [49, 18, 119], [48, 19, 118],
   ],
-  ['no Usage', { usage: { ...FULL.usage, rateLimits: [] } }, 32, 60, 38, 19, 118],
-  ['no Project block', { project: { name: '', branch: null, changes: null } }, 32, 60, 40, 17, 120],
-  ['no completed turn: a placeholder of one row', { lastTurn: null }, 32, 60, 35, 22, 115],
-  ['Turn stats folded: its rule and its header', { collapsed: { turn: true } }, 32, 60, 34, 23, 114],
-  ['no context reading: one row of it', { usage: { ...FULL.usage, contextPct: undefined } }, 32, 60, 43, 14, 123],
-  ['every section above the Log folded', { collapsed: FOLDED_ABOVE }, 32, 40, 18, 19, 118],
+  ['no Usage', { usage: { ...FULL.usage, rateLimits: [] } }, 32, 60, [41, 16, 121], [40, 17, 120]],
+  ['no Project block', { project: { name: '', branch: null, changes: null } }, 32, 60, [43, 14, 123], [42, 15, 122]],
+  ['no completed turn: a placeholder of one row', { lastTurn: null }, 32, 60, [38, 19, 118], [37, 20, 117]],
+  ['Turn stats folded: its rule and its header', { collapsed: { turn: true } }, 32, 60, [37, 20, 117], [36, 21, 116]],
+  // The band keeps its rows with no reading: only its figures read —.
+  [
+    'no context reading: the band keeps its rows', { usage: { ...FULL.usage, contextPct: undefined } }, 32, 60,
+    [47, 10, 127], [46, 11, 126],
+  ],
+  ['every section above the Log folded', { collapsed: FOLDED_ABOVE }, 32, 40, [21, 16, 121], [20, 17, 120]],
 ]
 
 test('the Log has the rows that the blocks above it leave, whatever they are, and the rows are the trees\'', () => {
   for (const surface of SURFACES) {
-    for (const [name, patch, bodyColumns, bodyRows, above, drawn, more] of SURROUNDINGS) {
+    for (const [name, patch, bodyColumns, bodyRows, desktop, terminal] of SURROUNDINGS) {
+      const [above, drawn, more] = surface === 'desktop' ? desktop : terminal
       const where = `${surface}: ${name}`
       const tree = draw(onSurface({ ...SURROUNDED, ...patch }, surface), bodyColumns, bodyRows)
       // What the blocks above take, counted again from their trees: the number the Log works from is true.
@@ -2160,15 +2242,17 @@ const CAPITAL_MCP = { servers: [{ name: 'GITHUB' }, { name: 'SLACK' }] }
 
 test('the chips of MCP are counted with the capital of the surface: a cell on the terminal, 1.5 on the desktop', () => {
   // [the columns, the surface, the rows above the Log, the lines it draws in a body of 60 rows, the events it counts]:
-  // the blocks above the Log are 44 rows with the chips in one row (SURROUNDED), and 45 with them in two. The editor
-  // and the mobile app are drawn where 1 and 1.5 differ, 24 and 19 columns, and count as the desktop does.
+  // the blocks above the Log are 47 rows on the desktop (the band is 5 rows) and 46 on the terminal (the core line and
+  // 3 grid rows) with the chips in one row (SURROUNDED), and a row more with them in two. The editor and the mobile
+  // app draw the desktop's band; they are drawn where 1 and 1.5 differ, 24 and 19 columns, and count as the desktop
+  // does.
   const cases = [
-    [25, 'terminal', 44, 13, 124], [25, 'desktop', 44, 13, 124],
-    [24, 'terminal', 44, 13, 124], [24, 'desktop', 45, 12, 125],
-    [24, 'vscode', 45, 12, 125], [24, 'mobile', 45, 12, 125],
-    [19, 'terminal', 44, 13, 124], [19, 'desktop', 45, 12, 125],
-    [19, 'vscode', 45, 12, 125], [19, 'mobile', 45, 12, 125],
-    [18, 'terminal', 45, 12, 125], [18, 'desktop', 45, 12, 125],
+    [25, 'terminal', 46, 11, 126], [25, 'desktop', 47, 10, 127],
+    [24, 'terminal', 46, 11, 126], [24, 'desktop', 48, 9, 128],
+    [24, 'vscode', 48, 9, 128], [24, 'mobile', 48, 9, 128],
+    [19, 'terminal', 46, 11, 126], [19, 'desktop', 48, 9, 128],
+    [19, 'vscode', 48, 9, 128], [19, 'mobile', 48, 9, 128],
+    [18, 'terminal', 47, 10, 127], [18, 'desktop', 48, 9, 128],
   ] as const
   for (const [columns, surface, above, drawn, more] of cases) {
     const where = `${surface} ${columns} columns`
@@ -2250,8 +2334,9 @@ test('the Log fills the body: no line is cut, and no row is left that a line cou
 
 test('the line that counts the rest is a dim Text, indented as the Subagents\', in a row that holds its size', () => {
   for (const surface of SURFACES) {
-    // FULL at 70 rows draws 21 lines and counts the other 116 of its 137 events; its Subagents count 2.
-    const tree = draw(onSurface({ ...FULL, log: logLines(60) }, surface), 45, 70)
+    // FULL at 73 rows (71 on the terminal, whose band is 2 rows shorter) draws 21 lines and counts the other 116 of
+    // its 137 events; its Subagents count 2.
+    const tree = draw(onSurface({ ...FULL, log: logLines(60) }, surface), 45, surface === 'desktop' ? 73 : 71)
     const more = logMoreLine(tree)
     const indent = surface === 'desktop' ? 3 : 2
     // The last child of the pane, after the tail, and no cell of a row: the tail's growing leaves it its row.
@@ -2401,12 +2486,15 @@ test('every image on the desktop has a non-empty alt, so none of them is dropped
     }
   }
 
-  // The top block: the ring says `Context` with a reading and without one; then the meter. The Project block has its
-  // rule, then an icon for the branch and one for the changes, each saying what its row is.
+  // The top block: the band's image says the context and every station, with a reading and without one. The Project
+  // block has its rule, then an icon for the branch and one for the changes, each saying what its row is.
   const [top, project, ...rest] = childrenOf(draw(onSurface(FULL, 'desktop')))
-  expect(alts(top)).toEqual(['Context', 'Context 88.2%'])
+  expect(alts(top)).toEqual([
+    'Context 88%, 529k of 600k. Model 0, 2 running; Files 0; Shell 0; Web 0; Agents 0, 2 running; MCP 0; Skills 0;' +
+      ' You 0.',
+  ])
   expect(alts(project)).toEqual(['rule', 'Branch', 'Changes'])
-  expect(alts(childrenOf(draw(onSurface(EMPTY, 'desktop')))[0])).toEqual(['Context'])
+  expect(alts(childrenOf(draw(onSurface(EMPTY, 'desktop')))[0])).toEqual([EMPTY_BAND_ALT])
   // Each section: its rule, then its icon, which says the title drawn in bold beside it. The Log's parts are children
   // of the pane: its rule, its header with the icon, then its head and its `+N more` line, which have no image (the
   // body of 20 rows leaves no room for a tail).
@@ -2414,13 +2502,14 @@ test('every image on the desktop has a non-empty alt, so none of them is dropped
     TITLES.slice(0, 5).map(title => ['rule', title]),
   )
   expect(rest.slice(5).map(alts)).toEqual([['rule'], ['Log'], [], []])
-  expect(alts(draw(onSurface(EMPTY, 'desktop')))).toEqual(['Context', 'rule', 'Turn stats'])
+  expect(alts(draw(onSurface(EMPTY, 'desktop')))).toEqual([EMPTY_BAND_ALT, 'rule', 'Turn stats'])
   // A status icon says its status: it is the only place that does.
   const agents = childrenOf(draw(onSurface(statuses, 'desktop')))[4]
   expect(alts(agents).slice(2).sort()).toEqual(['done', 'failed', 'running', 'stopped'])
-  // Only a meter says a percent, so the `/%$/` filter of the tests finds the meters and nothing else.
+  // Only a meter's alt ends in a percent (the band's ends in a full stop), so the `/%$/` filter of the tests finds the
+  // meters and nothing else.
   expect(alts(draw(onSurface(FULL, 'desktop'))).filter(alt => /%$/.test(String(alt)))).toEqual([
-    'Context 88.2%', '5-hour 3%', 'Weekly 84%', 'Spend 120%', 'some_new_window 5%',
+    '5-hour 3%', 'Weekly 84%', 'Spend 120%', 'some_new_window 5%',
   ])
 })
 
@@ -2460,11 +2549,13 @@ test('a body of 0 columns, or fewer, draws an empty rule on the terminal and doe
       expect(emptyRules(tree).length, `${bodyColumns} columns`).toBe(data === FULL ? 7 : 1)
       expect(ruleCount(tree), `${bodyColumns} columns`).toBe(0)
     }
-    // The desktop keeps the least width of its meters, so no image gets a negative or a zero width.
-    const widths = flat(draw(onSurface(FULL, 'desktop'), bodyColumns))
-      .filter(({ node }) => node.type === 'Svg' && /%$/.test(String(node.props?.alt)))
-      .map(({ node }) => node.props?.width)
-    expect(widths, `${bodyColumns} columns`).toEqual([48, 40, 40, 40, 40])
+    // The desktop keeps the least width of its meters, and the band's image is 1 px at the least, so no image gets a
+    // negative or a zero width.
+    const images = flat(draw(onSurface(FULL, 'desktop'), bodyColumns)).filter(({ node }) => node.type === 'Svg')
+    const widths = images.filter(({ node }) => /%$/.test(String(node.props?.alt))).map(({ node }) => node.props?.width)
+    expect(widths, `${bodyColumns} columns`).toEqual([40, 40, 40, 40])
+    const band = images.find(({ node }) => /^Context (—|\d)/.test(String(node.props?.alt)))
+    expect([band?.node.props?.width, band?.node.props?.height], `${bodyColumns} columns`).toEqual([1, 95])
   }
 })
 
@@ -2537,20 +2628,42 @@ test('the sections come in order, each beginning with its own rule, and a left-o
 })
 
 test('partial states draw what they have and leave the rest out', () => {
-  const read = (data: PaneData, surface: Surface): string[] =>
-    // Without the rules (▰▱ cells too: the terminal draws its meters as text).
-    textsOf(draw(onSurface(data, surface))).filter(text => !/^[─▰▱]+$/.test(text))
+  // Without the rules, the blank spans and the ▰▱ cells (the terminal draws its meters as text), and without the
+  // terminal band's station grid, which the band's own tests read: of the band, its core line.
+  const read = (data: PaneData, surface: Surface): string[] => {
+    const [top, ...rest] = childrenOf(draw(onSurface(data, surface)))
+    const [head, core, ...more] = childrenOf(top)
+    const kept = [head, core, ...more.filter(line => !isSpanLine(line)), ...rest]
+
+    return kept.flatMap(textsOf).filter(text => !/^[\s─▰▱]*$/.test(text))
+  }
 
   for (const surface of SURFACES) {
-    // Nothing at all: the title, an empty Context, and the turn placeholder in dim, under a header with no summary.
-    expect(read(EMPTY, surface), surface).toEqual(['Session', 'Context', '—', 'Turn stats', 'No completed turn yet'])
+    const isDesktop = surface === 'desktop'
+    // Nothing at all: the title, the band, and the turn placeholder in dim, under a header with no summary. The band
+    // reads —: in its image on the desktop, and on the terminal for the model, the percent and the tokens, the tokens
+    // dim.
+    expect(read(EMPTY, surface), surface).toEqual([
+      'Session', ...(isDesktop ? [] : ['—', '—', '—']), 'Turn stats', 'No completed turn yet',
+    ])
     expect(textNode(draw(onSurface(EMPTY, surface)), 'No completed turn yet')?.node.props?.dimColor, surface).toBe(true)
     expect(headerRows(draw(onSurface(EMPTY, surface))).map(row => row.summary), surface).toEqual([undefined])
-    expect(textNode(draw(onSurface(EMPTY, surface)), '—')?.node.props?.dimColor, surface).toBe(true)
+    const emptyBand = childrenOf(childrenOf(childrenOf(draw(onSurface(EMPTY, surface)))[0])[1])
+    if (isDesktop) {
+      expect(emptyBand[0]?.props?.alt, surface).toBe(EMPTY_BAND_ALT)
+    } else {
+      expect(childrenOf(emptyBand.at(-1))[0]?.props?.dimColor, surface).toBe(true)
+    }
 
-    // A reading with no tokens or window draws the meter and the percent, and no `tokens / window`.
+    // A reading with no tokens or window draws the meter and the percent, and `—` for `tokens / window`.
     const bare = { ...EMPTY, usage: { rateLimits: [], contextPct: 40 } }
-    expect(read(bare, surface), surface).toEqual(['Session', 'Context', '40.0%', 'Turn stats', 'No completed turn yet'])
+    expect(read(bare, surface), surface).toEqual([
+      'Session', ...(isDesktop ? [] : ['—', '40%', '—']), 'Turn stats', 'No completed turn yet',
+    ])
+    if (isDesktop) {
+      const bareBand = childrenOf(childrenOf(childrenOf(draw(onSurface(bare, surface)))[0])[1])[0]
+      expect(String(bareBand?.props?.alt), surface).toStartWith('Context 40%. Model 0;')
+    }
 
     // No total cost: `Session` stands alone on its row, and there is no split line.
     const noTotal = draw(onSurface({ ...FULL, usage: { ...FULL.usage, costUsd: undefined } }, surface))
@@ -2567,7 +2680,7 @@ test('partial states draw what they have and leave the rest out', () => {
       'usage', 'turn', 'mcp', 'sources', 'log',
     ])
     // A subagent whose cost is not known yet draws a dim dash in the cost column.
-    const dash = textNode(draw(onSurface(FULL, surface)), '—')
+    const dash = textNode(sectionOf(draw(onSurface(FULL, surface)), 'agents'), '—')
     expect(dash?.node.props?.dimColor, surface).toBe(true)
     expect(dash?.parent?.props, surface).toMatchObject({ width: 7, justifyContent: 'flex-end' })
   }
@@ -2748,29 +2861,131 @@ test('chipRows keeps the count of the rest: ASCII 1 cell, above U+007F 2 cells, 
   expect(chipRows(['abcd', 'Aé'], 15)).toBe(2)
 })
 
-test('the top block is the session and its total, the context and the cost split, with no project in it', () => {
+test('the top block is the session and its total, the Session band and the cost split, with no project in it', () => {
   for (const surface of SURFACES) {
     const [top] = childrenOf(draw(onSurface(FULL, surface)))
-    // (The terminal's meter is text: its ▰▱ cells are left out.)
-    expect(textsOf(top).filter(text => !/^[▰▱]+$/.test(text)), surface).toEqual([
-      'Session', '$148.59', 'Context', '529k / 600k', '88.2%', 'Session $126.09 · Subagents $22.50',
-    ])
+    const [head, ...rest] = childrenOf(top)
+    const split = rest.at(-1)
+    const band = rest.slice(0, -1)
+    expect(textsOf(head), surface).toEqual(['Session', '$148.59'])
     // The total sits at the right edge of the first row, and is not bold: bold is for titles.
-    const [head, label, bar, split] = childrenOf(top)
     expect(head?.props, surface).toMatchObject({ justifyContent: 'space-between' })
     expect(childrenOf(head).map(cell => isFixed(cell)), surface).toEqual([true, true])
     expect(textNode(head, '$148.59'), surface).toBeDefined()
     expect(textNode(head, '$148.59')?.node.props?.bold, surface).toBeUndefined()
-    // The context: its label and `tokens / window` at the right edge; then the meter, and the percent at the right
-    // edge, in the colour of its threshold.
-    expect(childrenOf(label).at(-1)?.props, surface).toMatchObject({ flexGrow: 1, justifyContent: 'flex-end' })
-    expect(bar?.props, surface).toMatchObject({ justifyContent: 'space-between' })
-    expect(isFlex(childrenOf(bar)[0]), surface).toBe(true)
-    expect(isFixed(childrenOf(bar)[1]), surface).toBe(true)
-    expect(textNode(bar, '88.2%')?.node.props?.color, surface).toBe('warning')
+    // The band in place of the two Context rows: on the desktop one image in a Box of its 5 rows (45 columns); on the
+    // terminal the core line, with the percent in the colour of its threshold and the tokens at the right edge, and
+    // the station grid's 2 rows.
+    if (surface === 'desktop') {
+      expect(band.map(part => part.props?.height), surface).toEqual([5])
+      expect(childrenOf(band[0]).map(part => part.type), surface).toEqual(['Svg'])
+    } else {
+      expect(band, surface).toHaveLength(1 + 2)
+      expect(band.every(isSpanLine), surface).toBe(true)
+      expect(textNode(band[0], '88%')?.node.props?.color, surface).toBe('warning')
+      expect(spanTexts(band[0]).at(-1), surface).toBe('529k / 600k')
+    }
     // The split line is the last row of the card: no project row follows it.
     expect(textsOf(split), surface).toEqual(['Session $126.09 · Subagents $22.50'])
-    expect(childrenOf(top), surface).toHaveLength(4)
+  }
+})
+
+// ---- The Session band ----
+
+// The texts of a row as spanLine draws it: a FLEX row Box of FIXED Boxes, one Text in each.
+const spanTexts = (line: Node | undefined): string[] => childrenOf(line).map(cell => textsOf(cell)[0] ?? '')
+const isSpanLine = (line: Node | undefined): boolean =>
+  isRow(line) && isFlex(line) && childrenOf(line).every(cell =>
+    isRow(cell) && isFixed(cell) && childrenOf(cell).length === 1 && childrenOf(cell)[0]?.type === 'Text')
+
+test('the band replaces the Context rows: one Svg in a clipping Box of whole rows', () => {
+  for (const [bodyColumns, rows, width, height] of [[41, 5, 328, 95], [109, 4, 864, 76]] as const) {
+    const tree = draw(FULL, bodyColumns)
+    const [top] = childrenOf(tree)
+    const [head, band, split, ...more] = childrenOf(top)
+    expect(textsOf(head), `${bodyColumns}`).toEqual(['Session', '$148.59'])
+    expect(band?.props, `${bodyColumns}`).toMatchObject({
+      flexDirection: 'row', height: rows, overflow: 'hidden', justifyContent: 'flex-start',
+    })
+    const images = childrenOf(band)
+    expect(images.map(image => image.type), `${bodyColumns}`).toEqual(['Svg'])
+    expect(images[0]?.props, `${bodyColumns}`).toMatchObject({ width, height })
+    expect(String(images[0]?.props?.alt), `${bodyColumns}`).toStartWith(
+      'Context 88%, 529k of 600k. Model 0, 2 running; Files 0;',
+    )
+    expect(images[0]?.props?.isInteractive, `${bodyColumns}`).toBeUndefined()
+    expect(textsOf(split), `${bodyColumns}`).toEqual(['Session $126.09 · Subagents $22.50'])
+    expect(more, `${bodyColumns}`).toEqual([])
+    expect(textNode(tree, 'Context'), `${bodyColumns}`).toBeUndefined()
+  }
+})
+
+test('the terminal band is the core line and the grid', () => {
+  for (const [bodyColumns, gridRows] of [[40, 3], [44, 2], [120, 1]] as const) {
+    const [top] = childrenOf(draw(onSurface(FULL, 'terminal'), bodyColumns))
+    const [head, ...rest] = childrenOf(top)
+    const lines = rest.slice(0, -1)
+    expect(textsOf(head), `${bodyColumns}`).toEqual(['Session', '$148.59'])
+    expect(lines, `${bodyColumns}`).toHaveLength(1 + gridRows)
+    expect(lines.every(isSpanLine), `${bodyColumns}`).toBe(true)
+    expect(textsOf(rest.at(-1)), `${bodyColumns}`).toEqual(['Session $126.09 · Subagents $22.50'])
+    // The core line: no model yet, the meter, the percent in the colour of 80 and over, the tokens at the right edge.
+    const core = spanTexts(lines[0])
+    expect(core.slice(0, 6), `${bodyColumns}`).toEqual(['—', '  ', '▰▰▰▰▰▰▰▰▰', '▱', '  ', '88%'])
+    expect(core.at(-1), `${bodyColumns}`).toBe('529k / 600k')
+    expect(core.join('').length, `${bodyColumns}`).toBe(bodyColumns)
+    expect(textNode(lines[0], '88%')?.node.props?.color, `${bodyColumns}`).toBe('warning')
+    expect(spanTexts(lines[1]).join(''), `${bodyColumns}`).toMatch(/^● ?Model/)
+  }
+})
+
+test('wider than 4096 px the band is 4088 px and centred', () => {
+  const [top] = childrenOf(draw(FULL, 626))
+  const band = childrenOf(top)[1]
+  expect(band?.props).toMatchObject({ height: 4, overflow: 'hidden', justifyContent: 'center' })
+  expect(childrenOf(band)[0]?.props).toMatchObject({ width: 4088, height: 76 })
+  expect(rowProblems(draw(FULL, 626))).toEqual([])
+})
+
+test('with nothing to show the band reads — and every station 0, dimmed', () => {
+  const [top] = childrenOf(draw(EMPTY))
+  const alt = String(childrenOf(childrenOf(top)[1])[0]?.props?.alt)
+  expect(alt).toStartWith('Context —')
+  expect(alt).toEndWith('Model 0; Files 0; Shell 0; Web 0; Agents 0; MCP 0; Skills 0; You 0.')
+
+  const [, core, ...grid] = childrenOf(childrenOf(draw(onSurface(EMPTY, 'terminal')))[0])
+  const texts = spanTexts(core)
+  expect(texts.slice(0, 5)).toEqual(['—', '  ', '▱'.repeat(10), '  ', '—'])
+  expect(texts.at(-1)).toBe('—')
+  expect(textNode(core, '▱'.repeat(10))?.node.props?.dimColor).toBe(true)
+  // Every station: an idle dim mark and a dim 0.
+  const cells = grid.flatMap(line => childrenOf(line).map(cell => childrenOf(cell)[0]))
+  const counts = cells.filter(text => textsOf(text)[0]?.trim() === '0')
+  expect(counts).toHaveLength(8)
+  expect(counts.every(text => text?.props?.dimColor === true)).toBe(true)
+  const marks = cells.filter(text => textsOf(text)[0] === '·')
+  expect(marks).toHaveLength(8)
+  expect(marks.every(text => text?.props?.dimColor === true)).toBe(true)
+})
+
+test('spanLine keeps a span\'s edge spaces on the desktop', () => {
+  const spans = [{ text: 'a ', color: '#e1ac6e', bold: true }, { text: ' b', dimColor: true }]
+  const lineOn = (surface: Surface): Node => {
+    const { Svg, ...rest } = PLAIN_ELEMENTS as unknown as Record<string, unknown>
+    return spanLine({ ui: surface === 'desktop' ? { Svg, ...rest } : rest } as never, spans) as unknown as Node
+  }
+
+  for (const [surface, texts] of [['desktop', ['a\u{a0}', '\u{a0}b']], ['terminal', ['a ', ' b']]] as const) {
+    const line = lineOn(surface)
+    expect(line.props, surface).toStrictEqual({
+      flexDirection: 'row', flexShrink: 1, minWidth: 0, overflow: 'hidden',
+    })
+    expect(isSpanLine(line), surface).toBe(true)
+    expect(spanTexts(line), surface).toEqual(texts)
+    const [first, second] = childrenOf(line).map(cell => childrenOf(cell)[0]?.props)
+    expect(first, surface).toMatchObject({ color: '#e1ac6e', bold: true })
+    expect(second, surface).toMatchObject({ dimColor: true })
+    expect(rowProblems(line), surface).toEqual([])
   }
 })
 
@@ -3027,33 +3242,6 @@ test('the Project block cannot outgrow the pane, and its numbers stay whole when
   }
 })
 
-test('the Context ring is a track and an arc from 12 o\'clock in the colour of the meter', () => {
-  const arcOf = (pct: number | undefined): string => ringSvg(pct).split('<circle ')[2] ?? ''
-  // No reading, or nothing in the window: the track alone.
-  for (const pct of [undefined, Number.NaN, Number.POSITIVE_INFINITY, 0, -3]) {
-    expect(ringSvg(pct), String(pct)).toBe(ringSvg(undefined))
-    expect(ringSvg(pct).match(/<circle /g), String(pct)).toHaveLength(1)
-  }
-  expect(ringSvg(undefined)).toContain('stroke="#808080" stroke-opacity="0.3"')
-  expect(ringSvg(88.2)).toStartWith('<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14"')
-  // The arc is p/100 of the circumference (34.56 for r = 5.5), from the top, clockwise.
-  expect(arcOf(88.2)).toContain('stroke-dasharray="30.48 34.56"')
-  expect(arcOf(88.2)).toContain('transform="rotate(-90 7 7)"')
-  expect(arcOf(12.8)).toContain('stroke-dasharray="4.42 34.56"')
-  expect(arcOf(50)).toContain('stroke-dasharray="17.28 34.56"')
-  // Its colour is the meter's: blue below 80, amber from 80, red from 95.
-  const colours = [[12.8, '#2f7de1'], [79.9, '#2f7de1'], [80, '#e0a030'], [94.9, '#e0a030'], [95, '#e5484d']] as const
-  for (const [pct, colour] of colours) {
-    expect(arcOf(pct), String(pct)).toContain(`stroke="${colour}"`)
-    expect(meterSvg(pct, 100), String(pct)).toContain(`fill="${colour}"/></svg>`)
-  }
-  // A full circle has no dash, so no hairline gap is left; a percent past the end is held on it.
-  for (const pct of [100, 250]) {
-    expect(arcOf(pct), String(pct)).not.toContain('stroke-dasharray')
-    expect(arcOf(pct), String(pct)).toContain('stroke="#e5484d"')
-  }
-})
-
 test('meterSvg: a rounded track, a rounded fill, the colour by threshold', () => {
   const svg = meterSvg(85, 100)
   expect(svg).toContain('#e0a030')
@@ -3288,7 +3476,7 @@ test('a time wider than the cell of a task is drawn as a dim dash: one row, and 
   const log = logLines(60)
 
   for (const surface of SURFACES) {
-    for (const bodyColumns of [20, 45]) {
+    for (const bodyColumns of [20, 45] as const) {
       for (const [name, row, time] of cases) {
         const where = `${surface} ${bodyColumns} columns: ${name}`
         const tree = draw(onSurface({ ...withLog(log), tasks: tasksOf([row]) }, surface), bodyColumns, 40)
@@ -3298,9 +3486,11 @@ test('a time wider than the cell of a task is drawn as a dim dash: one row, and 
         expect(textsOf(cell), where).toEqual([time ?? '—'])
         expect(childrenOf(cell).map(styleOf), where).toEqual([[undefined, time === null ? true : undefined, undefined]])
         expect(String(textsOf(cell)[0]).length, where).toBeLessThanOrEqual(Number(cell?.props?.width))
-        // The Log has the rows of the block fewer, as for any one task: the rule, the header and the row.
-        expect(logRows(tree), where).toHaveLength(32 - 3)
-        expect(rowsAbove(tree, bodyColumns, surface), where).toBe(5 + 3)
+        // The Log has the rows of the block fewer, as for any one task: the rule, the header and the row. Of the 40
+        // rows, the blocks above take ABOVE_LOG, the Log's rule and header 2 and `+N more` 1.
+        const above = ABOVE_LOG[surface][bodyColumns]
+        expect(logRows(tree), where).toHaveLength(40 - above - 3 - 3)
+        expect(rowsAbove(tree, bodyColumns, surface), where).toBe(above + 3)
       }
     }
   }
@@ -3485,9 +3675,10 @@ test('the task rows outgrow no pane: every kind and status, a description wider 
 })
 
 test('the Log draws fewer lines by exactly the rows of the Tasks block: rule, header, rows and `+N more`', () => {
-  // A pane of a Log and the tasks. Above the Log are the Session card (2 rows) and the placeholder of Turn stats (3),
-  // and its rule and header are 2 more: of a body of 40 rows the Log has 33, and of its 60 lines a row goes to its own
-  // `+N more` line, so 32 are drawn.
+  // A pane of a Log and the tasks. Above the Log are the Session card and the placeholder of Turn stats (ABOVE_LOG: 9
+  // rows on the desktop, 8 and 7 on the terminal at 20 and 45 columns), and its rule and header are 2 more; of its 60
+  // lines a row goes to its own `+N more` line. So of a body of 40 rows 28 lines are drawn on the desktop, and 29 and
+  // 30 on the terminal.
   const log = logLines(60)
   // [the tasks, whether the section is folded, the rows of its block]: the rule and the header, the rows (8 at the
   // most), and the line that counts the rest when there are more tasks than rows.
@@ -3496,19 +3687,21 @@ test('the Log draws fewer lines by exactly the rows of the Tasks block: rule, he
     [TEN.slice(0, 9), false, 11], [TEN, false, 11], [TEN, true, 2], [TEN.slice(0, 1), true, 2],
   ]
   for (const surface of SURFACES) {
-    for (const bodyColumns of [20, 45]) {
+    for (const bodyColumns of [20, 45] as const) {
+      const above = ABOVE_LOG[surface][bodyColumns]
+      const lines = { desktop: 28, terminal: bodyColumns === 20 ? 29 : 30 }[surface]
       const none = draw(onSurface(withLog(log), surface), bodyColumns, 40)
-      expect(logRows(none), `${surface} ${bodyColumns}: no tasks`).toHaveLength(32)
+      expect(logRows(none), `${surface} ${bodyColumns}: no tasks`).toHaveLength(lines)
       for (const [rows, isFolded, blockRows] of cases) {
         const where = `${surface} ${bodyColumns} columns: ${rows.length} tasks${isFolded ? ', folded' : ''}`
         const collapsed: Record<string, boolean> = isFolded ? { tasks: true } : {}
         const data = { ...withLog(log), tasks: tasksOf(rows), collapsed }
         const tree = draw(onSurface(data, surface), bodyColumns, 40)
         // The Log has the rows of the Tasks block fewer, and `+N more` counts the lines it has not drawn.
-        expect(logRows(tree), where).toHaveLength(32 - blockRows)
-        expect(moreOf(tree), where).toBe(60 - (32 - blockRows))
+        expect(logRows(tree), where).toHaveLength(lines - blockRows)
+        expect(moreOf(tree), where).toBe(60 - (lines - blockRows))
         // The rows that the panel counts above the Log are those of the trees: counted again from them.
-        expect(rowsAbove(tree, bodyColumns, surface), where).toBe(5 + blockRows)
+        expect(rowsAbove(tree, bodyColumns, surface), where).toBe(above + blockRows)
       }
     }
   }

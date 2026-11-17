@@ -7,14 +7,19 @@ import type {
   TextProps,
 } from 'claude-code'
 
+import { bandTerminal, drawBand } from './band'
+import type { BandInput } from './band'
+import type { Span } from './cells'
 import { TASK_TIME_CELLS, taskTime } from './lanes'
 import {
   fmtClock, fmtCountdown, fmtDuration, fmtPct, fmtRate, fmtTokens, fmtTtft, fmtUsd, orderAgents, orderTasks, shortType,
   splitCost, TYPE_MAX,
 } from './stats'
 import type { AgentRow, LogEntry, TaskStatus } from './stats'
+import { runningOf } from './stations'
 import type { Motion } from './stations'
 import { BAD, BLUE, clampPct, GREEN, meterColor, NEUTRAL, OK, pctColor, RED, SVG_MAX_PX } from './svg'
+import type { Look } from './svg'
 
 export type SectionId = 'usage' | 'turn' | 'agents' | 'tasks' | 'mcp' | 'sources' | 'log'
 
@@ -46,25 +51,25 @@ type Kit = {
   // terminal holds an Svg that draws nothing. renderPane leaves it out there.
   Svg: ElementConstructor<SvgProps> | undefined
 }
-// `cols` and `rows` are the body in cells, `rows` 0 where its height is not known; the two meter widths are worked out
-// from `cols` once, in px.
+// `cols` and `rows` are the body in cells, `rows` 0 where its height is not known; `bodyPx` and the limit meter's
+// width are worked out from `cols` once, in px. `look` is how the images move.
 type Draw = {
   ui: Kit
   data: PaneData
   handlers: PaneHandlers
   cols: number
   rows: number
-  contextMeterPx: number
+  bodyPx: number
   limitMeterPx: number
+  look: Look
 }
 
 // Layout is in cells, the unit of Box numbers. On the desktop a cell is CELL_PX wide, measured on the live pane (§2.1).
-// It is used only to turn `bodyColumns` into the px of the meters; confirmed on the live pane on 2026-10-07 (§11,
-// check 1).
+// It is used only to turn `bodyColumns` into the px of the meters and the band; confirmed on the live pane on
+// 2026-10-07 (§11, check 1).
 const CELL_PX = 8
 const ICON_PX = 14 // every icon, in CSS px
 const ICON_CELLS = 2 // the slot an icon sits in: the text after it starts 3 cells in
-const PCT_CELLS = 6 // `100.0%`
 const LIMIT_LABEL_CELLS = 7 // `5-hour`, `Weekly`, `Spend`
 const LIMIT_PCT_CELLS = 5 // `100%`
 const COST_CELLS = 7 // `$148.59`, `<$0.001`; a restored row's `$148.59+` takes a cell more (agentsSection)
@@ -206,22 +211,6 @@ const STATUS_SVG: Record<TaskStatus, string> = {
   ended: statusIcon(NEUTRAL, ''),
 }
 
-const RING_R = 5.5
-const RING_C = 2 * Math.PI * RING_R
-
-// The Context ring: a track, and an arc of the percent from 12 o'clock, clockwise, in the colour of the meter. No arc
-// when there is no reading or the percent is 0; a full circle at 100, so no hairline gap is left. Butt caps keep the
-// arc as long as the percent says.
-export function ringSvg(pct: number | undefined): string {
-  const p = pct === undefined || !Number.isFinite(pct) ? 0 : clampPct(pct)
-  const circle = `<circle cx="7" cy="7" r="${RING_R}" fill="none"`
-  const dash = p >= 100 ? '' : ` stroke-dasharray="${((p / 100) * RING_C).toFixed(2)} ${RING_C.toFixed(2)}"`
-  const track = `${circle} stroke="#808080" stroke-opacity="0.3" stroke-width="2"/>`
-  const arc = p > 0 ? `${circle} stroke="${meterColor(p)}" stroke-width="2"${dash} transform="rotate(-90 7 7)"/>` : ''
-
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14">${track}${arc}</svg>`
-}
-
 // Meter bar after Desktop Statusline (George Liu, centminmod, MIT): a rounded track with a rounded fill on it.
 export function meterSvg(pct: number, widthPx: number): string {
   const fillPx = Math.round((clampPct(pct) * widthPx) / 100)
@@ -234,14 +223,8 @@ export function meterSvg(pct: number, widthPx: number): string {
   ].join('')
 }
 
-// The context meter shares its row with the percent only: the body less the 1-cell gap and PCT_CELLS, up to SVG_MAX_PX,
-// so that it reaches the percent in a wide pane too.
-export function contextMeterWidth(bodyColumns: number): number {
-  return Math.min(SVG_MAX_PX, Math.max(48, (bodyColumns - 7) * CELL_PX))
-}
-
 // A limit meter shares its row with the label, the percent and the countdown: 7 + 1 + 1 + 5 + 1 + 9 + 1 spare cells, up
-// to SVG_MAX_PX, as the context meter.
+// to SVG_MAX_PX, so that it reaches the countdown in a wide pane too.
 export function limitMeterWidth(bodyColumns: number): number {
   return Math.min(SVG_MAX_PX, Math.max(40, (bodyColumns - 25) * CELL_PX))
 }
@@ -281,6 +264,24 @@ function meter(d: Draw, pct: number, alt: string, widthPx: number): RenderElemen
     <Box flexDirection="row" flexShrink={0}>
       {filled > 0 && <Text color={meterColor(pct)}>{'▰'.repeat(filled)}</Text>}
       {filled < TEXT_METER_CELLS && <Text dimColor>{'▱'.repeat(TEXT_METER_CELLS - filled)}</Text>}
+    </Box>
+  )
+}
+
+// A row of styled spans (the terminal band's lines): a FLEX cell of FIXED cells, one Text each. On the desktop a span's
+// edge spaces are no-break ones: a plain space at the edge of a flex item may be dropped.
+export function spanLine(d: Draw, spans: Span[]): RenderElement {
+  const { Box, Text } = d.ui
+  const edges = (text: string): string =>
+    d.ui.Svg === undefined ? text : text.replace(/^ +| +$/g, spaces => '\u{a0}'.repeat(spaces.length))
+
+  return (
+    <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
+      {spans.map(span => (
+        <Box flexDirection="row" flexShrink={0}>
+          <Text color={span.color} dimColor={span.dimColor} bold={span.bold}>{edges(span.text)}</Text>
+        </Box>
+      ))}
     </Box>
   )
 }
@@ -415,58 +416,51 @@ function section(
 
 // ---- Top block (§6.1–§6.2) ----
 
-// The context of the window: a ring, the label and `tokens / window`; under it the meter and the percent. A dash when
-// there is no reading: before any response, after a /clear, or with a percent that is not a number (NaN, Infinity, or a
-// null left by one). Then the ring is its track alone and there is no meter row.
-function contextRows(d: Draw): RenderElement[] {
-  const { Box, Text } = d.ui
-  const { contextPct, contextTokens, contextWindow } = d.data.usage
-  const label = (
-    <Box flexDirection="row" flexShrink={0}>
-      <Text>Context</Text>
-    </Box>
-  )
-  if (contextPct === undefined || !Number.isFinite(contextPct)) {
-    return [
-      <Box flexDirection="row" alignItems="center" columnGap={1}>
-        {iconSlot(d, ringSvg(undefined), 'Context')}
-        {label}
-        {endText(d, '—', { dimColor: true })}
-      </Box>,
-    ]
+// The Session band (§4), in place of the Context rows: on the desktop one image in a Box of its whole rows, centred
+// where the body is wider than the widest Svg; in the terminal the core line and the station grid, a row each. A
+// percent that is no finite number (NaN, Infinity, or a null left by an older build) is no reading, and the tokens
+// show only with a reading.
+function sessionBand(d: Draw): { parts: RenderElement[]; rows: number } {
+  const { Box, Svg } = d.ui
+  const { usage, mainModel, compactions, stations, inFlight, agents, tasks, turn, now } = d.data
+  const { contextPct, contextTokens, contextWindow } = usage
+  const pct = typeof contextPct === 'number' && Number.isFinite(contextPct) ? contextPct : undefined
+  const hasTokens = pct !== undefined && contextTokens !== undefined && contextWindow !== undefined
+  const input: BandInput = {
+    pct, tokens: hasTokens ? contextTokens : undefined, window: hasTokens ? contextWindow : undefined,
+    model: mainModel, compactions, stations, running: runningOf(inFlight, agents, tasks, turn !== null), nowMs: now,
   }
-  const hasTokens = contextTokens !== undefined && contextWindow !== undefined
-  const note = hasTokens ? `${fmtTokens(contextTokens)} / ${fmtTokens(contextWindow)}` : ''
-  const pctText = fmtPct(contextPct, 1)
+  if (Svg === undefined) {
+    const lines = bandTerminal(input, d.cols).map(spans => spanLine(d, spans))
+    return { parts: lines, rows: lines.length }
+  }
+  const band = drawBand(input, d.bodyPx, d.look)
 
-  return [
-    <Box flexDirection="row" alignItems="center" columnGap={1}>
-      {iconSlot(d, ringSvg(contextPct), 'Context')}
-      {label}
-      {endText(d, note, { dimColor: true })}
-    </Box>,
-    <Box flexDirection="row" alignItems="center" justifyContent="space-between" columnGap={1}>
-      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
-        {meter(d, contextPct, `Context ${pctText}`, d.contextMeterPx)}
-      </Box>
-      <Box flexDirection="row" width={PCT_CELLS} flexShrink={0} justifyContent="flex-end">
-        <Text color={pctColor(contextPct)}>{pctText}</Text>
-      </Box>
-    </Box>,
-  ]
+  return {
+    parts: [
+      <Box
+        flexDirection="row" height={band.rows} overflow="hidden"
+        justifyContent={band.offsetPx > 0 ? 'center' : 'flex-start'}
+      >
+        <Svg source={band.svg} alt={band.alt} width={band.widthPx} height={band.heightPx} />
+      </Box>,
+    ],
+    rows: band.rows,
+  }
 }
 
 // Whether a subagent row was rebuilt from the session's messages: its cost before the restore is not known.
 const hasRestored = (agents: AgentRow[]): boolean => agents.some(agent => agent.restored === true)
 
-// Session and Total, the context, and the split of the cost when subagents ran. The card never folds and has no rule
-// above it. The total is primary weight: bold is for titles. Its rows, one line each: Session with its total, the
-// context (two with a reading, the label and the meter), and the split.
+// Session and Total, the Session band, and the split of the cost when subagents ran. The card never folds and has no
+// rule above it. The total is primary weight: bold is for titles. Its rows: Session with its total (one), the band's,
+// and the split (one).
 function topBlock(d: Draw): Block {
   const { Box, Text } = d.ui
   const { usage, agents } = d.data
   const subagentsUsd = Object.values(agents).reduce((sum, agent) => sum + (agent.costUsd ?? 0), 0)
   const split = splitCost(usage.costUsd, subagentsUsd)
+  const band = sessionBand(d)
   const rows: RenderElement[] = [
     <Box flexDirection="row" justifyContent="space-between" columnGap={2}>
       <Box flexDirection="row" flexShrink={0}>
@@ -478,7 +472,7 @@ function topBlock(d: Draw): Block {
         </Box>
       )}
     </Box>,
-    ...contextRows(d),
+    ...band.parts,
   ]
   // A restored row's cost before the restore is not known, so the subagents' cost is a lower bound and Session, which
   // is Total less that cost, is not shown. With no Total there is no split line, as for live rows.
@@ -492,7 +486,7 @@ function topBlock(d: Draw): Block {
     )
   }
 
-  return { tree: <Box flexDirection="column">{rows}</Box>, rows: rows.length }
+  return { tree: <Box flexDirection="column">{rows}</Box>, rows: rows.length - band.parts.length + band.rows }
 }
 
 // ---- Project block (§6.3) ----
@@ -978,8 +972,9 @@ export function renderPane(els: ElementTable, data: PaneData, props: PaneProps, 
     handlers,
     cols,
     rows: Number.isFinite(bodyRows) && bodyRows > 0 ? bodyRows : 0,
-    contextMeterPx: contextMeterWidth(cols),
+    bodyPx: cols * CELL_PX,
     limitMeterPx: limitMeterWidth(cols),
+    look: { motion: data.motion },
   }
 
   const blocks = [
