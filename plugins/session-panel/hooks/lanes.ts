@@ -26,7 +26,7 @@ type KnownSpan = { start: number; end: number | null }
 
 export const LANE_VALUE_CELLS = 8
 // A time from 100 hours on takes 8 cells (`100h 00m`), the widest this cell holds. A time of 1000 hours or more
-// (`1000h 00m`) would overflow it, and taskTime draws it as not known; a cost of $1000 or more overflows COST_CELLS.
+// (`1000h 00m`) would overflow it, and taskTime draws it as not known.
 // The `≤` of a bound takes a cell of its own, so `≤99h 59m` is the widest bound the cell holds, and `≤100h 00m` is
 // drawn as not known.
 export const TASK_TIME_CELLS = 8

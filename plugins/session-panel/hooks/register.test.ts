@@ -1120,10 +1120,10 @@ test('the section that a press flips is the one the pane shows, whatever the sto
     await ui.unmount()
   })
 
-// The Tasks section folds as the others do, and the store keeps its fold under `tasks` (the v2 spec, §4.1: the fold is
-// remembered, as `collapsed.tasks`). A press folds it: the row goes, the header stays with its summary and its chevron
-// turns; a second press unfolds it.
-test('a press of the Tasks header folds the section and the store keeps it; a second press unfolds it', WITH_STORE,
+// The Activity section folds as the others do, and the store keeps its fold under `activity` (spec 0.7.0 §6.1). A
+// press folds it: the task's lane goes, the header stays with its summary and its chevron turns; a second press unfolds
+// it.
+test('a press of the Activity header folds the section and the store keeps it; a second press unfolds it', WITH_STORE,
   async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })
     const w = bottom(on, clock)
@@ -1131,20 +1131,20 @@ test('a press of the Tasks header folds the section and the store keeps it; a se
     await clock.advance(1)
     await startTask($, clock, w, 'b1') // the main agent's background Bash call: a task that runs
     const ui = await mountPane($)
-    const chevron = async (): Promise<unknown> => (await ui.find({ key: 'toggle:tasks' }))?.props.label
-    const hasRow = async (): Promise<boolean> => (await ui.find({ type: 'Text', text: /^run tests$/ })) !== undefined
+    const chevron = async (): Promise<unknown> => (await ui.find({ key: 'toggle:activity' }))?.props.label
+    const hasLane = async (): Promise<boolean> => (await ui.find({ type: 'Text', text: /^run tests$/ })) !== undefined
     const summaries = async (): Promise<number> => (await ui.findAll({ type: 'Text', text: /^1\/1$/ })).length
-    expect([await chevron(), await hasRow(), await summaries()], 'open').toEqual(['▾', true, 1])
+    expect([await chevron(), await hasLane(), await summaries()], 'open').toEqual(['▾', true, 1])
 
-    await ui.press({ key: 'toggle:tasks' })
-    expect(await readStore($)).toEqual({ tasks: true })
-    expect((await readState($)).collapsed).toEqual({ tasks: true })
-    expect([await chevron(), await hasRow(), await summaries()], 'folded').toEqual(['▸', false, 1])
+    await ui.press({ key: 'toggle:activity' })
+    expect(await readStore($)).toEqual({ activity: true })
+    expect((await readState($)).collapsed).toEqual({ activity: true })
+    expect([await chevron(), await hasLane(), await summaries()], 'folded').toEqual(['▸', false, 1])
 
-    await ui.press({ key: 'toggle:tasks' })
-    expect(await readStore($)).toEqual({ tasks: false })
-    expect((await readState($)).collapsed).toEqual({ tasks: false })
-    expect([await chevron(), await hasRow(), await summaries()], 'unfolded').toEqual(['▾', true, 1])
+    await ui.press({ key: 'toggle:activity' })
+    expect(await readStore($)).toEqual({ activity: false })
+    expect((await readState($)).collapsed).toEqual({ activity: false })
+    expect([await chevron(), await hasLane(), await summaries()], 'unfolded').toEqual(['▾', true, 1])
     await ui.unmount()
   })
 
@@ -3945,7 +3945,7 @@ test('an emoji sequence stays whole in the line of a prompt; a format character 
     expect(log[0]?.text).not.toContain(ZWJ)
   })
 
-// The Subagents list draws the description and the type of a row as the row keeps them. The row is written when the
+// An Activity lane draws the description and the type of a row as the row keeps them. The row is written when the
 // agent spawns; a resume, a sync and the end of a run only change it, so they keep what is there.
 test('the format characters are taken out of the description and the type of a spawned agent, and stay out',
   SLOW_READER, async ($, on) => {
@@ -4015,7 +4015,7 @@ test('a secret in the description or the type of a spawned agent is masked in it
   })
 
 // The row keeps the description and the type as the spawn line shows them: on one line and cut to 512 characters, so a
-// long one, or one of many lines, is no taller or wider in the Subagents list than that.
+// long one, or one of many lines, is no taller or wider in its Activity lane than that.
 test('a spawned agent keeps its description and its type on one line, cut to 512 characters', WITH_READER,
   async ($, on) => {
     bottom(on, mock.clock(on))
@@ -6008,11 +6008,13 @@ test('a second session.start, which a hot reload raises, keeps the tasks', SLOW_
   expect(await taskRows($)).toEqual(before)
 })
 
-// The pane draws the tasks of the state (the v2 spec, §4.1) and draws again when they change, which is the read of the
-// atom that subscribes it: no section before the task starts, a row and `1/1` while it runs, `1` and the mark of a done
-// task once the notice of its end has come. The mark is the alt of an image on the desktop and a glyph on the terminal.
+// The pane draws the tasks of the state as lanes of Activity (spec 0.7.0 §6) and draws again when they change, which is
+// the read of the atom that subscribes it: no section before the task starts, a lane and `1/1` while it runs, `1` and
+// the mark of a done task once the notice of its end has come. The status is in the lane's alt on the desktop, and a
+// mark in its line on the terminal: the gutter's `◐` ends a running lane's span (main is idle here), and a `✓` of its
+// own follows a done one.
 for (const surface of ['desktop', 'terminal'] as const) {
-  test(`the ${surface} pane shows the Tasks section: a running row, then a done one once the notice comes`,
+  test(`the ${surface} pane shows the task's lane in Activity: running, then done once the notice comes`,
     SLOW_READER, async ($, on) => {
       const clock = mock.clock(on, { now: 1_000_000 })
       const w = bottom(on, clock)
@@ -6020,22 +6022,21 @@ for (const surface of ['desktop', 'terminal'] as const) {
       await clock.advance(1)
       const ui = await mountPane($, surface)
       const isDesktop = surface === 'desktop'
-      // The marks of the rows, as the pane draws them.
+      // The statuses of the task's lane on the desktop, the marks of the lanes on the terminal.
       const marks = async (): Promise<string[]> => {
-        if (!isDesktop) return (await ui.findAll({ type: 'Text', text: /^[◐✓]$/ })).map(el => el.text)
+        if (!isDesktop) return (await ui.findAll({ type: 'Text', text: /(◐|^✓)$/ })).map(el => el.text.slice(-1))
         const alts = (await ui.findAll({ type: 'Svg' })).map(el => String(el.props.alt))
 
-        return alts.filter(alt => /^(running|done)$/.test(alt))
+        return alts.flatMap(alt => /^run tests \(@shell\), (\w+), /.exec(alt)?.slice(1) ?? [])
       }
-      expect(await ui.find({ key: 'toggle:tasks' }), 'no task').toBeUndefined()
+      expect(await ui.find({ key: 'toggle:activity' }), 'no task').toBeUndefined()
 
       const startedAt = clock.now() + 300 // the task is there once its call is over, which takes the bottom 300 ms
       await startTask($, clock, w, 'b1')
 
-      expect(await ui.find({ key: 'toggle:tasks' }), 'a task runs').toBeDefined()
+      expect(await ui.find({ key: 'toggle:activity' }), 'a task runs').toBeDefined()
       expect(await ui.findAll({ type: 'Text', text: /^1\/1$/ }), 'its summary').toHaveLength(1)
-      expect(await ui.find({ type: 'Text', text: /^run tests$/ }), 'its description').toBeDefined()
-      expect(await ui.find({ type: 'Text', text: /^@shell$/ }), 'its kind').toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^run tests$/ }), 'its label').toBeDefined()
       expect(await marks(), 'its mark').toEqual([isDesktop ? 'running' : '◐'])
 
       await endTurn($) // the loop is idle for the 5 s, so the notice is at the end of its task and the time is exact
@@ -6044,7 +6045,7 @@ for (const surface of ['desktop', 'terminal'] as const) {
 
       expect(await ui.findAll({ type: 'Text', text: /^1\/1$/ }), 'none runs').toEqual([])
       expect(await ui.findAll({ type: 'Text', text: /^1$/ }), 'its summary, the total alone').toHaveLength(1)
-      expect(await ui.find({ type: 'Text', text: /^5\.0s$/ }), 'the time it ran').toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^ *5\.0s$/ }), 'the time it ran').toBeDefined()
       expect(await marks(), 'its mark').toEqual([isDesktop ? 'done' : '✓'])
       await ui.unmount()
     })
@@ -7098,28 +7099,26 @@ test('a reset whose second log write fails has no count above the lines, and nor
     await ui.unmount()
   })
 
-// The cells at the right edge of the rows of the Subagents and the Tasks of a drawn pane, in the order they are drawn,
-// each as its texts with whether the text is dim. A restored subagent's cost cell is 8 cells wide, as a task's time
-// cell is; the pane of a test has no other row of either, so a row is found by its three cells and the last one's
-// width.
+// The value cells of a drawn desktop pane's Activity lanes whose label is `label`, each as its texts with whether the
+// text is dim. A lane row is three cells, [label][image][value], and its image's alt starts with the label and the tag.
 type Drawn = { type: string; props?: Record<string, unknown>; children?: unknown[] }
-const valueCellsOf = (tree: unknown, width: number): Array<Array<[text: string, isDim: boolean]>> => {
+const laneValuesOf = (tree: unknown, label: string): Array<Array<[text: string, isDim: boolean]>> => {
   const node = tree as Drawn
   const cells = (node.children ?? []).filter(child => typeof child === 'object' && child !== null) as Drawn[]
-  const value = cells[2]
-  const isRow = node.type === 'Box' && cells.length === 3 && value?.props?.width === width &&
-    value.props.justifyContent === 'flex-end'
-  const own = isRow ? [(value?.children as Drawn[]).map((el): [string, boolean] => [
+  const image = (cells[1]?.children as Drawn[] | undefined)?.[0]
+  const isLane = node.type === 'Box' && cells.length === 3 && image?.type === 'Svg' &&
+    String(image.props?.alt).startsWith(`${label} (@`)
+  const own = isLane ? [(cells[2]?.children as Drawn[]).map((el): [string, boolean] => [
     String(el.children?.[0]), el.props?.dimColor === true,
   ])] : []
 
-  return [...own, ...cells.flatMap(child => valueCellsOf(child, width))]
+  return [...own, ...cells.flatMap(child => laneValuesOf(child, label))]
 }
 
 // The parked mounted test: a subagent and a task that are `ended` (the restore's rows, put in through the
-// `state.set` of a plugin above the mod's) are drawn on the desktop and on the terminal: the dim ring of an `ended`
-// row, in the icon's slot or as a glyph, a dim dash in the cell of the cost and in the cell of the time, and the
-// split line of a restored row.
+// `state.set` of a plugin above the mod's) are drawn on the desktop and on the terminal as Activity lanes of an unknown
+// span: the dashed line and the dim ring, a dim dash for the cost and the time that are not known, and the split line
+// of a restored row.
 test('a mounted pane draws an `ended` subagent and an `ended` task with the dim ring and a dim dash', WITH_RESTORER,
   async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })
@@ -7135,14 +7134,25 @@ test('a mounted pane draws an `ended` subagent and an `ended` task with the dim 
     for (const surface of ['desktop', 'terminal'] as const) {
       const ui = await mountPane($, surface)
       if (surface === 'desktop') {
-        const marks = await ui.findAll({ type: 'Svg' })
-        expect(marks.filter(el => el.props.alt === 'ended'), surface).toHaveLength(2)
+        // The lanes say `ended` and `unknown` in their alts, and draw the ring.
+        const lanes = (await ui.findAll({ type: 'Svg' }))
+          .filter(el => / \(@\w+\), ended, unknown$/.test(String(el.props.alt)))
+        expect(lanes.map(el => el.props.alt), surface).toEqual([
+          'Fix cart total qty (@engineer), ended, unknown', 'run tests (@shell), ended, unknown',
+        ])
+        for (const lane of lanes) expect(String(lane.props.source), surface).toContain('<circle r="3.5"')
+        // The cost of the subagent and the time of the task: each cell is a dim dash.
+        const drawn = await ui.drawn()
+        expect([...laneValuesOf(drawn, 'Fix cart total qty'), ...laneValuesOf(drawn, 'run tests')], surface)
+          .toEqual([[['—', true]], [['—', true]]])
       } else {
         const rings = (await ui.findAll({ type: 'Text' })).filter(el => el.text === '○')
         expect(rings.map(el => el.props.dimColor), surface).toEqual([true, true])
+        // The value of a lane is a span of 8 cells, right-aligned: a dim dash for each of the two, and for main's,
+        // whose cost is not known while a row is restored.
+        const dashes = await ui.findAll({ type: 'Text', text: /^ {7}—$/ })
+        expect(dashes.map(el => el.props.dimColor), surface).toEqual([true, true, true])
       }
-      // The cost of the subagent and the time of the task: each cell is a dim dash, and the Context row's is not one.
-      expect(valueCellsOf(await ui.drawn(), 8), surface).toEqual([[['—', true]], [['—', true]]])
       expect(await ui.find({ type: 'Text', text: 'Subagents $0+' }), surface).toBeDefined()
       await ui.unmount()
     }
@@ -7160,10 +7170,10 @@ test('a restored subagent that is resumed: the resumed line, then `$x+` in its c
     await $.turn.start({ text: 'go', turnId: 't1' })
     await $.agent.spawn(SPAWN)
     const restoredOf = async () => (await readState($)).agents.a1
-    // The cost cell of the subagent's row, the only row of the pane that has one: its texts as drawn.
+    // The value cell of the subagent's lane: its texts as drawn.
     const costCell = async (): Promise<Array<Array<[string, boolean]>>> => {
       const ui = await mountPane($)
-      const cells = valueCellsOf(await ui.drawn(), 8)
+      const cells = laneValuesOf(await ui.drawn(), 'Fix cart total qty')
       await ui.unmount()
 
       return cells

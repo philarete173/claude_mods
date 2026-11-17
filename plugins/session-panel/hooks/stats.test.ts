@@ -24,8 +24,6 @@ import {
   LOG_TEXT_MAX,
   mergedLength,
   normTurn,
-  orderAgents,
-  orderTasks,
   parseStatus,
   parseTaskNotification,
   plainText,
@@ -273,27 +271,6 @@ test('splitCost', () => {
   expect(split.subagents).toBe(2.95)
   expect(splitCost(undefined, 1)).toEqual({ total: null, session: null, subagents: 1 })
   expect(splitCost(1, 2).session).toBe(0)
-})
-
-test('orderAgents', () => {
-  const rows = [agent('done', 100), agent('running', 50), agent('done', 300)]
-  expect(orderAgents(rows).map(r => r.id)).toEqual(['running@50', 'done@300', 'done@100'])
-  expect(rows.map(r => r.id)).toEqual(['done@100', 'running@50', 'done@300']) // the source is not reordered
-  expect(orderAgents([agent('running', 10), agent('running', 20)]).map(r => r.id)).toEqual(['running@20', 'running@10'])
-})
-
-test('orderAgents puts a start not known last of its group, in the order given, as orderTasks does', () => {
-  const rows = [
-    agent('done', 100), agent('running', null), agent('ended', null), agent('running', 50), agent('done', 300),
-    agent('failed', null),
-  ]
-  expect(orderAgents(rows).map(r => r.id)).toEqual([
-    'running@50', 'running@null', 'done@300', 'done@100', 'ended@null', 'failed@null',
-  ])
-  expect(rows.map(r => r.id)).toEqual([
-    'done@100', 'running@null', 'ended@null', 'running@50', 'done@300', 'failed@null',
-  ]) // the source is not reordered
-  expect(orderAgents([agent('ended', null, 'a'), agent('ended', null, 'b')]).map(r => r.id)).toEqual(['a', 'b'])
 })
 
 test('pushLog', () => {
@@ -2202,23 +2179,6 @@ test('finishTask marks a time from the clock as a bound when atMost is set, and 
   ]
   // The key is absent, not set to anything: toEqual would not tell it from `undefined`.
   for (const [name, row] of exact) expect('durationAtMost' in row, name).toBe(false)
-})
-
-test('orderTasks puts the running tasks first, then the newest start first, and a start not known last', () => {
-  const rows = [
-    task('done', 100), task('running', 50), task('done', 300), task('running', null), task('failed', null),
-    task('running', 70), task('stopped', 200), task('done', null),
-  ]
-  expect(orderTasks(rows).map(r => r.id)).toEqual([
-    'running@70', 'running@50', 'running@null', 'done@300', 'stopped@200', 'done@100', 'failed@null', 'done@null',
-  ])
-  expect(rows.map(r => r.id)).toEqual([
-    'done@100', 'running@50', 'done@300', 'running@null', 'failed@null', 'running@70', 'stopped@200', 'done@null',
-  ]) // the source is not reordered
-  // Tasks that started at the same time keep their order.
-  expect(orderTasks([task('running', 10, 'a'), task('running', 10, 'b'), task('running', 10, 'c')]).map(r => r.id))
-    .toEqual(['a', 'b', 'c'])
-  expect(orderTasks([])).toEqual([])
 })
 
 test('parseStatus counts the entries and lists the new files', () => {

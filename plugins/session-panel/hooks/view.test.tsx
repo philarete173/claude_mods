@@ -7,7 +7,7 @@ import type { PaneData } from './view'
 import { restoreFromMessages } from './restore'
 import { emptyStationsState, STATION_HUES, zeroStationMs } from './stations'
 import { fmtDuration } from './stats'
-import type { AgentRow, AgentStatus, LogEntry, TaskKind, TaskRow, TaskStatus, TurnAcc, TurnStats } from './stats'
+import type { AgentRow, AgentStatus, LogEntry, TaskRow, TaskStatus, TurnAcc, TurnStats } from './stats'
 
 // The state of the pane is seeded the way register.test.ts does it: the events of a session run through the real
 // hooks, over a bottom that answers as the engine would, and the pane is mounted on a surface to see what it draws.
@@ -288,23 +288,6 @@ const bandImage = async (ui: Pane) =>
 // The band's alt for a pane with no reading and no call: the core reads —, and every station 0.
 const EMPTY_BAND_ALT = 'Context —. Model 0; Files 0; Shell 0; Web 0; Agents 0; MCP 0; Skills 0; You 0.'
 
-const STATUSES: string[] = ['running', 'done', 'failed', 'stopped', 'ended']
-// The glyphs of the terminal's status marks: a half circle, a check, a cross, a square, a ring.
-const GLYPH = /^[◐✓✗■○]$/
-// The status mark of each subagent and task row with the width of the cell around it, in the order they are drawn: on
-// the desktop an Svg (its alt is the status) in a slot, on the terminal a glyph in a one-cell Box.
-const marksOf = (tree: unknown): Array<[mark: string, cells: unknown]> =>
-  flat(tree).flatMap(({ node, parent }): Array<[string, unknown]> => {
-    if (node.type === 'Svg' && STATUSES.includes(String(node.props?.alt))) {
-      return [[String(node.props?.alt), parent?.props?.width]]
-    }
-    const first = childrenOf(node)[0]
-    const isGlyph = node.type === 'Box' && first?.type === 'Text' && GLYPH.test(textsOf(first)[0] ?? '')
-
-    return isGlyph ? [[textsOf(first)[0] ?? '', node.props?.width]] : []
-  })
-const markCells = async (ui: Pane): Promise<Array<[mark: string, cells: unknown]>> => marksOf(await ui.drawn())
-
 // The log rows as drawn: who, how many cells wide the columns of the time and of `who` are, how many cells the row
 // has, and its outcome cell, the fourth, when there is one. A time cell is a column with a width: the `—` that leads
 // the terminal band's core line sits in a cell with none.
@@ -341,7 +324,7 @@ const logRoles = (row: Node): string[] =>
 const rowText = (row: Node): string => textsOf(childrenOf(row)[logRoles(row).indexOf('text')])[0] ?? ''
 // The Boxes of the pane that hold log rows, in order: a head and a tail, or the one Box of a body of unknown height.
 const logBoxes = (tree: Node): Node[] => childrenOf(tree).filter(child => logRows(child).length > 0)
-// The `+N more` line of the Log: the child of the pane that reads so (the Subagents' own is inside its section), and
+// The `+N more` line of the Log: the child of the pane that reads so (Activity's own is inside its section), and
 // the number it counts; undefined where the Log has no such line.
 const MORE_LINE = /^\+(\d+) more$/
 const logMoreLine = (tree: Node): Node | undefined =>
@@ -485,8 +468,8 @@ const FULL: PaneData = {
   motion: 'full',
 }
 // The sections in the order they are drawn, by id and by title.
-const SECTIONS = ['usage', 'turn', 'agents', 'mcp', 'sources', 'log'] as const
-const TITLES = ['Usage', 'Turn stats', 'Subagents', 'MCP', 'Context sources', 'Log']
+const SECTIONS = ['usage', 'turn', 'activity', 'mcp', 'sources', 'log'] as const
+const TITLES = ['Usage', 'Turn stats', 'Activity', 'MCP', 'Context sources', 'Log']
 
 // The two kinds of cell of a row (spec §2.3): a FIXED one holds its size, a FLEX one gives way first and clips.
 const isFixed = (box: Node | undefined): boolean => box?.props?.flexShrink === 0
@@ -567,11 +550,11 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
     expect(images.length > 0, surface).toBe(surface === 'desktop')
     // The sections come in the mockup's order, all unfolded, each with its summary beside it.
     expect(await headers(ui)).toEqual([
-      '▾ Usage', '▾ Turn stats', '▾ Subagents', '▾ MCP', '▾ Context sources', '▾ Log',
+      '▾ Usage', '▾ Turn stats', '▾ Activity', '▾ MCP', '▾ Context sources', '▾ Log',
     ])
     const buttons = await ui.findAll({ type: 'Button' })
     expect(buttons.map(button => button.key)).toEqual([
-      'toggle:usage', 'toggle:turn', 'details:turn', 'toggle:agents', 'toggle:mcp', 'toggle:sources', 'toggle:log',
+      'toggle:usage', 'toggle:turn', 'details:turn', 'toggle:activity', 'toggle:mcp', 'toggle:sources', 'toggle:log',
     ])
     // The chevron is a plain Button, dim at rest, and so is the details Button. The title is a Text, and the only bold
     // ones are the titles.
@@ -581,7 +564,7 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
     ])
     // The Log counts the five events the seed makes: a prompt, a Bash call, two spawns and the end of one subagent.
     expect(await summaries(ui), surface).toStrictEqual({
-      usage: '5-hour 3%', turn: '~120 tok/s', agents: '1/2', mcp: '2', sources: '52 skills · 2 MCP', log: '5',
+      usage: '5-hour 3%', turn: '~120 tok/s', activity: '1/2', mcp: '2', sources: '52 skills · 2 MCP', log: '5',
     })
     // Usage: both windows, with their countdowns.
     for (const text of ['5-hour', 'Weekly', '3%', '24%', '↻ 2h 13m', '↻ 5d 15h']) {
@@ -600,14 +583,21 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
       expect(await ui.find({ type: 'Text', text }), `${surface}: ${text}`).toBeDefined()
     }
     expect((await ui.find({ type: 'Text', text: '99%' }))?.props.color, `${surface} cache`).toBe('success')
-    // Subagents: the running one first, then the finished one; the type loses its plugin prefix.
-    expect((await ui.findAll({ type: 'Text', text: /^@/ })).map(el => el.text)).toEqual([
-      '@code-reviewer', '@engineer',
+    // Activity: main's lane, then the running subagent, then the finished one, their labels cut to the 12 cells of 40
+    // columns, too few for the tag. The desktop's alts carry the tag, which loses its plugin prefix, and main's cost.
+    const lanes = textsOf(sectionOf(await ui.drawn(), 'activity'))
+    expect(lanes.filter(text => /^(main|Revert stoc…|Fix cart to…)$/.test(text))).toEqual([
+      'main', 'Revert stoc…', 'Fix cart to…',
     ])
-    expect(
-      (await ui.findAll({ type: 'Text', text: /^(Revert stockUnits|Fix cart total qty)$/ })).map(el => el.text),
-    ).toEqual(['Revert stockUnits', 'Fix cart total qty'])
-    for (const text of ['$0.030', '$0.020']) {
+    expect(await ui.find({ type: 'Text', text: /^@/ }), surface).toBeUndefined()
+    if (isDesktop) {
+      expect((await ui.findAll({ type: 'Svg' })).map(el => String(el.props.alt)).filter(alt => alt.includes(', $')))
+        .toEqual([
+          'main, done, $5.44', 'Revert stockUnits (@code-reviewer), running, $0.030',
+          'Fix cart total qty (@engineer), done, $0.020',
+        ])
+    }
+    for (const text of [/^ *\$0\.030$/, /^ *\$0\.020$/]) {
       expect(await has(ui, text), `${surface}: ${text}`).toBe(true)
     }
     // MCP and Context sources: every server is a green dot and a name in the plain colour; the app's own servers are
@@ -655,7 +645,7 @@ test('a chevron folds its section, the store keeps the map, a second press unfol
   const bodies: [id: string, title: string, text: string | RegExp][] = [
     ['usage', 'Usage', 'Weekly'],
     ['turn', 'Turn stats', 'Tools'],
-    ['agents', 'Subagents', /^Revert stockUnits$/],
+    ['activity', 'Activity', /^Revert stoc…$/],
     ['mcp', 'MCP', 'codebase-memory'],
     ['sources', 'Context sources', 'Skills'],
     ['log', 'Log', 'fix the stock order qty'],
@@ -695,7 +685,7 @@ test('the folded sections of the last session stay folded: the map comes from th
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
     expect(await headers(ui)).toEqual([
-      '▾ Usage', '▸ Turn stats', '▾ Subagents', '▾ MCP', '▾ Context sources', '▸ Log',
+      '▾ Usage', '▸ Turn stats', '▾ Activity', '▾ MCP', '▾ Context sources', '▸ Log',
     ])
     expect(await has(ui, 'Whole turn')).toBe(false)
     expect(await has(ui, 'Tools')).toBe(false) // the legend, which an open Turn stats shows with its details closed
@@ -719,7 +709,7 @@ test('with no rate limits (a third-party provider) there is no Usage section', S
     expect(await has(ui, 'Usage')).toBe(false)
     expect(await has(ui, '5-hour')).toBe(false)
     // The rest of the pane carries on.
-    expect(await headers(ui)).toEqual(['▾ Turn stats', '▾ Subagents', '▾ MCP', '▾ Context sources', '▾ Log'])
+    expect(await headers(ui)).toEqual(['▾ Turn stats', '▾ Activity', '▾ MCP', '▾ Context sources', '▾ Log'])
     // Without a five-hour window the summary is the first window there is, and a window with no reset has no countdown.
     await measure($, 128_000, [{ kind: 'seven_day', percentUsed: 24 }])
     expect((await summaries(ui)).usage, `${surface} one window`).toBe('Weekly 24%')
@@ -956,7 +946,7 @@ test('a turn of one tool step hides Response and Steps; the cache is green from 
   }
 })
 
-test('the subagent list shows 8 rows, the running ones first and the newest first, and counts the rest', SLOW,
+test('Activity shows main and 7 lanes, the running ones first and the older start first, and counts the rest', SLOW,
   async ($, on) => {
     const clock = mock.clock(on, { now: NOW })
     bottom(on, clock)
@@ -972,22 +962,23 @@ test('the subagent list shows 8 rows, the running ones first and the newest firs
     for (const surface of SURFACES) {
       const ui = await mountPane($, surface)
       const tasks = (await ui.findAll({ type: 'Text', text: /^task \d$/ })).map(el => el.text)
-      expect(tasks, surface).toEqual(['task 8', 'task 7', 'task 6', 'task 5', 'task 4', 'task 3', 'task 2', 'task 1'])
-      const more = flat(await ui.drawn()).find(({ node }) => textsOf(node)[0] === '+2 more' && node.type === 'Box')
-      // The count lines up with the names: past the status mark and the gap, 3 cells on the desktop, 2 on the terminal.
-      expect(more?.node.props?.paddingLeft, surface).toBe(surface === 'desktop' ? 3 : 2)
-      expect(await ui.find({ type: 'Text', text: '+2 more' }), surface).toBeDefined()
-      expect((await summaries(ui)).agents, surface).toBe('9/10')
-      // No request has been charged to any of them: a dash where the cost goes, on each of the 8 rows. (The terminal
-      // band's core line has a dash of its own, for the model: the dashes are counted in the section.)
-      const dashes = flat(sectionOf(await ui.drawn(), 'agents')).filter(({ node }) =>
-        node.type === 'Text' && textsOf(node)[0] === '—')
-      expect(dashes, surface).toHaveLength(8)
+      expect(tasks, surface).toEqual(['task 0', 'task 1', 'task 2', 'task 3', 'task 4', 'task 5', 'task 6'])
+      // The other 3 are counted in a dim line at column 0, the last of the section.
+      const section = sectionOf(await ui.drawn(), 'activity')
+      const more = childrenOf(childrenOf(section)[2]).at(-1)
+      expect(textsOf(more), surface).toEqual(['+3 more'])
+      expect(more?.props?.paddingLeft, surface).toBeUndefined()
+      expect((await ui.find({ type: 'Text', text: '+3 more' }))?.props.dimColor, surface).toBe(true)
+      expect((await summaries(ui)).activity, surface).toBe('9/10')
+      // No request has been charged to any of them: a dim dash where the cost goes, on each of the 7 lanes; main's lane
+      // has the cost of the session. (The terminal's value is a span of 8 cells, the dash at its right.)
+      const dashes = flat(section).filter(({ node }) => node.type === 'Text' && /^ *—$/.test(textsOf(node)[0] ?? ''))
+      expect(dashes.map(({ node }) => node.props?.dimColor), surface).toEqual(Array(7).fill(true))
       await ui.unmount()
     }
   })
 
-test('a subagent shows its status as a shape and a colour: ✗ for failed, a dim ■ for stopped, ◐ in blue for running',
+test('a subagent lane shows its status as a shape and a colour: ✗ for failed, a dim ■ for stopped, a live cap running',
   SLOW, async ($, on) => {
     const clock = mock.clock(on, { now: NOW })
     bottom(on, clock)
@@ -999,28 +990,34 @@ test('a subagent shows its status as a shape and a colour: ✗ for failed, a dim
 
     for (const surface of SURFACES) {
       const ui = await mountPane($, surface)
-      // Running first (a4), then the newest start first; the four were spawned in one tick, so by order of spawn.
+      const section = sectionOf(await ui.drawn(), 'activity')
+      // Running first (a4), then the newer end first; the three ended in one tick, so in the order of spawn.
       if (surface === 'terminal') {
-        const marks = await ui.findAll({ type: 'Text', text: GLYPH })
-        expect(marks.map(el => [el.text, el.props.color, el.props.dimColor]), surface).toEqual([
-          ['◐', '#2f7de1', undefined],
+        // The gutter's `◐` ends the running lane's span, in the Agents hue; the house marks follow the ended spans.
+        const marks = flat(section).flatMap(({ node }) => {
+          const text = node.type === 'Text' ? textsOf(node)[0] ?? '' : ''
+          return /[◐✓✗■○]$/.test(text) ? [[text.slice(-1), node.props?.color, node.props?.dimColor]] : []
+        })
+        expect(marks, surface).toEqual([
+          ['◐', STATION_HUES.agents.dark, undefined],
           ['✓', 'success', undefined],
           ['✗', 'error', undefined],
           ['■', undefined, true],
         ])
-        // Each mark has a cell of its own, so the descriptions start at the same place whatever the glyph.
-        expect(await markCells(ui), surface).toEqual([['◐', 1], ['✓', 1], ['✗', 1], ['■', 1]])
       } else {
-        // An icon in a slot of 2 cells; its alt is the status, since the icon is the only place that says it.
-        expect(await markCells(ui), surface).toEqual([['running', 2], ['done', 2], ['failed', 2], ['stopped', 2]])
-        // Each is drawn in its own colour (blue, green, red, grey) and they differ in shape too: with the colours
-        // taken out, no two are alike.
-        const sources = (await ui.findAll({ type: 'Svg' }))
-          .filter(el => STATUSES.includes(String(el.props.alt)))
-          .map(el => String(el.props.source))
-        const colours = ['#2f7de1', '#2ea043', '#e5484d', '#8a8a8a']
-        sources.forEach((source, i) => expect(source, STATUSES[i]).toContain(`stroke="${colours[i]}"`))
-        expect(new Set(sources.map(source => source.replace(/#[0-9a-f]{6}/g, '#'))).size).toBe(4)
+        // The lane's alt says its status; its image draws it as a shape in a colour: the live cap, a green check, a red
+        // cross and a grey square.
+        const lanes = flat(section).map(({ node }) => node)
+          .filter(node => node.type === 'Svg' && /^task \d /.test(String(node.props?.alt)))
+        expect(lanes.map(node => String(node.props?.alt).split(', ')[1]), surface).toEqual([
+          'running', 'done', 'failed', 'stopped',
+        ])
+        const sources = lanes.map(node => String(node.props?.source))
+        expect(sources[0], 'running').toContain('data-part="cap"')
+        expect(sources[1], 'done').toContain('stroke="#2ea043"')
+        expect(sources[2], 'failed').toContain('stroke="#e5484d"')
+        expect(sources[3], 'stopped').toContain('width="5" height="5" rx="1" fill="#8a8a8a"')
+        expect(sources.slice(1).every(source => !source.includes('data-part="cap"')), surface).toBe(true)
       }
       await ui.unmount()
     }
@@ -1028,12 +1025,13 @@ test('a subagent shows its status as a shape and a colour: ✗ for failed, a dim
 
 // A body that leaves the Log room for 20 of the 22 events below. Above the Log the mounted pane has the Session card
 // (the Session row and the band: at the 40 columns of the mount the band is 5 rows on the desktop, and the core line
-// and 3 grid rows on the terminal), Turn stats (5: the last start leaves a turn running, drawn as the ribbon) and the
-// one subagent (3), and the Log's rule and header are 2 more: 16 rows on the desktop, 15 on the terminal. The 21 rows
-// that are left are 20 lines and the line that counts the other 2.
+// and 3 grid rows on the terminal), Turn stats (5: the last start leaves a turn running, drawn as the ribbon) and
+// Activity (5: its rule and header, main's lane and the one subagent's, and the axis), and the Log's rule and header
+// are 2 more: 18 rows on the desktop, 17 on the terminal. The 21 rows that are left are 20 lines and the line that
+// counts the other 2.
 const BODY_FOR_20_LINES: Record<Surface, RenderPropsOf['Pane']> = {
-  desktop: { ...PANE_PROPS, scroll: { offset: 0, bodyRows: 37 } },
-  terminal: { ...PANE_PROPS, scroll: { offset: 0, bodyRows: 36 } },
+  desktop: { ...PANE_PROPS, scroll: { offset: 0, bodyRows: 39 } },
+  terminal: { ...PANE_PROPS, scroll: { offset: 0, bodyRows: 38 } },
 }
 
 test('the log shows 20 lines, newest first, an error in red, and a long text cut to one line', SLOW, async ($, on) => {
@@ -1232,24 +1230,10 @@ const isType = (text: string): boolean => text.startsWith('@')
 // The Text that shows exactly this string, with the element that holds it.
 const textNode = (tree: unknown, text: string): Placed | undefined =>
   flat(tree).find(({ node }) => node.type === 'Text' && textsOf(node)[0] === text)
-// The rows of a list with a status mark: a mark, the group of the description and the `@…` (the description alone where
-// the pane is too narrow for it), the value at the right edge, `valueCells` wide. The column that holds the rows is no
-// row, though it has three children when there are three rows. A subagent's value is its cost, 7 cells, and a task's
-// its time, 8: the width tells the two lists apart.
-const listRows = (tree: unknown, valueCells: number): Node[] =>
-  flat(tree)
-    .map(({ node }) => node)
-    .filter(node => {
-      const [, group, value] = childrenOf(node)
-
-      return isRow(node) && childrenOf(node).length === 3 && group?.props?.flexGrow === 1 &&
-        group.props.columnGap === 1 && value?.props?.width === valueCells && value.props.justifyContent === 'flex-end'
-    })
-const agentRows = (tree: unknown): Node[] => listRows(tree, 7)
-const taskRows = (tree: unknown): Node[] => listRows(tree, 8)
-// The rules: on the desktop the image whose alt is `rule`, on the terminal a row of ─.
-const isRuleNode = (node: Node): boolean =>
-  (node.type === 'Svg' && node.props?.alt === 'rule') || (node.type === 'Text' && /^─+$/.test(textsOf(node)[0] ?? ''))
+// The rules: on the desktop the image whose alt is `rule`, on the terminal a dim row of ─ (an Activity lane's ─ is in
+// its hue).
+const isRuleNode = (node: Node): boolean => (node.type === 'Svg' && node.props?.alt === 'rule') ||
+  (node.type === 'Text' && node.props?.dimColor === true && /^─+$/.test(textsOf(node)[0] ?? ''))
 const ruleCount = (tree: unknown): number => flat(tree).filter(({ node }) => isRuleNode(node)).length
 // The rules of a terminal body with no columns: a dim Text cut to the pane, with no `─` in it.
 const emptyRules = (tree: unknown): Node[] =>
@@ -1319,32 +1303,41 @@ test('the texts that can overrun a row carry the truncation props; the values ne
       .filter(({ node }) => node.type === 'Text' && node.props?.wrap === 'truncate')
       .map(({ node }) => textsOf(node)[0])
     const isDesktop = surface === 'desktop'
-    // A summary, the cost split, the project, its branch and the label of its changes, a description, the type of an
-    // agent, a server, a log line and its `who`, a countdown, a label.
+    // A summary, the cost split, the project, its branch and the label of its changes, a server, a log line and its
+    // `who`, a countdown, a label.
     for (const text of [
       '5-hour 3%', 'Session $126.09 · Subagents $22.50', PROJECT, isDesktop ? BRANCH : `🌿 ${BRANCH}`,
-      isDesktop ? '12 files changed' : '📝 12 files changed', 'task 9', '@code-reviewer', 'Claude_Browser', LONG_TEXT,
-      'minimal-change', '↻ 2h 13m', 'Response', 'Spend',
+      isDesktop ? '12 files changed' : '📝 12 files changed', 'Claude_Browser', LONG_TEXT, 'minimal-change',
+      '↻ 2h 13m', 'Response', 'Spend',
     ]) {
       expect(cut, `${surface}: ${text}`).toContain(text)
     }
     // A figure, a percent (the terminal band's among them), a cost, the lines of the changes, a title and the legend's
     // labels are not cut.
     for (const text of [
-      '$148.59', ...(isDesktop ? [] : ['88%']), '120%', '1m 18s', '$2.50', '+1204', SEP, `${MINUS}387`, 'Usage',
+      '$148.59', ...(isDesktop ? [] : ['88%']), '120%', '1m 18s', isDesktop ? '$2.50' : '   $2.50', '+1204', SEP,
+      `${MINUS}387`, 'Usage',
       'Session', 'Project', 'Model', 'Tools',
     ]) {
       const placed = textNode(tree, text)
       expect(placed, `${surface}: ${text}`).toBeDefined()
       expect(placed?.node.props?.wrap, `${surface}: ${text}`).toBeUndefined()
     }
-    // A long type is cut to 14 characters by shortType, with an ellipsis; the column is as wide as the longest type, so
-    // its own cut is for a cell that a pane makes narrower than that.
-    const types = flat(tree).filter(({ node }) => node.type === 'Text' && isType(textsOf(node)[0] ?? ''))
-    const typeTexts = types.map(({ node }) => textsOf(node)[0] ?? '')
-    expect(typeTexts, surface).toContain('@minimal-chang…')
-    expect(typeTexts.every(text => text.length <= 1 + 14), surface).toBe(true)
-    expect(types.every(({ node }) => node.props?.wrap === 'truncate'), surface).toBe(true)
+    // A lane's label is cut to its column (13 cells at 45 columns) with an ellipsis before it is drawn: it carries no
+    // truncation, and neither does the value beside it.
+    const label = textNode(tree, 'Map the orde…')
+    expect(label, surface).toBeDefined()
+    expect(label?.node.props?.wrap, surface).toBeUndefined()
+    // The type tag shows from a label column of 24 cells (80 columns), dim and cut by shortType, not by the layout.
+    const tagsAt = (bodyColumns: number): Node[] => flat(draw(onSurface(FULL, surface), bodyColumns))
+      .map(({ node }) => node)
+      .filter(node => node.type === 'Text' && isType((textsOf(node)[0] ?? '').replace(/^[\s\u{a0}]+/u, '')))
+    expect(tagsAt(79), surface).toEqual([])
+    const tags = tagsAt(80)
+    expect(tags.map(node => (textsOf(node)[0] ?? '').trim()), surface).toEqual([
+      '@code-reviewer', '@minimal-chang…', ...Array(5).fill('@code-reviewer'),
+    ])
+    expect(tags.every(node => node.props?.dimColor === true && node.props.wrap === undefined), surface).toBe(true)
   }
 })
 
@@ -1375,12 +1368,18 @@ test('value columns hold their width and align right, so the figures line up on 
     expect(percents.every(isRightAligned), `${surface} limit percents`).toBe(true)
     expect(new Set(percents.map(widthOf)).size, `${surface} limit percents`).toBe(1)
     expect(widthOf(percents[0])).toBeGreaterThanOrEqual('100%'.length)
-    // The costs of the subagents: eight rows, one width, wide enough for $148.59, each at the right edge.
-    const costs = agentRows(tree).map(row => childrenOf(row)[2])
-    expect(costs, surface).toHaveLength(8)
-    expect(costs.every(isRightAligned), `${surface} costs`).toBe(true)
-    expect(new Set(costs.map(widthOf)).size, `${surface} costs`).toBe(1)
-    expect(widthOf(costs[0])).toBeGreaterThanOrEqual('$148.59'.length)
+    // The values of the eight lanes: on the desktop a cell at the right edge, one width, wide enough for `$148.59+`; on
+    // the terminal the last span of each line, right-aligned in 8 cells.
+    const lanes = activityBody(tree).slice(0, 8)
+    if (surface === 'desktop') {
+      const costs = lanes.map(row => childrenOf(row)[2])
+      expect(costs.every(isRightAligned), `${surface} costs`).toBe(true)
+      expect(new Set(costs.map(widthOf)), `${surface} costs`).toEqual(new Set([8]))
+    } else {
+      expect(lanes.map(line => spanTexts(line).at(-1)), `${surface} costs`).toEqual([
+        ' $126.09', '   $2.50', '       —', ...Array(5).fill('   $2.50'),
+      ])
+    }
     // The label/value rows (Turn stats and Context sources): the label gives way, the value holds its size.
     const rows = flat(tree).filter(({ node }) => node.props?.justifyContent === 'space-between')
     const valueRows = rows.filter(({ node }) => {
@@ -1391,9 +1390,8 @@ test('value columns hold their width and align right, so the figures line up on 
   }
 })
 
-// Three subagents for the type column. The descriptions differ in length: a short one, one in between, and one wider
-// than any pane. The types are three lengths: `@code-reviewer` is 14 cells, `@ui-designer` 12, and `@frontend-deve…`
-// (cut by shortType) 15. The running one is drawn first, then the newest start.
+// Three subagents. The descriptions differ in length: a short one, one in between, and one wider than any pane. The
+// types are three lengths: `@code-reviewer` is 14 cells, `@ui-designer` 12, and `@frontend-deve…` (shortType's cut) 15.
 const WIDE = 'Map every call of the order flow and its tests '.repeat(8)
 const TYPED: AgentRow[] = [
   agent(1, 'running', { description: 'Fix', type: 'code-reviewer' }),
@@ -1402,137 +1400,41 @@ const TYPED: AgentRow[] = [
 ]
 const withAgents = (rows: AgentRow[], surface: Surface): PaneData =>
   onSurface({ ...EMPTY, agents: Object.fromEntries(rows.map(row => [row.id, row])) }, surface)
-// The two cells of a subagent row's group: the description and the type.
-const groupOf = (row: Node | undefined): Node[] => childrenOf(childrenOf(row)[1])
 
-test('a subagent row gives `@type` a column of its own, one width on every row; the description takes the rest', () => {
-  for (const surface of SURFACES) {
-    const rows = agentRows(draw(withAgents(TYPED, surface)))
-    expect(rows, surface).toHaveLength(3)
-    const textsAt = (at: number): Array<string | undefined> => rows.map(row => textsOf(groupOf(row)[at])[0])
-    expect(textsAt(0), surface).toEqual(['Fix', 'Review the change', WIDE])
-    expect(textsAt(1), surface).toEqual(['@code-reviewer', '@frontend-deve…', '@ui-designer'])
-
-    for (const row of rows) {
-      const [, group, cost] = childrenOf(row)
-      const [description, type] = groupOf(row)
-      // The group takes the room the mark and the cost leave, and clips what does not fit it.
-      expect(childrenOf(group), surface).toHaveLength(2)
-      expect(group?.props, surface).toMatchObject({
-        flexDirection: 'row', flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden', columnGap: 1,
-      })
-      // The description takes all the room the type leaves, and gives way down to nothing before the type does. Its
-      // text starts at the left of the cell (no `justifyContent`): a right-aligned one would sit against the type.
-      expect(description?.props, surface).toMatchObject({
-        flexDirection: 'row', flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden',
-      })
-      expect(description?.props?.justifyContent, surface).toBeUndefined()
-      expect(childrenOf(description).map(text => text.props?.wrap), surface).toEqual(['truncate'])
-      // The type holds its width, from the left of its cell, and its text is cut inside the cell.
-      expect(type?.props, surface).toMatchObject({ flexDirection: 'row', flexShrink: 0, overflow: 'hidden' })
-      expect(type?.props?.justifyContent, surface).toBeUndefined()
-      expect(childrenOf(type).map(text => [text.props?.dimColor, text.props?.wrap]), surface).toEqual([
-        [true, 'truncate'],
-      ])
-      // The cost keeps its column at the right edge.
-      expect(cost?.props, surface).toMatchObject({ width: 7, flexShrink: 0, justifyContent: 'flex-end' })
-    }
-    // One width for the three rows: a width of its own on the desktop, on the terminal the longest `@type` drawn.
-    const longest = Math.max(...textsAt(1).map(type => type?.length ?? 0))
-    expect(longest, surface).toBe(15)
-    expect(rows.map(row => groupOf(row)[1]?.props?.width), surface).toEqual(
-      Array(3).fill(surface === 'desktop' ? 15 : longest),
-    )
-  }
-})
-
-test('the terminal\'s type column is as wide as the longest `@type` drawn, up to 15; the desktop\'s is its own', () => {
-  const set = (...types: string[]): AgentRow[] => types.map((type, i) => agent(i + 1, 'done', { type }))
-  const widths = (rows: AgentRow[], surface: Surface): unknown[] =>
-    agentRows(draw(withAgents(rows, surface))).map(row => groupOf(row)[1]?.props?.width)
-
-  // `@ui-designer` is 12 cells and the longest of its set. `@frontend-deve…` is 15: the `@` and the 14 shortType keeps.
-  expect(widths(set('tdd', 'ui-designer'), 'terminal')).toEqual([12, 12])
-  expect(widths(set('tdd', 'ui-designer', 'frontend-developer'), 'terminal')).toEqual([15, 15, 15])
-  expect(widths(set('tdd'), 'terminal')).toEqual([4])
-  // The plugin prefix is not drawn, so it does not count: `@minimal-change`, 14 characters and the `@`, is 15.
-  expect(widths(set('claude-mods:minimal-change'), 'terminal')).toEqual([15])
-  // Only the rows that are drawn count: the ninth, which is left to `+1 more`, does not widen the column.
-  const nine = [
-    agent(1, 'done', { type: 'frontend-developer' }),
-    ...[2, 3, 4, 5, 6, 7, 8, 9].map(n => agent(n, 'running', { type: 'ui-designer' })),
-  ]
-  expect(widths(nine, 'terminal')).toEqual(Array(8).fill(12))
-  // The desktop's column is one width whatever the types are.
-  for (const types of [['tdd'], ['ui-designer'], ['frontend-developer']]) {
-    expect(widths(set(...types), 'desktop'), types.join()).toEqual([15])
-  }
-})
-
-test('the subagent rows outgrow no pane, at the narrowest and the widest body the tests use', () => {
+test('the lanes outgrow no pane, at the narrowest and the widest body the tests use', () => {
   for (const surface of SURFACES) {
     for (const bodyColumns of [8, 120]) {
       const where = `${surface} ${bodyColumns}`
       const tree = draw(withAgents(TYPED, surface), bodyColumns)
-      const rows = agentRows(tree)
-      expect(rows, where).toHaveLength(3)
+      // Main's lane and the three, then the axis.
+      expect(activityBody(tree), where).toHaveLength(5)
       expect(rowProblems(tree), where).toEqual([])
-      for (const row of rows) expect(rowProblems(row), where).toEqual([])
     }
-    // The check sees the type cell: with its width taken off, the cut text has no sized cell to sit in.
-    const [row] = agentRows(draw(withAgents(TYPED, surface)))
-    const type = groupOf(row)[1]
-    if (type !== undefined) type.props = { ...type.props, width: undefined }
-    const problems = rowProblems(row)
-    expect(problems, surface).toHaveLength(1)
-    expect(problems[0], surface).toContain('cut text')
   }
+  // The check sees the label cell: one that does not hold its size is neither fixed nor flexible. Desktop only: a
+  // terminal lane is one spanLine, with no label cell to break.
+  const [lane] = activityBody(draw(withAgents(TYPED, 'desktop')))
+  const label = childrenOf(lane)[0]
+  if (label !== undefined) label.props = { ...label.props, flexShrink: undefined }
+  const problems = rowProblems(lane)
+  expect(problems).toHaveLength(1)
+  expect(problems[0]).toContain('neither fixed nor flexible')
 })
 
-// The narrowest body that keeps the type column of a subagent row, by surface and subagents. The description keeps
-// the body less the mark (2 cells on the desktop, 1 on the terminal), the type, the cost (7) and 3 gaps (two in the
-// row, one in its group), and the type gives way under 12 cells of description. The desktop's type is 15 cells whatever
-// the types are: 2 + 15 + 7 + 3 + 12 = 39. The terminal's is the longest `@type` drawn: `@frontend-deve…` is 15, so
-// 1 + 15 + 7 + 3 + 12 = 38, and `@tdd` is 4, so 1 + 4 + 7 + 3 + 12 = 27.
-const TDD = [agent(1, 'done', { type: 'tdd', description: WIDE })]
-const TYPE_FROM: [surface: Surface, rows: AgentRow[], typeCells: number, bodyColumns: number][] = [
-  ['desktop', TYPED, 15, 39], ['desktop', TDD, 15, 39], ['terminal', TYPED, 15, 38], ['terminal', TDD, 4, 27],
-]
-
-test('a subagent row keeps its `@type` while the description keeps 12 cells beside it, and drops it below that', () => {
-  for (const [surface, set, typeCells, from] of TYPE_FROM) {
-    // The narrowest body the tests use, one column short of the edge, the edge itself, and a wide one.
-    for (const bodyColumns of [8, from - 1, from, 120]) {
-      const where = `${surface} ${set.length} subagents ${bodyColumns} columns, from ${from}`
-      const tree = draw(withAgents(set, surface), bodyColumns)
-      const hasType = bodyColumns >= from
-      expect(agentRows(tree), where).toHaveLength(set.length)
-      expect(rowProblems(tree), where).toEqual([])
-      for (const row of agentRows(tree)) {
-        expect(rowProblems(row), where).toEqual([])
-        // The cells of the row, and of its group, are one cell apart; the mark is the cell it was.
-        const [mark, group] = childrenOf(row)
-        expect(row.props?.columnGap, where).toBe(1)
-        expect(mark?.props?.width, where).toBe(surface === 'desktop' ? 2 : 1)
-        expect(group?.props, where).toMatchObject({
-          flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden', columnGap: 1,
-        })
-        // The type is the second cell of the group, in every row or in none; without it the description is the group.
-        const [description, type] = childrenOf(group)
-        expect(childrenOf(group), where).toHaveLength(hasType ? 2 : 1)
-        expect(description?.props, where).toMatchObject({ flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden' })
-        expect(childrenOf(description).map(text => text.props?.wrap), where).toEqual(['truncate'])
-        expect(type?.props?.width, where).toBe(hasType ? typeCells : undefined)
-        expect(textsOf(row).some(isType), where).toBe(hasType)
-      }
-    }
-  }
-  // The line that counts the rest does not move: the ninth subagent is `+1 more`, in a pane with no type column.
-  const nine = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => agent(n, 'running', { type: 'ui-designer' }))
+test('a lane keeps its `@type` from a label column of 24 cells (80 columns), and drops it below that', () => {
   for (const surface of SURFACES) {
+    for (const bodyColumns of [8, 79, 80, 120]) {
+      const where = `${surface} ${bodyColumns} columns`
+      const tree = draw(withAgents(TYPED, surface), bodyColumns)
+      expect(rowProblems(tree), where).toEqual([])
+      const tags = textsOf(activityOf(tree)).map(text => text.trim()).filter(isType)
+      expect(tags, where).toEqual(bodyColumns >= 80 ? ['@code-reviewer', '@ui-designer', '@frontend-deve…'] : [])
+    }
+    // The line that counts the rest does not move: of nine subagents seven have a lane, and `+2 more` is at column 0.
+    const nine = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => agent(n, 'running', { type: 'ui-designer' }))
     const tree = draw(withAgents(nine, surface), 8)
-    expect(agentRows(tree), surface).toHaveLength(8)
-    expect(textNode(tree, '+1 more')?.parent?.props?.paddingLeft, surface).toBe(surface === 'desktop' ? 3 : 2)
+    expect(textNode(tree, '+2 more')?.parent?.props?.paddingLeft, surface).toBeUndefined()
+    expect(childrenOf(textNode(tree, '+2 more')?.parent), surface).toHaveLength(1)
   }
 })
 
@@ -1925,11 +1827,11 @@ const logBody = (surface: Surface, rows: number): number => ABOVE_LOG[surface][4
 
 test('the Log is a rule, a header, a head of 8, a tail and a `+N more`, children of a root as tall as the body', () => {
   for (const surface of SURFACES) {
-    // The blocks above the Log take 42 rows on the desktop and 40 on the terminal (45 columns, FULL: the band is 5 rows
-    // there, and the core line and 2 grid rows here; Turn stats is its ribbon, its legend and its closed details), and
-    // its rule and header 2: a body of 66 rows, or 64, leaves 22 rows, 21 lines and the line that counts the other 116
-    // of the 137 events.
-    const [above, bodyRows] = surface === 'desktop' ? [42, 66] : [40, 64]
+    // The blocks above the Log take 43 rows on the desktop and 41 on the terminal (45 columns, FULL: the band is 5 rows
+    // there, and the core line and 2 grid rows here; Turn stats is its ribbon, its legend and its closed details;
+    // Activity is 12), and its rule and header 2: a body of 67 rows, or 65, leaves 22 rows, 21 lines and the line that
+    // counts the other 116 of the 137 events.
+    const [above, bodyRows] = surface === 'desktop' ? [43, 67] : [41, 65]
     const tree = draw(onSurface({ ...FULL, log: logLines(60) }, surface), 45, bodyRows)
     expect(rowsAbove(tree, 45, surface), surface).toBe(above)
     // The root is at least as tall as the body, and has no height of its own.
@@ -2078,7 +1980,7 @@ test('a folded Log is its rule and its header, and a Log with no lines is nothin
     // 137 is no reason to draw a Log with nothing in it, or a line that counts the rest.
     for (const collapsed of [{}, { log: true }] as Array<Record<string, boolean>>) {
       const empty = draw(onSurface({ ...FULL, log: [], collapsed }, surface), 45, 40)
-      expect(headerRows(empty).map(row => row.id), surface).toEqual(['usage', 'turn', 'agents', 'mcp', 'sources'])
+      expect(headerRows(empty).map(row => row.id), surface).toEqual(['usage', 'turn', 'activity', 'mcp', 'sources'])
       expect(childrenOf(empty), surface).toHaveLength(1 + 1 + 5) // the top block, the Project block, five sections
       expect(ruleCount(empty), surface).toBe(6)
       expect(moreOf(empty), surface).toBeUndefined()
@@ -2183,14 +2085,16 @@ test('the rows of the head and of the tail outgrow no pane, at the narrowest and
 // the chips are one row at 32 columns and two at 31. The Log of it holds 60 lines of 137 events.
 //   Session card 7 (the Session row, the band's 5, the cost split; 6 on the terminal, whose band is 4 rows), Project 4
 //   (rule, title, branch, changes), Usage 6 (rule, header, 4 limits), Turn stats 5 (rule, header, the ribbon, its
-//   legend, the closed details; 10 figures more with them open), Subagents 11 (rule, header, 8 subagents, `+2 more`),
-//   MCP 3 (rule, header, the chips), Context sources 4 (rule, header, 2 figures): 40, 39 on the terminal.
+//   legend, the closed details; 10 figures more with them open), Activity 12 (rule, header, main's lane and 7 more,
+//   the axis, `+3 more`), MCP 3 (rule, header, the chips), Context sources 4 (rule, header, 2 figures): 41, 40 on the
+//   terminal.
 const SHORT_MCP = { servers: [{ name: 'codebase-memory' }, { name: 'issue-hub' }] }
 const SURROUNDED: PaneData = { ...FULL, mcp: SHORT_MCP, log: logLines(60) }
 const agentsOf = (rows: AgentRow[]): PaneData['agents'] => Object.fromEntries(rows.map(row => [row.id, row]))
 const tasksOf = (rows: TaskRow[]): PaneData['tasks'] => Object.fromEntries(rows.map(row => [row.id, row]))
-// Ten tasks, b1 the newest and b10 the oldest, and b3 and b5 run. Drawn: b3 and b5, which run, then the others newest
-// first, 8 rows in all: b1, b2, b4, b6, b7 and b8. The rows of b9 and b10 are counted in `+2 more`.
+// Ten tasks, b1 the newest and b10 the oldest, and b3 and b5 run. Drawn after main's lane: b5 and b3, which run, the
+// older start first, then the others, which all ended at one time, in their order: b1, b2, b4, b6 and b7. The lanes
+// of b8, b9 and b10 are counted in `+3 more`.
 const TEN: TaskRow[] = Array.from({ length: 10 }, (_, i) => task(i + 1, i === 2 || i === 4 ? 'running' : 'done'))
 // A task of each status, in the order they are drawn: the one that runs, then the others, newest start first.
 const EVERY_STATUS: TaskStatus[] = ['running', 'done', 'failed', 'stopped', 'ended']
@@ -2206,37 +2110,40 @@ type Surrounding = [
 // than 8) and the events counted (137 less the lines). At 31 and 32 columns the Session band is 5 rows on the desktop
 // and 4 on the terminal (the core line and 3 grid rows), so the terminal has a row less above the Log.
 const SURROUNDINGS: Surrounding[] = [
-  ['every block, a body of 40: not even 8 lines fit', {}, 32, 40, [40, 8, 129], [39, 8, 129]],
-  ['every block, a body of 60', {}, 32, 60, [40, 17, 120], [39, 18, 119]],
-  ['every block, a body of 70', {}, 32, 70, [40, 27, 110], [39, 28, 109]],
-  ['the MCP chips in two rows', {}, 31, 60, [41, 16, 121], [40, 17, 120]],
+  ['every block, a body of 40: not even 8 lines fit', {}, 32, 40, [41, 8, 129], [40, 8, 129]],
+  ['every block, a body of 60', {}, 32, 60, [41, 16, 121], [40, 17, 120]],
+  ['every block, a body of 70', {}, 32, 70, [41, 26, 111], [40, 27, 110]],
+  ['the MCP chips in two rows', {}, 31, 60, [42, 15, 122], [41, 16, 121]],
   [
-    'eight subagents, so no `+N more` of theirs', { agents: agentsOf(AGENTS.slice(0, 8)) }, 32, 60,
-    [39, 18, 119], [38, 19, 118],
+    'seven subagents, so no `+N more` of theirs', { agents: agentsOf(AGENTS.slice(0, 7)) }, 32, 60,
+    [40, 17, 120], [39, 18, 119],
   ],
-  ['three subagents', { agents: agentsOf(AGENTS.slice(0, 3)) }, 32, 60, [34, 23, 114], [33, 24, 113]],
+  ['three subagents', { agents: agentsOf(AGENTS.slice(0, 3)) }, 32, 60, [36, 21, 116], [35, 22, 115]],
   ['no subagents, and no cost split with them', { agents: {} }, 32, 60, [28, 29, 108], [27, 30, 107]],
-  // The Tasks block adds its rule, its header, its rows (8 at the most) and the line that counts the rest, to the 40
-  // (39 on the terminal).
-  ['one task: 3 rows more', { tasks: tasksOf(TEN.slice(0, 1)) }, 32, 70, [43, 24, 113], [42, 25, 112]],
-  ['three tasks: 5 rows more', { tasks: tasksOf(TEN.slice(0, 3)) }, 32, 70, [45, 22, 115], [44, 23, 114]],
-  ['ten tasks: 8 rows and `+2 more`, 11 rows more', { tasks: tasksOf(TEN) }, 32, 70, [51, 16, 121], [50, 17, 120]],
+  // With no subagents, the tasks alone make Activity: its rule, its header, main's lane, theirs (7 at the most), the
+  // axis and the line that counts the rest, to the 28 (27 on the terminal).
+  ['one task: 5 rows more', { agents: {}, tasks: tasksOf(TEN.slice(0, 1)) }, 32, 70, [33, 34, 103], [32, 35, 102]],
+  ['three tasks: 7 rows more', { agents: {}, tasks: tasksOf(TEN.slice(0, 3)) }, 32, 70, [35, 32, 105], [34, 33, 104]],
+  [
+    'ten tasks: 8 lanes, the axis and `+3 more`, 12 rows more', { agents: {}, tasks: tasksOf(TEN) }, 32, 70,
+    [40, 27, 110], [39, 28, 109],
+  ],
   [
     'ten tasks, folded: their rule and header, 2 rows more',
-    { tasks: tasksOf(TEN), collapsed: { tasks: true } }, 32, 70, [42, 25, 112], [41, 26, 111],
+    { agents: {}, tasks: tasksOf(TEN), collapsed: { activity: true } }, 32, 70, [30, 37, 100], [29, 38, 99],
   ],
-  ['no Usage', { usage: { ...FULL.usage, rateLimits: [] } }, 32, 60, [34, 23, 114], [33, 24, 113]],
-  ['no Project block', { project: { name: '', branch: null, changes: null } }, 32, 60, [36, 21, 116], [35, 22, 115]],
+  ['no Usage', { usage: { ...FULL.usage, rateLimits: [] } }, 32, 60, [35, 22, 115], [34, 23, 114]],
+  ['no Project block', { project: { name: '', branch: null, changes: null } }, 32, 60, [37, 20, 117], [36, 21, 116]],
   [
     'Turn stats with its details open: 10 rows more', { collapsed: { turnDetails: false } }, 32, 70,
-    [50, 17, 120], [49, 18, 119],
+    [51, 16, 121], [50, 17, 120],
   ],
-  ['no completed turn: a placeholder of one row', { lastTurn: null }, 32, 60, [38, 19, 118], [37, 20, 117]],
-  ['Turn stats folded: its rule and its header', { collapsed: { turn: true } }, 32, 60, [37, 20, 117], [36, 21, 116]],
+  ['no completed turn: a placeholder of one row', { lastTurn: null }, 32, 60, [39, 18, 119], [38, 19, 118]],
+  ['Turn stats folded: its rule and its header', { collapsed: { turn: true } }, 32, 60, [38, 19, 118], [37, 20, 117]],
   // The band keeps its rows with no reading: only its figures read —.
   [
     'no context reading: the band keeps its rows', { usage: { ...FULL.usage, contextPct: undefined } }, 32, 60,
-    [40, 17, 120], [39, 18, 119],
+    [41, 16, 121], [40, 17, 120],
   ],
   ['every section above the Log folded', { collapsed: FOLDED_ABOVE }, 32, 40, [21, 16, 121], [20, 17, 120]],
 ]
@@ -2264,17 +2171,17 @@ const CAPITAL_MCP = { servers: [{ name: 'GITHUB' }, { name: 'SLACK' }] }
 
 test('the chips of MCP are counted with the capital of the surface: a cell on the terminal, 1.5 on the desktop', () => {
   // [the columns, the surface, the rows above the Log, the lines it draws in a body of 60 rows, the events it counts]:
-  // the blocks above the Log are 40 rows on the desktop (the band is 5 rows) and 39 on the terminal (the core line and
+  // the blocks above the Log are 41 rows on the desktop (the band is 5 rows) and 40 on the terminal (the core line and
   // 3 grid rows) with the chips in one row (SURROUNDED), and a row more with them in two. The editor and the mobile
   // app draw the desktop's band; they are drawn where 1 and 1.5 differ, 24 and 19 columns, and count as the desktop
   // does.
   const cases = [
-    [25, 'terminal', 39, 18, 119], [25, 'desktop', 40, 17, 120],
-    [24, 'terminal', 39, 18, 119], [24, 'desktop', 41, 16, 121],
-    [24, 'vscode', 41, 16, 121], [24, 'mobile', 41, 16, 121],
-    [19, 'terminal', 39, 18, 119], [19, 'desktop', 41, 16, 121],
-    [19, 'vscode', 41, 16, 121], [19, 'mobile', 41, 16, 121],
-    [18, 'terminal', 40, 17, 120], [18, 'desktop', 41, 16, 121],
+    [25, 'terminal', 40, 17, 120], [25, 'desktop', 41, 16, 121],
+    [24, 'terminal', 40, 17, 120], [24, 'desktop', 42, 15, 122],
+    [24, 'vscode', 42, 15, 122], [24, 'mobile', 42, 15, 122],
+    [19, 'terminal', 40, 17, 120], [19, 'desktop', 42, 15, 122],
+    [19, 'vscode', 42, 15, 122], [19, 'mobile', 42, 15, 122],
+    [18, 'terminal', 41, 16, 121], [18, 'desktop', 42, 15, 122],
   ] as const
   for (const [columns, surface, above, drawn, more] of cases) {
     const where = `${surface} ${columns} columns`
@@ -2308,8 +2215,9 @@ const MATRIX: Array<[name: string, data: PaneData]> = [
   ['eight subagents', { ...FULL, agents: agentsOf(AGENTS.slice(0, 8)) }],
   ['no subagents', { ...FULL, agents: {} }],
   ['three tasks', { ...FULL, tasks: tasksOf(TEN.slice(0, 3)) }],
-  ['ten tasks: eight rows and `+2 more`', { ...FULL, tasks: tasksOf(TEN) }],
-  ['ten tasks, folded', { ...FULL, tasks: tasksOf(TEN), collapsed: { tasks: true } }],
+  ['ten tasks among the lanes', { ...FULL, tasks: tasksOf(TEN) }],
+  ['ten tasks and no subagents', { ...FULL, agents: {}, tasks: tasksOf(TEN) }],
+  ['ten tasks, folded', { ...FULL, tasks: tasksOf(TEN), collapsed: { activity: true } }],
   ['no MCP servers', { ...FULL, mcp: null }],
   ['no skills and no MCP: no Context sources', { ...FULL, usage: { ...FULL.usage, skills: undefined }, mcp: null }],
   ['Usage and MCP folded', { ...FULL, collapsed: { usage: true, mcp: true } }],
@@ -2354,11 +2262,11 @@ test('the Log fills the body: no line is cut, and no row is left that a line cou
   }
 })
 
-test('the line that counts the rest is a dim Text, indented as the Subagents\', in a row that holds its size', () => {
+test('the line that counts the rest is a dim Text, indented past a mark\'s slot, in a row that holds its size', () => {
   for (const surface of SURFACES) {
-    // FULL at 66 rows (64 on the terminal, whose band is 2 rows shorter) draws 21 lines and counts the other 116 of
-    // its 137 events; its Subagents count 2.
-    const tree = draw(onSurface({ ...FULL, log: logLines(60) }, surface), 45, surface === 'desktop' ? 66 : 64)
+    // FULL at 67 rows (65 on the terminal, whose band is 2 rows shorter) draws 21 lines and counts the other 116 of
+    // its 137 events; its Activity counts 3.
+    const tree = draw(onSurface({ ...FULL, log: logLines(60) }, surface), 45, surface === 'desktop' ? 67 : 65)
     const more = logMoreLine(tree)
     const indent = surface === 'desktop' ? 3 : 2
     // The last child of the pane, after the tail, and no cell of a row: the tail's growing leaves it its row.
@@ -2369,8 +2277,11 @@ test('the line that counts the rest is a dim Text, indented as the Subagents\', 
     expect(childrenOf(more).map(el => [el.type, textsOf(el), ...styleOf(el)]), surface).toEqual([
       ['Text', ['+116 more'], undefined, true, undefined],
     ])
-    // Where the text of the rows above starts: the line of the Subagents is as far in.
-    expect(textNode(tree, '+2 more')?.parent?.props?.paddingLeft, surface).toBe(indent)
+    // Activity's own line is at column 0 (spec 0.7.0 §6.4): a plain Box on the desktop, a line of one span on the
+    // terminal.
+    const activityMore = activityBody(tree).at(-1)
+    expect(spanTexts(activityMore), surface).toEqual(['+3 more'])
+    if (surface === 'desktop') expect(activityMore?.props, surface).toStrictEqual({ flexDirection: 'row' })
     // N is the events not drawn: the 21 lines and 116 are the 137.
     expect(logRows(tree).length + 116, surface).toBe(137)
     // The row check passes the new line, and the pane with it.
@@ -2525,9 +2436,13 @@ test('every image on the desktop has a non-empty alt, so none of them is dropped
   )
   expect(rest.slice(5).map(alts)).toEqual([['rule'], ['Log'], [], []])
   expect(alts(draw(onSurface(EMPTY, 'desktop')))).toEqual([EMPTY_BAND_ALT, 'rule', 'Turn stats'])
-  // A status icon says its status: it is the only place that does.
-  const agents = childrenOf(draw(onSurface(statuses, 'desktop')))[4]
-  expect(alts(agents).slice(2).sort()).toEqual(['done', 'failed', 'running', 'stopped'])
+  // A lane's image says its label, its tag, its status and its value; then comes the axis's.
+  const activity = childrenOf(draw(onSurface(statuses, 'desktop')))[4]
+  expect(alts(activity).slice(2, -1)).toEqual([
+    'main, done, $138.59', 'task 20 (@code-reviewer), running, $2.50', 'task 21 (@code-reviewer), done, $2.50',
+    'task 22 (@code-reviewer), failed, $2.50', 'task 23 (@code-reviewer), stopped, $2.50',
+  ])
+  expect(String(alts(activity).at(-1))).toMatch(/^axis \d\d:\d\d to now$/)
   // Only a meter's alt ends in a percent (the band's ends in a full stop), so the `/%$/` filter of the tests finds the
   // meters and nothing else.
   expect(alts(draw(onSurface(FULL, 'desktop'))).filter(alt => /%$/.test(String(alt)))).toEqual([
@@ -2697,14 +2612,16 @@ test('partial states draw what they have and leave the rest out', () => {
     expect(read(free, surface).some(text => text.startsWith('Session ')), surface).toBe(false)
     expect(read(FULL, surface), surface).toContain('Session $126.09 · Subagents $22.50')
 
-    // No subagents: no section for them, so no header and no rule.
+    // No subagents and no tasks: no Activity, so no header and no rule.
     expect(headerRows(draw(onSurface({ ...FULL, agents: {} }, surface))).map(row => row.id), surface).toEqual([
       'usage', 'turn', 'mcp', 'sources', 'log',
     ])
-    // A subagent whose cost is not known yet draws a dim dash in the cost column.
-    const dash = textNode(sectionOf(draw(onSurface(FULL, surface)), 'agents'), '—')
+    // A subagent whose cost is not known yet draws a dim dash in its value: a cell of 8 at the right edge on the
+    // desktop, a span right-aligned in 8 cells on the terminal.
+    const activity = sectionOf(draw(onSurface(FULL, surface)), 'activity')
+    const dash = textNode(activity, isDesktop ? '—' : '       —')
     expect(dash?.node.props?.dimColor, surface).toBe(true)
-    expect(dash?.parent?.props, surface).toMatchObject({ width: 7, justifyContent: 'flex-end' })
+    if (isDesktop) expect(dash?.parent?.props, surface).toMatchObject({ width: 8, justifyContent: 'flex-end' })
   }
 })
 
@@ -3189,7 +3106,8 @@ test('what is missing is left out: no changes, no changes row; no branch, no bra
     // `+N more` line.
     expect(childrenOf(noName), surface).toHaveLength(1 + 5 + 4)
     expect(ruleCount(noName), surface).toBe(6)
-    const shown = textsOf(noName)
+    // (Activity's lane of the main agent is labelled `main` too: the branch is looked for outside it.)
+    const shown = childrenOf(noName).filter(child => child !== sectionOf(noName, 'activity')).flatMap(textsOf)
     expect(shown.some(text => /(files? changed|^Project|main)$/.test(text)), surface).toBe(false)
   }
 })
@@ -3285,215 +3203,113 @@ test('meterSvg: a rounded track, a rounded fill, the colour by threshold', () =>
   expect(fillOf(Number.NaN)).toContain('width="0"')
 })
 
-// ---- The Tasks section ----
+// ---- Activity: the tasks' lanes ----
 
-// Three tasks, one of each kind, in the order they are drawn: the one that runs, then the newest start. The
-// descriptions differ in length, as the subagents' do: a short one, one in between, and one wider than any pane. The
-// kinds differ in cells: `@shell` is 6, `@monitor` 8 and `@workflow` 9. The times are 1m 30s, 1m 12s and 5.0s.
+// Three tasks, one of each kind, in the order they are drawn: the one that runs, then the others, which ended at one
+// time, in their order. The descriptions differ in length, as the subagents' do: a short one, one wider than any pane,
+// and one in between. The times are 1m 30s, 1m 12s and 5.0s.
 const KINDS: TaskRow[] = [
   task(1, 'running', { description: 'Fix' }),
   task(2, 'done', { kind: 'monitor', description: WIDE, durationMs: 72_000 }),
   task(3, 'failed', { kind: 'workflow', description: 'Review the change' }),
 ]
-const SHELL: TaskRow[] = [task(1, 'done', { description: WIDE })]
 const withTasks = (rows: TaskRow[], surface: Surface): PaneData =>
   onSurface({ ...EMPTY, tasks: tasksOf(rows) }, surface)
 // The section of the pane that has this id: the column of its rule, its header and its body.
 const sectionOf = (tree: unknown, id: string): Node | undefined => headerRows(tree).find(row => row.id === id)?.section
 
-test('the Tasks section sits after Subagents and before MCP: a column of its rule, its header and its rows', () => {
+test('the Activity section sits after Turn stats and before MCP: a column of its rule, its header and its body', () => {
   for (const surface of SURFACES) {
     const tree = draw(onSurface({ ...FULL, tasks: tasksOf(KINDS) }, surface))
     const rows = headerRows(tree)
-    expect(rows.map(row => row.id), surface).toEqual(['usage', 'turn', 'agents', 'tasks', 'mcp', 'sources', 'log'])
-    expect(rows.map(row => row.title), surface).toEqual([...TITLES.slice(0, 3), 'Tasks', ...TITLES.slice(3)])
-    // The sections are children of the pane, after the top block and the Project block: the Tasks' is the one that
-    // follows the Subagents'.
-    const [, , , , agents, tasks, mcp] = childrenOf(tree)
-    expect(rows[2]?.section, surface).toBe(agents)
-    expect(rows[3]?.section, surface).toBe(tasks)
-    expect(rows[4]?.section, surface).toBe(mcp)
-    // A column of its rule, its header and its body, which holds the three rows; nothing comes after the body.
-    const [rule, header, body, ...rest] = childrenOf(tasks)
-    expect(tasks?.props, surface).toStrictEqual({ flexDirection: 'column' })
+    expect(rows.map(row => row.id), surface).toEqual([...SECTIONS])
+    expect(rows.map(row => row.title), surface).toEqual(TITLES)
+    // The sections are children of the pane, after the top block and the Project block: Activity's is the one that
+    // follows Turn stats'.
+    const [, , , turn, activity, mcp] = childrenOf(tree)
+    expect(rows[1]?.section, surface).toBe(turn)
+    expect(rows[2]?.section, surface).toBe(activity)
+    expect(rows[3]?.section, surface).toBe(mcp)
+    // A column of its rule, its header and its body: main's lane and 7 of the 13, the axis and `+6 more`. Two
+    // subagents and a task run.
+    const [rule, header, body, ...rest] = childrenOf(activity)
+    expect(activity?.props, surface).toStrictEqual({ flexDirection: 'column' })
     expect(ruleCount(rule), surface).toBe(1)
     expect(headerRows(header).map(row => [row.id, row.label, row.title, row.summary]), surface).toEqual([
-      ['tasks', '▾', 'Tasks', '1/3'],
+      ['activity', '▾', 'Activity', '3/13'],
     ])
     expect(body?.props, surface).toStrictEqual({ flexDirection: 'column' })
-    expect(childrenOf(body), surface).toHaveLength(3)
-    expect(taskRows(tasks), surface).toHaveLength(3)
+    expect(childrenOf(body), surface).toHaveLength(10)
+    expect(textsOf(childrenOf(body).at(-1)), surface).toEqual(['+6 more'])
     expect(rest, surface).toEqual([])
   }
 })
 
-test('the desktop draws an icon of its own for Tasks, labelled with its title, and the terminal draws none', () => {
+test('the desktop draws an icon of its own for Activity, labelled with its title, and the terminal draws none', () => {
   const isIcon = (source: string): boolean => /^<svg [^>]*width="14" height="14"[\s\S]*<\/svg>$/.test(source)
   const desktop = draw(onSurface({ ...FULL, tasks: tasksOf(KINDS) }, 'desktop'))
   const rows = headerRows(desktop)
   const icons = rows.map(row => String(childrenOf(row.cells[0])[0]?.props?.source))
-  // Seven sections, seven icons, no two alike, each an SVG document of its own.
+  // Six sections, six icons, no two alike, each an SVG document of its own.
   expect(icons.every(isIcon)).toBe(true)
-  expect(new Set(icons).size).toBe(7)
-  // The icon sits in a slot of 2 cells, as the others do, and says the title that is drawn in bold beside it.
-  const [slot] = rows[3]?.cells ?? []
+  expect(new Set(icons).size).toBe(6)
+  // The icon sits in a slot of 2 cells, as the others do, and says the title that is drawn in bold beside it. It is
+  // §3.6's three lanes, in the grey of every section icon.
+  const [slot] = rows[2]?.cells ?? []
   expect(slot?.props).toMatchObject({ flexShrink: 0, width: 2 })
   expect(childrenOf(slot).map(image => [image.type, image.props?.alt, image.props?.width, image.props?.height]))
-    .toEqual([['Svg', 'Tasks', 14, 14]])
+    .toEqual([['Svg', 'Activity', 14, 14]])
+  expect(icons[2]).toContain('stroke="#8a8a8a"')
+  expect(icons[2]).toContain('<path d="M1.5 3.5h6M4.5 7h8M2.5 10.5h4.5"/>')
 
   const terminal = draw(onSurface({ ...FULL, tasks: tasksOf(KINDS) }, 'terminal'))
   expect(flat(terminal).filter(({ node }) => node.type === 'Svg')).toEqual([])
 })
 
-test('a task row is a mark, the description, a dim `@kind` of its own, and the time at the right edge', () => {
+test('a task lane shows its status as a shape and a colour: the live cap, ✓, ✗, a dim ■ and a dim ○', () => {
   for (const surface of SURFACES) {
-    const rows = taskRows(draw(withTasks(KINDS, surface)))
-    expect(rows, surface).toHaveLength(3)
-    const textsAt = (at: number): Array<string | undefined> => rows.map(row => textsOf(groupOf(row)[at])[0])
-    expect(textsAt(0), surface).toEqual(['Fix', WIDE, 'Review the change'])
-    expect(textsAt(1), surface).toEqual(['@shell', '@monitor', '@workflow'])
-    expect(rows.map(row => textsOf(childrenOf(row)[2])), surface).toEqual([['1m 30s'], ['1m 12s'], ['5.0s']])
-
-    for (const row of rows) {
-      const [mark, group, time] = childrenOf(row)
-      const [description, kind] = groupOf(row)
-      // The cells of the row are a cell apart: the mark's slot (2 cells) or glyph cell (1), the group, and the time.
-      expect(row.props, surface).toMatchObject({ flexDirection: 'row', alignItems: 'center', columnGap: 1 })
-      expect(mark?.props?.width, surface).toBe(surface === 'desktop' ? 2 : 1)
-      expect(group?.props, surface).toMatchObject({
-        flexDirection: 'row', flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden', columnGap: 1,
-      })
-      // The description takes the room the kind leaves, from the left, and is cut to it.
-      expect(description?.props, surface).toMatchObject({
-        flexDirection: 'row', flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden',
-      })
-      expect(description?.props?.justifyContent, surface).toBeUndefined()
-      expect(childrenOf(description).map(styleOf), surface).toEqual([[undefined, undefined, 'truncate']])
-      // The kind holds its width, from the left of its cell; its text is dim and is cut inside the cell.
-      expect(kind?.props, surface).toMatchObject({ flexDirection: 'row', flexShrink: 0, overflow: 'hidden' })
-      expect(kind?.props?.justifyContent, surface).toBeUndefined()
-      expect(childrenOf(kind).map(styleOf), surface).toEqual([[undefined, true, 'truncate']])
-      // The time keeps its column at the right edge: a time that is known is plain, and is never cut.
-      expect(time?.props, surface).toMatchObject({
-        flexDirection: 'row', width: 8, flexShrink: 0, justifyContent: 'flex-end',
-      })
-      expect(childrenOf(time).map(styleOf), surface).toEqual([[undefined, undefined, undefined]])
-    }
-    // One width for the three rows: a width of its own on the desktop, the longest `@kind` drawn on the terminal.
-    expect(rows.map(row => groupOf(row)[1]?.props?.width), surface).toEqual(
-      Array(3).fill(surface === 'desktop' ? 10 : 9),
-    )
-  }
-})
-
-test('the terminal\'s `@kind` column is as wide as the longest kind drawn; the desktop\'s is always 10', () => {
-  const set = (...kinds: TaskKind[]): TaskRow[] => kinds.map((kind, i) => task(i + 1, 'done', { kind }))
-  const widths = (rows: TaskRow[], surface: Surface): unknown[] =>
-    taskRows(draw(withTasks(rows, surface))).map(row => groupOf(row)[1]?.props?.width)
-
-  // `@shell` is 6 cells, `@monitor` 8 and `@workflow` 9, the longest there is.
-  expect(widths(set('shell'), 'terminal')).toEqual([6])
-  expect(widths(set('shell', 'monitor'), 'terminal')).toEqual([8, 8])
-  expect(widths(set('shell', 'monitor', 'workflow'), 'terminal')).toEqual([9, 9, 9])
-  // Only the rows that are drawn count: the ninth, which is left to `+1 more`, does not widen the column.
-  const nine = [task(1, 'done', { kind: 'workflow' }), ...[2, 3, 4, 5, 6, 7, 8, 9].map(n => task(n, 'running'))]
-  expect(widths(nine, 'terminal')).toEqual(Array(8).fill(6))
-  // The desktop's column is one width whatever the kinds are.
-  for (const kinds of [['shell'], ['monitor'], ['workflow'], ['shell', 'workflow']] as const) {
-    expect(widths(set(...kinds), 'desktop'), kinds.join()).toEqual(Array(kinds.length).fill(10))
-  }
-})
-
-test('a task shows its status as a shape and a colour: ◐ blue, ✓, ✗, a dim ■ for stopped and a dim ○ for ended', () => {
-  for (const surface of SURFACES) {
-    const tree = draw(withTasks(EACH_STATUS, surface))
-    // The marks come in the order of the rows: the task that runs, then the others, the newest start first.
+    const activity = activityOf(draw(withTasks(EACH_STATUS, surface)))
+    // The lanes come after main's: the task that runs, then the others, which ended at one time, in their order.
     if (surface === 'terminal') {
-      const glyphs = flat(tree).filter(({ node }) => node.type === 'Text' && GLYPH.test(textsOf(node)[0] ?? ''))
-      expect(glyphs.map(({ node }) => [textsOf(node)[0], node.props?.color, node.props?.dimColor]), surface).toEqual([
-        ['◐', '#2f7de1', undefined],
+      // The gutter's `◐` ends the running lane's span, in the Shell hue; the house marks follow the ended spans.
+      const marks = flat(activity).flatMap(({ node }) => {
+        const text = node.type === 'Text' ? textsOf(node)[0] ?? '' : ''
+        return /[◐✓✗■○]$/.test(text) ? [[text.slice(-1), node.props?.color, node.props?.dimColor]] : []
+      })
+      expect(marks, surface).toEqual([
+        ['◐', STATION_HUES.shell.dark, undefined],
         ['✓', 'success', undefined],
         ['✗', 'error', undefined],
         ['■', undefined, true],
         ['○', undefined, true],
       ])
-      // Each mark has a cell of its own, as a subagent's has, so the descriptions start at the same place.
-      expect(marksOf(tree), surface).toEqual([['◐', 1], ['✓', 1], ['✗', 1], ['■', 1], ['○', 1]])
     } else {
-      // An icon in a slot of 2 cells, whose alt is the status: the icon is the only place that says it.
-      expect(marksOf(tree), surface).toEqual(EVERY_STATUS.map(status => [status, 2]))
-      const sources = flat(tree)
-        .filter(({ node }) => node.type === 'Svg' && STATUSES.includes(String(node.props?.alt)))
-        .map(({ node }) => String(node.props?.source))
-      // Blue, green, red and two greys, and five shapes: with the colours taken out no two are alike. The mark of a
-      // task that has ended is the grey ring and nothing in it; the others have a shape in the ring.
-      const colours = ['#2f7de1', '#2ea043', '#e5484d', '#8a8a8a', '#8a8a8a']
-      sources.forEach((source, i) => expect(source, EVERY_STATUS[i]).toContain(`stroke="${colours[i]}"`))
-      expect(new Set(sources.map(source => source.replace(/#[0-9a-f]{6}/g, '#'))).size, surface).toBe(5)
-      expect(sources.map(source => source.match(/<(circle|path|rect) /g)?.length), surface).toEqual([2, 2, 2, 2, 1])
+      // The lane's alt says its status; its image draws it: the live cap, a green check, a red cross, a grey square and
+      // a grey ring.
+      const lanes = flat(activity).map(({ node }) => node)
+        .filter(node => node.type === 'Svg' && /^job \d /.test(String(node.props?.alt)))
+      expect(lanes.map(node => String(node.props?.alt).split(', ')[1]), surface).toEqual(EVERY_STATUS)
+      const sources = lanes.map(node => String(node.props?.source))
+      expect(sources[0], 'running').toContain('data-part="cap"')
+      expect(sources[1], 'done').toContain('stroke="#2ea043"')
+      expect(sources[2], 'failed').toContain('stroke="#e5484d"')
+      expect(sources[3], 'stopped').toContain('width="5" height="5" rx="1" fill="#8a8a8a"')
+      expect(sources[4], 'ended').toContain('<circle r="3.5" fill="none" stroke="#8a8a8a"')
+      expect(sources.slice(1).every(source => !source.includes('data-part="cap"')), surface).toBe(true)
     }
   }
 })
 
-test('the time of a task: how long a running one has run, how long a finished one ran, a dim dash if unknown', () => {
-  const cases: Array<[name: string, row: TaskRow, time: string | null]> = [
-    ['running since 90 s', task(1, 'running', { startedAt: NOW - 90_000 }), '1m 30s'],
-    ['running since 0.4 s', task(1, 'running', { startedAt: NOW - 400 }), '0.4s'],
-    ['running since 100 hours', task(1, 'running', { startedAt: NOW - 100 * 3_600_000 }), '100h 00m'],
-    // A wall clock that was put back since the task began never gives a negative time.
-    ['running, the clock put back', task(1, 'running', { startedAt: NOW + 5000 }), '0.0s'],
-    ['running, its start not seen', task(1, 'running', { startedAt: null }), null],
-    // A task that has ended shows how long it ran, and not the time since its start.
-    ['done in 72 s', task(1, 'done', { durationMs: 72_000, startedAt: NOW - 3_600_000 }), '1m 12s'],
-    ['failed in 5 s', task(1, 'failed', { durationMs: 5000 }), '5.0s'],
-    ['stopped after 2 min', task(1, 'stopped', { durationMs: 120_300 }), '2m 00s'],
-    ['ended after 5 s', task(1, 'ended', { durationMs: 5000 }), '5.0s'],
-    ['done, no start but a duration', task(1, 'done', { startedAt: null, durationMs: 72_000 }), '1m 12s'],
-    ['done, no duration', task(1, 'done', { durationMs: null }), null],
-    ['done, no start and no duration', task(1, 'done', { startedAt: null, durationMs: null }), null],
-    ['ended, no duration', task(1, 'ended', { durationMs: null }), null],
-    // A time that ran to a late notice is a bound: `≤` (U+2264) stands before it.
-    ['done, at most 12.2 s', task(1, 'done', { durationMs: 12_200, durationAtMost: true }), '\u{2264}12.2s'],
-  ]
-
-  for (const surface of SURFACES) {
-    for (const [name, row, time] of cases) {
-      const where = `${surface}: ${name}`
-      const [drawn] = taskRows(draw(withTasks([row], surface)))
-      const cell = childrenOf(drawn)[2]
-      expect(textsOf(cell), where).toEqual([time ?? '—'])
-      // A time that is known is plain, the dash is dim, and either fits the 8 cells of the column.
-      expect(childrenOf(cell).map(styleOf), where).toEqual([[undefined, time === null ? true : undefined, undefined]])
-      expect(String(textsOf(cell)[0]).length, where).toBeLessThanOrEqual(Number(cell?.props?.width))
-    }
-  }
-})
-
-test('the time of a running task follows the time of the drawing, and the time of a finished one does not move', () => {
-  const rows = [task(1, 'running'), task(2, 'done', { durationMs: 72_000 })]
-  const timesAt = (now: number): unknown[] =>
-    taskRows(draw({ ...withTasks(rows, 'desktop'), now })).map(row => textsOf(childrenOf(row)[2])[0])
-
-  expect(timesAt(NOW)).toEqual(['1m 30s', '1m 12s'])
-  // The pane is drawn again every 30 s: the task that runs has run 30 s more, the finished one has not.
-  expect(timesAt(NOW + 30_000)).toEqual(['2m 00s', '1m 12s'])
-})
-
-// A value is drawn whole or not at all, and the row stays one line, which the Log's count of rows relies on. No task
-// runs 1000 hours, but a notice can carry any safe integer as the time the task ran, which is 15 characters in a cell
-// of 8: a time wider than the cell is drawn as not known. `999h 59m` is the widest that fits; with the `≤` of a bound,
-// `≤99h 59m`.
-test('a time wider than the cell of a task is drawn as a dim dash: one row, and the Log counts on it', () => {
+// A value is drawn whole or not at all, and the lane stays one row, which the Log's count of rows relies on. A time
+// wider than the 8 cells of the value is drawn as not known (taskTime, whose cases are in lanes.test.ts).
+test('a task time wider than its value is a dim dash: the lane stays one row, and the Log counts on it', () => {
   const hours = (h: number, m = 0): number => (h * 60 + m) * 60_000
   const cases: Array<[name: string, row: TaskRow, time: string | null]> = [
     ['a duration of 2^53 - 1 ms', task(1, 'done', { durationMs: Number.MAX_SAFE_INTEGER }), null],
-    ['done in 1000 hours', task(1, 'done', { durationMs: hours(1000) }), null],
     ['done in 999h 59m', task(1, 'done', { durationMs: hours(999, 59) }), '999h 59m'],
-    ['running since 1000 hours', task(1, 'running', { startedAt: NOW - hours(1000) }), null],
-    ['running since 999h 59m', task(1, 'running', { startedAt: NOW - hours(999, 59) }), '999h 59m'],
-    // The `≤` of a bound takes a cell of its own: `≤99h 59m` fills the 8 cells, `≤100h 00m` is a ninth too wide.
     ['99h 59m, at most', task(1, 'done', { durationMs: hours(99, 59), durationAtMost: true }), '\u{2264}99h 59m'],
     ['100 hours, at most', task(1, 'done', { durationMs: hours(100), durationAtMost: true }), null],
+    ['running, its start not seen', task(1, 'running', { startedAt: null }), null],
   ]
   const log = logLines(60)
 
@@ -3502,17 +3318,25 @@ test('a time wider than the cell of a task is drawn as a dim dash: one row, and 
       for (const [name, row, time] of cases) {
         const where = `${surface} ${bodyColumns} columns: ${name}`
         const tree = draw(onSurface({ ...withLog(log), tasks: tasksOf([row]) }, surface), bodyColumns, 40)
-        expect(taskRows(tree), where).toHaveLength(1)
+        // Main's lane, the task's and the axis.
+        const [, lane, ...rest] = activityBody(tree)
+        expect(rest, where).toHaveLength(1)
         expect(rowProblems(tree), where).toEqual([])
-        const cell = childrenOf(taskRows(tree)[0])[2]
-        expect(textsOf(cell), where).toEqual([time ?? '—'])
-        expect(childrenOf(cell).map(styleOf), where).toEqual([[undefined, time === null ? true : undefined, undefined]])
-        expect(String(textsOf(cell)[0]).length, where).toBeLessThanOrEqual(Number(cell?.props?.width))
-        // The Log has the rows of the block fewer, as for any one task: the rule, the header and the row. Of the 40
-        // rows, the blocks above take ABOVE_LOG, the Log's rule and header 2 and `+N more` 1.
+        if (surface === 'desktop') {
+          const cell = childrenOf(lane)[2]
+          expect(textsOf(cell), where).toEqual([time ?? '—'])
+          expect(childrenOf(cell).map(styleOf), where)
+            .toEqual([[undefined, time === null ? true : undefined, undefined]])
+        } else {
+          const value = childrenOf(childrenOf(lane).at(-1))[0]
+          expect(textsOf(value), where).toEqual([(time ?? '—').padStart(8)])
+          expect(value?.props?.dimColor, where).toBe(time === null ? true : undefined)
+        }
+        // The Log has the rows of the block fewer: the rule, the header, two lanes and the axis. Of the 40 rows, the
+        // blocks above take ABOVE_LOG, the Log's rule and header 2 and `+N more` 1.
         const above = ABOVE_LOG[surface][bodyColumns]
-        expect(logRows(tree), where).toHaveLength(40 - above - 3 - 3)
-        expect(rowsAbove(tree, bodyColumns, surface), where).toBe(above + 3)
+        expect(logRows(tree), where).toHaveLength(40 - above - 3 - 5)
+        expect(rowsAbove(tree, bodyColumns, surface), where).toBe(above + 5)
       }
     }
   }
@@ -3531,139 +3355,76 @@ test('the header counts `running/total` while a task runs, and the total alone w
   for (const surface of SURFACES) {
     for (const [name, rows, summary] of cases) {
       const tree = draw(withTasks(rows, surface))
-      expect(headerRows(tree).find(row => row.id === 'tasks')?.summary, `${surface}: ${name}`).toBe(summary)
+      expect(headerRows(tree).find(row => row.id === 'activity')?.summary, `${surface}: ${name}`).toBe(summary)
     }
   }
 })
 
-test('the task list shows 8 rows, the running ones first and the newest first, and counts the rest', () => {
+test('Activity draws main and 7 task lanes, the running ones and the older start first, and counts the rest', () => {
   for (const surface of SURFACES) {
     const tree = draw(withTasks(TEN, surface))
-    expect(taskRows(tree).map(row => textsOf(groupOf(row)[0])[0]), surface).toEqual([
-      'job 3', 'job 5', 'job 1', 'job 2', 'job 4', 'job 6', 'job 7', 'job 8',
+    const body = activityBody(tree)
+    expect(body.slice(0, 8).map(lane => textsOf(lane)[0]), surface).toEqual([
+      'main', 'job 5', 'job 3', 'job 1', 'job 2', 'job 4', 'job 6', 'job 7',
     ])
-    // The two that are left are counted in a line of their own, the last of the body: dim, and in line with the
-    // descriptions, which start after the mark and its gap (3 cells on the desktop, 2 on the terminal).
-    const body = childrenOf(sectionOf(tree, 'tasks'))[2]
-    const more = textNode(tree, '+2 more')
+    // Then the axis: its image on the desktop, the clock labels and `now` on the terminal.
+    const axis = surface === 'desktop' ? childrenOf(childrenOf(body[8])[1])[0]?.props?.alt : spanTexts(body[8]).join('')
+    expect(String(axis), surface).toMatch(/now$/)
+    // The three that are left are counted in a dim line of their own at column 0, the last of the body.
+    const more = textNode(tree, '+3 more')
     expect(more?.node.props?.dimColor, surface).toBe(true)
-    expect(more?.parent?.props?.paddingLeft, surface).toBe(surface === 'desktop' ? 3 : 2)
-    expect(childrenOf(body), surface).toHaveLength(9)
-    expect(childrenOf(body).at(-1), surface).toBe(more?.parent)
+    expect(body, surface).toHaveLength(10)
+    expect(spanTexts(body.at(-1)), surface).toEqual(['+3 more'])
+    if (surface === 'desktop') expect(body.at(-1)?.props, surface).toStrictEqual({ flexDirection: 'row' })
 
-    // Eight tasks fill the list and leave nothing to count.
-    const eight = draw(withTasks(TEN.slice(0, 8), surface))
-    expect(taskRows(eight), surface).toHaveLength(8)
-    expect(textsOf(eight).some(text => /^\+\d+ more$/.test(text)), surface).toBe(false)
+    // Seven tasks fill the lanes and leave nothing to count.
+    const seven = activityBody(draw(withTasks(TEN.slice(0, 7), surface)))
+    expect(seven, surface).toHaveLength(9)
+    expect(seven.flatMap(textsOf).some(text => /^\+\d+ more$/.test(text)), surface).toBe(false)
   }
 })
 
-test('a folded Tasks section is its rule and its header, with its summary; with no tasks there is no section', () => {
+test('a folded Activity is its rule and its header, with its summary; with no lanes but main it is left out', () => {
   for (const surface of SURFACES) {
     const open = draw(withTasks(TEN, surface))
-    const folded = draw({ ...withTasks(TEN, surface), collapsed: { tasks: true } })
-    const headerOf = (tree: Node): Header | undefined => headerRows(tree).find(row => row.id === 'tasks')
+    const folded = draw({ ...withTasks(TEN, surface), collapsed: { activity: true } })
+    const headerOf = (tree: Node): Header | undefined => headerRows(tree).find(row => row.id === 'activity')
     expect(headerOf(open)?.label, surface).toBe('▾')
     expect(headerOf(folded)?.label, surface).toBe('▸')
-    expect(textsOf(headerOf(open)?.section), surface).toContain('+2 more')
+    expect(textsOf(headerOf(open)?.section), surface).toContain('+3 more')
     // The body goes, and the line that counts the rest with it; the summary stays.
     expect(headerOf(folded)?.summary, surface).toBe('2/10')
     expect(childrenOf(headerOf(folded)?.section), surface).toHaveLength(2)
-    expect(taskRows(folded), surface).toEqual([])
     expect(textsOf(headerOf(folded)?.section).some(text => /^\+\d+ more$/.test(text)), surface).toBe(false)
 
-    // No tasks, no section: no header, and no rule of its own either. With them the pane has one rule more.
-    const none = draw(onSurface(FULL, surface))
-    expect(headerRows(none).map(row => row.id), surface).toEqual(['usage', 'turn', 'agents', 'mcp', 'sources', 'log'])
+    // No subagents and no tasks, no section: no header, and no rule of its own either. With tasks the pane has one
+    // rule more.
+    const none = draw(onSurface({ ...FULL, agents: {} }, surface))
+    expect(headerRows(none).map(row => row.id), surface).toEqual(['usage', 'turn', 'mcp', 'sources', 'log'])
     expect(headerRows(draw(withTasks([], surface))).map(row => row.id), surface).toEqual(['turn'])
-    expect(ruleCount(draw(onSurface({ ...FULL, tasks: tasksOf(KINDS) }, surface))), surface).toBe(ruleCount(none) + 1)
+    expect(ruleCount(draw(onSurface({ ...FULL, agents: {}, tasks: tasksOf(KINDS) }, surface))), surface)
+      .toBe(ruleCount(none) + 1)
   }
 })
 
-test('the chevron of the Tasks header asks to fold `tasks`', () => {
+test('the chevron of the Activity header asks to fold `activity`', () => {
   for (const surface of SURFACES) {
     const pressed: string[] = []
     const tree = renderPane(
       PLAIN_ELEMENTS, withTasks(KINDS, surface), { bodyColumns: 45, scroll: { bodyRows: 20 } },
       { onToggle: id => pressed.push(id) },
     ) as unknown as Node
-    const chevron = flat(tree).find(({ node }) => node.type === 'Button' && node.props?.key === 'toggle:tasks')?.node
+    const chevron = flat(tree).find(({ node }) => node.type === 'Button' && node.props?.key === 'toggle:activity')?.node
     const press = chevron?.props?.onPress
     expect(typeof press, surface).toBe('function')
     if (typeof press === 'function') press()
-    expect(pressed, surface).toEqual(['tasks'])
+    expect(pressed, surface).toEqual(['activity'])
   }
 })
 
-// The narrowest body that keeps the `@kind` column of a task row, by surface and tasks. As for the subagents, the
-// description keeps the body less the mark (2 cells on the desktop, 1 on the terminal), the kind, the time (8) and 3
-// gaps (two in the row, one in its group), and the kind gives way under 12 cells of description. The desktop's kind
-// is 10 cells whatever the kinds are: 2 + 10 + 8 + 3 + 12 = 35. The terminal's is the longest `@kind` drawn:
-// `@workflow` is 9, so 1 + 9 + 8 + 3 + 12 = 33, and `@shell` is 6, so 1 + 6 + 8 + 3 + 12 = 30.
-const KIND_FROM: [surface: Surface, rows: TaskRow[], kindCells: number, bodyColumns: number][] = [
-  ['desktop', KINDS, 10, 35], ['desktop', SHELL, 10, 35], ['terminal', KINDS, 9, 33], ['terminal', SHELL, 6, 30],
-]
-
-test('a task row keeps its `@kind` while the description keeps 12 cells beside it, and drops it below that', () => {
-  for (const [surface, set, kindCells, from] of KIND_FROM) {
-    // The narrowest body the tests use, one column short of the edge, the edge itself, and a wide one.
-    for (const bodyColumns of [8, from - 1, from, 120]) {
-      const where = `${surface} ${set.length} tasks ${bodyColumns} columns, from ${from}`
-      const tree = draw(withTasks(set, surface), bodyColumns)
-      const hasKind = bodyColumns >= from
-      expect(taskRows(tree), where).toHaveLength(set.length)
-      expect(rowProblems(tree), where).toEqual([])
-      for (const row of taskRows(tree)) {
-        expect(rowProblems(row), where).toEqual([])
-        // The cells of the row, and of its group, are one cell apart; the mark is the cell it was.
-        const [mark, group] = childrenOf(row)
-        expect(row.props?.columnGap, where).toBe(1)
-        expect(mark?.props?.width, where).toBe(surface === 'desktop' ? 2 : 1)
-        expect(group?.props, where).toMatchObject({
-          flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden', columnGap: 1,
-        })
-        // The kind is the second cell of the group, in every row or in none; without it the description is the group.
-        const [description, kind] = childrenOf(group)
-        expect(childrenOf(group), where).toHaveLength(hasKind ? 2 : 1)
-        expect(description?.props, where).toMatchObject({ flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: 'hidden' })
-        expect(childrenOf(description).map(text => text.props?.wrap), where).toEqual(['truncate'])
-        expect(kind?.props?.width, where).toBe(hasKind ? kindCells : undefined)
-        expect(textsOf(row).some(isType), where).toBe(hasKind)
-      }
-    }
-  }
-  // The line that counts the rest does not move: the ninth task is `+1 more`, in a pane with no kind column.
-  const nine = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => task(n, 'running'))
-  for (const surface of SURFACES) {
-    const tree = draw(withTasks(nine, surface), 8)
-    expect(taskRows(tree), surface).toHaveLength(8)
-    expect(textNode(tree, '+1 more')?.parent?.props?.paddingLeft, surface).toBe(surface === 'desktop' ? 3 : 2)
-  }
-})
-
-test('Subagents and Tasks each drop their `@…` column on their own, at the edge of their own width', () => {
-  // The subagents need 39 columns on the desktop (their type is 15 cells) and the tasks 35 (their kind is 10); on the
-  // terminal, with `@frontend-deve…` (15 cells) and `@workflow` (9), 38 and 33.
-  const cases: [surface: Surface, bodyColumns: number, hasType: boolean, hasKind: boolean][] = [
-    ['desktop', 34, false, false], ['desktop', 35, false, true], ['desktop', 38, false, true],
-    ['desktop', 39, true, true], ['terminal', 32, false, false], ['terminal', 33, false, true],
-    ['terminal', 37, false, true], ['terminal', 38, true, true],
-  ]
-  for (const [surface, bodyColumns, hasType, hasKind] of cases) {
-    const where = `${surface} ${bodyColumns} columns`
-    const tree = draw(onSurface({ ...EMPTY, agents: agentsOf(TYPED), tasks: tasksOf(KINDS) }, surface), bodyColumns)
-    // Each list has its rows, told apart by the width of the value at the right edge.
-    expect(agentRows(tree), where).toHaveLength(3)
-    expect(taskRows(tree), where).toHaveLength(3)
-    expect(agentRows(tree).map(row => textsOf(row).some(isType)), where).toEqual(Array(3).fill(hasType))
-    expect(taskRows(tree).map(row => textsOf(row).some(isType)), where).toEqual(Array(3).fill(hasKind))
-    expect(rowProblems(tree), where).toEqual([])
-  }
-})
-
-test('the task rows outgrow no pane: every kind and status, a description wider than any pane, narrow and wide', () => {
+test('the task lanes outgrow no pane: every kind and status, a description wider than any pane, narrow, wide', () => {
   const kinds = ['shell', 'monitor', 'workflow'] as const
-  // Ten rows, so that the line that counts the rest is drawn too: every status and kind, a description wider than any
+  // Ten tasks, so that the line that counts the rest is drawn too: every status and kind, a description wider than any
   // pane, and a task whose time is not known.
   const mixed: TaskRow[] = [
     ...EVERY_STATUS.map((status, i) => (
@@ -3678,35 +3439,26 @@ test('the task rows outgrow no pane: every kind and status, a description wider 
       // The pane of the tasks, the same folded, and the full pane with them.
       const open = withTasks(mixed, surface)
       const full = onSurface({ ...FULL, tasks: tasksOf(mixed) }, surface)
-      for (const data of [open, { ...open, collapsed: { tasks: true } }, full]) {
-        const tree = draw(data, bodyColumns)
-        expect(rowProblems(tree), where).toEqual([])
-        for (const row of taskRows(tree)) expect(rowProblems(row), where).toEqual([])
+      for (const data of [open, { ...open, collapsed: { activity: true } }, full]) {
+        expect(rowProblems(draw(data, bodyColumns)), where).toEqual([])
       }
-      // Eight of the ten tasks are drawn, so these are the rows the check has seen.
-      expect(taskRows(draw(open, bodyColumns)), where).toHaveLength(8)
+      // Main's lane, seven of the ten, the axis and `+3 more`: these are the rows the check has seen.
+      expect(activityBody(draw(open, bodyColumns)), where).toHaveLength(10)
     }
-    // The check sees the kind cell: with its width taken off, the cut text has no sized cell to sit in.
-    const [row] = taskRows(draw(withTasks(KINDS, surface)))
-    const kind = groupOf(row)[1]
-    if (kind !== undefined) kind.props = { ...kind.props, width: undefined }
-    const problems = rowProblems(row)
-    expect(problems, surface).toHaveLength(1)
-    expect(problems[0], surface).toContain('cut text')
   }
 })
 
-test('the Log draws fewer lines by exactly the rows of the Tasks block: rule, header, rows and `+N more`', () => {
+test('the Log draws fewer lines by exactly the rows of Activity: rule, header, lanes, axis and `+N more`', () => {
   // A pane of a Log and the tasks. Above the Log are the Session card and the placeholder of Turn stats (ABOVE_LOG: 9
   // rows on the desktop, 8 and 7 on the terminal at 20 and 45 columns), and its rule and header are 2 more; of its 60
   // lines a row goes to its own `+N more` line. So of a body of 40 rows 28 lines are drawn on the desktop, and 29 and
   // 30 on the terminal.
   const log = logLines(60)
-  // [the tasks, whether the section is folded, the rows of its block]: the rule and the header, the rows (8 at the
-  // most), and the line that counts the rest when there are more tasks than rows.
+  // [the tasks, whether the section is folded, the rows of its block]: the rule and the header, main's lane and theirs
+  // (7 at the most), the axis, and the line that counts the rest when there are more than 7 tasks.
   const cases: Array<[rows: TaskRow[], isFolded: boolean, blockRows: number]> = [
-    [TEN.slice(0, 1), false, 3], [TEN.slice(0, 3), false, 5], [TEN.slice(0, 8), false, 10],
-    [TEN.slice(0, 9), false, 11], [TEN, false, 11], [TEN, true, 2], [TEN.slice(0, 1), true, 2],
+    [TEN.slice(0, 1), false, 5], [TEN.slice(0, 3), false, 7], [TEN.slice(0, 7), false, 11],
+    [TEN.slice(0, 8), false, 12], [TEN, false, 12], [TEN, true, 2], [TEN.slice(0, 1), true, 2],
   ]
   for (const surface of SURFACES) {
     for (const bodyColumns of [20, 45] as const) {
@@ -3716,10 +3468,10 @@ test('the Log draws fewer lines by exactly the rows of the Tasks block: rule, he
       expect(logRows(none), `${surface} ${bodyColumns}: no tasks`).toHaveLength(lines)
       for (const [rows, isFolded, blockRows] of cases) {
         const where = `${surface} ${bodyColumns} columns: ${rows.length} tasks${isFolded ? ', folded' : ''}`
-        const collapsed: Record<string, boolean> = isFolded ? { tasks: true } : {}
+        const collapsed: Record<string, boolean> = isFolded ? { activity: true } : {}
         const data = { ...withLog(log), tasks: tasksOf(rows), collapsed }
         const tree = draw(onSurface(data, surface), bodyColumns, 40)
-        // The Log has the rows of the Tasks block fewer, and `+N more` counts the lines it has not drawn.
+        // The Log has the rows of Activity fewer, and `+N more` counts the lines it has not drawn.
         expect(logRows(tree), where).toHaveLength(lines - blockRows)
         expect(moreOf(tree), where).toBe(60 - (lines - blockRows))
         // The rows that the panel counts above the Log are those of the trees: counted again from them.
@@ -3800,30 +3552,42 @@ test('a log line with no known time draws a dim dash in its time column, as wide
   }
 })
 
-// The mark and the icon of an `ended` task are the ones of an `ended` subagent: passing already, as the marks are keyed
-// by the status of a task and a subagent's status goes in as it is.
+// An `ended` subagent and an `ended` task whose start the mod did not see are lanes of an unknown span, alike: the
+// dashed line and the dim ring, and a dim dash for a value that is not known.
 test('an `ended` subagent has the dim ring of an `ended` task, and a dim dash for a cost that is not known', () => {
-  const rows = [agent(1, 'ended', { startedAt: null, costUsd: null })]
+  const agentRow = [agent(1, 'ended', { startedAt: null, costUsd: null })]
+  const taskRow = [task(1, 'ended', { startedAt: null, durationMs: null })]
   for (const surface of SURFACES) {
-    const tree = draw(withAgents(rows, surface))
-    const ended = draw(withTasks([task(1, 'ended')], surface))
-    expect(marksOf(tree), surface).toEqual(marksOf(ended))
-    expect(marksOf(tree).map(([mark]) => mark), surface).toEqual(surface === 'desktop' ? ['ended'] : ['○'])
-    if (surface === 'terminal') {
-      expect(flat(tree).filter(({ node }) => textsOf(node)[0] === '○' && node.type === 'Text')
-        .map(({ node }) => node.props?.dimColor), surface).toEqual([true])
+    const lanes = [draw(withAgents(agentRow, surface)), draw(withTasks(taskRow, surface))]
+      .map(tree => activityBody(tree)[1])
+    if (surface === 'desktop') {
+      const images = lanes.map(lane => childrenOf(childrenOf(lane)[1])[0]?.props)
+      expect(images.map(image => image?.alt), surface).toEqual([
+        'task 1 (@code-reviewer), ended, unknown', 'job 1 (@shell), ended, unknown',
+      ])
+      for (const image of images) {
+        expect(String(image?.source), surface).toContain('data-part="dash"')
+        expect(String(image?.source), surface).toContain('<circle r="3.5" fill="none" stroke="#8a8a8a"')
+      }
+      const values = lanes.map(lane => childrenOf(lane)[2])
+      expect(values.map(value => textsOf(value)), surface).toEqual([['—'], ['—']])
+      expect(values.map(value => childrenOf(value).map(styleOf)), surface).toEqual(
+        Array(2).fill([[undefined, true, undefined]]),
+      )
+    } else {
+      for (const lane of lanes) {
+        const spans = childrenOf(lane).map(cell => childrenOf(cell)[0])
+        expect(spans.filter(span => textsOf(span)[0] === '○').map(span => span?.props?.dimColor), surface)
+          .toEqual([true])
+        expect([textsOf(spans.at(-1))[0], spans.at(-1)?.props?.dimColor], surface).toEqual(['       —', true])
+      }
     }
-    const [drawn] = agentRows(tree)
-    expect(textsOf(childrenOf(drawn)[2]), surface).toEqual(['—'])
-    expect(childrenOf(childrenOf(drawn)[2]).map(styleOf), surface).toEqual([[undefined, true, undefined]])
   }
 })
 
-const restoredAgentRows = (tree: unknown): Node[] => listRows(tree, 8)
-
-// A subagent that was restored has a cost from the restore on only: the cell shows `$x+`, one cell wider than a cost.
-// A column of 8 cells holds the widest, `$148.59+` and `<$0.001+`, on every row of the list.
-test('the cost of a restored subagent is `$x+` in a cell of 8 cells; a cost that is not known stays a dim dash', () => {
+// A subagent that was restored has a cost from the restore on only: the value shows `$x+`. The value's 8 cells hold
+// the widest, `$148.59+` and `<$0.001+`, on every lane.
+test('the cost of a restored subagent is `$x+` in a value of 8 cells; a cost not known stays a dim dash', () => {
   const costs: Array<[costUsd: number | null, shown: string]> = [
     [0.5, '$0.500+'], [12.345, '$12.35+'], [148.59, '$148.59+'], [0.0004, '<$0.001+'], [0, '$0+'], [null, '—'],
   ]
@@ -3834,17 +3598,19 @@ test('the cost of a restored subagent is `$x+` in a cell of 8 cells; a cost that
       for (const bodyColumns of [8, 45, 120]) {
         const tree = draw(withAgents(rows, surface), bodyColumns)
         expect(rowProblems(tree), where).toEqual([])
-        // Both rows of the list have the cell of 8 cells: the cost of the live one is drawn whole in it.
-        const drawn = restoredAgentRows(tree)
-        expect(drawn, where).toHaveLength(2)
-        const [live, restored] = drawn.map(row => childrenOf(row)[2])
-        expect(textsOf(restored), where).toEqual([shown])
-        expect(textsOf(live), where).toEqual(['$2.50'])
+        // Neither lane has a known end: they keep their order, the restored one first.
+        const [, restored, live] = activityBody(tree)
+        const valueOf = (lane: Node | undefined): string | undefined => (surface === 'desktop'
+          ? textsOf(childrenOf(lane)[2])[0]
+          : textsOf(childrenOf(lane).at(-1))[0])
         expect(shown.length, where).toBeLessThanOrEqual(8)
+        // A terminal line is cut to the body: at 8 columns the label alone overruns it, and the value is cut away.
+        if (surface === 'terminal' && bodyColumns < 20) continue
+        expect(valueOf(restored), where).toBe(surface === 'desktop' ? shown : shown.padStart(8))
+        expect(valueOf(live), where).toBe(surface === 'desktop' ? '$2.50' : '   $2.50')
+        if (surface === 'desktop') expect(childrenOf(restored)[2]?.props?.width, where).toBe(8)
       }
     }
-    // A pane with no restored row keeps the cell of 7 cells: nothing of the live layout moves.
-    expect(agentRows(draw(withAgents([agent(1, 'done')], surface))), surface).toHaveLength(1)
   }
 })
 
@@ -4045,4 +3811,217 @@ test('a running turn draws its own table, elapsed time and summary, not the last
   // Before any step has stopped there is no rate: the summary cell is empty.
   const unstarted = draw({ ...RIBBONED, turn: { ...RUNNING, steps: [], toolIntervals: [], tools: [] } })
   expect(headerRows(unstarted).find(header => header.id === 'turn')?.summary).toBeUndefined()
+})
+
+// ---- Activity (spec 0.7.0 §6) ----
+
+// §2.3's session at its own clock, in local time so that the axis labels hold in any zone: five subagents, three
+// tasks, main's three turns and its running turn, and a Total of $4.97, of which the subagents cost $1.77.
+const LANES_NOW = new Date(2026, 10, 16, 12, 4, 20).getTime()
+const lanesAgo = (seconds: number): number => LANES_NOW - seconds * 1000
+const LANES: PaneData = {
+  ...EMPTY,
+  usage: { rateLimits: [], costUsd: 4.97 },
+  turn: { ...RUNNING, startedAt: lanesAgo(134), steps: [], toolIntervals: [], tools: [] },
+  agents: agentsOf([
+    agent(1, 'running', {
+      description: 'Review the diff', type: 'pr-review:code-reviewer', startedAt: lanesAgo(360), costUsd: 0.31,
+    }),
+    agent(2, 'running', {
+      description: 'Plan critique', type: 'plan-critic', startedAt: null, costUsd: 0.41, restored: true,
+    }),
+    agent(3, 'done', {
+      description: 'Map the mask', type: 'explorer', startedAt: lanesAgo(69), endedAt: lanesAgo(46), costUsd: 0.12,
+    }),
+    agent(4, 'failed', {
+      description: 'Repro check', type: 'general-purpose', startedAt: lanesAgo(240), endedAt: lanesAgo(180),
+      costUsd: 0.05,
+    }),
+    agent(5, 'done', {
+      description: 'Engine facts', type: 'general-purpose', startedAt: lanesAgo(720), endedAt: lanesAgo(240),
+      costUsd: 0.88,
+    }),
+  ]),
+  tasks: tasksOf([
+    task(1, 'running', { description: 'npm test', startedAt: lanesAgo(220) }),
+    task(2, 'done', {
+      description: 'claude plugin test', startedAt: lanesAgo(580), endedAt: lanesAgo(562), durationMs: 18_200,
+    }),
+    task(3, 'stopped', {
+      description: 'dev server', startedAt: lanesAgo(600), endedAt: lanesAgo(360), durationMs: 240_000,
+    }),
+  ]),
+  mainTurns: [
+    { start: lanesAgo(750), end: lanesAgo(530) }, { start: lanesAgo(380), end: lanesAgo(220) },
+    { start: lanesAgo(134), end: null },
+  ],
+  now: LANES_NOW,
+}
+// §6.2's alts of the example's lanes, in their order. Plan critique is restored, so main's cost is not known.
+const LANE_ALTS = [
+  'main, running, unknown', 'Review the diff (@code-reviewer), running, $0.310', 'npm test (@shell), running, 3m 40s',
+  'Plan critique (@plan-critic), running, $0.410+', 'Map the mask (@explorer), done, $0.120',
+  'Repro check (@general-purpo…), failed, $0.050', 'Engine facts (@general-purpo…), done, $0.880',
+  'dev server (@shell), stopped, 4m 00s',
+]
+// The Activity section, and the rows of its body.
+const activityOf = (tree: unknown): Node | undefined => sectionOf(tree, 'activity')
+const activityBody = (tree: unknown): Node[] => childrenOf(childrenOf(activityOf(tree))[2])
+// The keys of the Buttons of a tree, in order.
+const buttonKeys = (tree: unknown): unknown[] =>
+  flat(tree).flatMap(({ node }) => (node.type === 'Button' ? [node.props?.key] : []))
+
+test('Activity replaces Subagents and Tasks', SLOW, async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  await seed($, clock, bottom(on, clock))
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await headers(ui), surface).toEqual([
+      '▾ Usage', '▾ Turn stats', '▾ Activity', '▾ MCP', '▾ Context sources', '▾ Log',
+    ])
+    expect((await ui.findAll({ type: 'Button' })).map(button => button.key), surface).toEqual([
+      'toggle:usage', 'toggle:turn', 'details:turn', 'toggle:activity', 'toggle:mcp', 'toggle:sources', 'toggle:log',
+    ])
+    // One of the two subagents runs; main's lane is not counted.
+    expect((await summaries(ui)).activity, surface).toBe('1/2')
+    await ui.unmount()
+  }
+})
+
+test('Activity is hidden with no subagents and no tasks', () => {
+  const mainOnly: PaneData = { ...LANES, agents: {}, tasks: {} }
+  for (const surface of SURFACES) {
+    for (const data of [EMPTY, mainOnly]) {
+      const tree = draw(onSurface(data, surface))
+      expect(buttonKeys(tree), surface).not.toContain('toggle:activity')
+      expect(activityOf(tree), surface).toBeUndefined()
+    }
+    // A lone subagent or a lone task brings it back.
+    expect(buttonKeys(draw(onSurface({ ...mainOnly, tasks: LANES.tasks }, surface))), surface)
+      .toContain('toggle:activity')
+  }
+})
+
+test('a lane row is a label of L cells, an Svg of 19 px and a value of 8 cells', () => {
+  // At 41 columns L is 12 cells and the area 41 × 8 − (12 + 10) × 8 = 152 px.
+  const tree = draw(LANES, 41)
+  const body = activityBody(tree)
+  expect(body).toHaveLength(10)
+  const lanes = body.slice(0, 8)
+  for (const lane of lanes) {
+    const [label, area, value, ...rest] = childrenOf(lane)
+    expect(rest).toEqual([])
+    expect(lane.props).toMatchObject({ flexDirection: 'row', alignItems: 'center', columnGap: 1 })
+    expect(isFixed(label) && label?.props?.width).toBe(12)
+    expect(childrenOf(label)).toHaveLength(1)
+    expect(isSpanLine(childrenOf(label)[0])).toBe(true)
+    expect(isFlex(area)).toBe(true)
+    expect(childrenOf(area).map(image => [image.type, image.props?.width, image.props?.height])).toEqual([
+      ['Svg', 152, 19],
+    ])
+    expect(isFixed(value)).toBe(true)
+    expect(value?.props).toMatchObject({ width: 8, justifyContent: 'flex-end' })
+  }
+  expect(lanes.map(lane => childrenOf(childrenOf(lane)[1])[0]?.props?.alt)).toEqual(LANE_ALTS)
+  expect(lanes.map(lane => textsOf(childrenOf(lane)[0]).join(''))).toEqual([
+    'main', 'Review the …', 'npm test', 'Plan critiq…', 'Map the mask', 'Repro check', 'Engine facts', 'dev server',
+  ])
+  // Running lanes and main primary, the rest dim.
+  expect(lanes.map(lane => flat(childrenOf(lane)[0]).find(({ node }) => node.type === 'Text')?.node.props?.dimColor))
+    .toEqual([undefined, undefined, undefined, undefined, true, true, true, true])
+  expect(lanes.map(lane => textsOf(childrenOf(lane)[2]))).toEqual([
+    ['—'], ['$0.310'], ['3m 40s'], ['$0.410+'], ['$0.120'], ['$0.050'], ['$0.880'], ['4m 00s'],
+  ])
+  // The axis row: an empty label cell, the axis 152 × 16, an empty value cell.
+  const [axisLabel, axisArea, axisValue, ...axisRest] = childrenOf(body[8])
+  expect(axisRest).toEqual([])
+  expect(body[8]?.props).toMatchObject({ flexDirection: 'row', alignItems: 'center', columnGap: 1 })
+  expect(isFixed(axisLabel) && axisLabel?.props?.width).toBe(12)
+  expect(isFlex(axisArea)).toBe(true)
+  expect(childrenOf(axisArea).map(image => [image.type, image.props?.width, image.props?.height, image.props?.alt]))
+    .toEqual([['Svg', 152, 16, 'axis 11:52 to now']])
+  expect(isFixed(axisValue) && axisValue?.props?.width).toBe(8)
+  expect([...childrenOf(axisLabel), ...childrenOf(axisValue)]).toEqual([])
+  // `+1 more`: dim, at column 0.
+  expect(textsOf(body[9])).toEqual(['+1 more'])
+  expect(body[9]?.props?.paddingLeft).toBeUndefined()
+  expect(childrenOf(body[9]).map(styleOf)).toEqual([[undefined, true, undefined]])
+  // No element of the section is keyed by a lane id: its one key is its chevron's.
+  const ids = new Set([...Object.keys(LANES.agents), ...Object.keys(LANES.tasks), 'main'])
+  const keys = flat(activityOf(tree)).flatMap(({ node }) => (node.props?.key === undefined ? [] : [node.props.key]))
+  expect(keys).toEqual(['toggle:activity'])
+  expect(keys.some(key => ids.has(String(key)))).toBe(false)
+  expect(rowProblems(tree)).toEqual([])
+})
+
+test('the terminal Activity rows at 44 columns are §6.5\'s', () => {
+  const tree = draw(onSurface(LANES, 'terminal'), 44)
+  const [header] = headerRows(activityOf(tree))
+  expect([header?.title, header?.label, header?.summary]).toEqual(['Activity', '▾', '3/8'])
+  const body = activityBody(tree)
+  expect(body.every(isSpanLine)).toBe(true)
+  // Main's value is a dash: Plan critique is restored, so main's cost is not known. §6.5's example, which shows
+  // `$3.20`, is aligned in Task 13.
+  expect(body.map(line => spanTexts(line).join(''))).toEqual([
+    'main          ─────    ─────  ━━━━◐        —',
+    'Review the d…           ━━━━━━━━━━◐   $0.310',
+    'npm test                    ━━━━━━◐   3m 40s',
+    'Plan critique ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄◐  $0.410+',
+    'Map the mask                    ─✓    $0.120',
+    'Repro check                ──✗        $0.050',
+    'Engine facts  ─────────────✓          $0.880',
+    'dev server       ───────■             4m 00s',
+    '                11:55    12:00  now',
+    '+1 more',
+  ])
+  expect(rowProblems(tree)).toEqual([])
+})
+
+test('the old agents and tasks folds are ignored', () => {
+  for (const surface of SURFACES) {
+    const tree = draw(onSurface({ ...LANES, collapsed: { agents: true, tasks: true } }, surface))
+    expect(headerRows(tree).find(header => header.id === 'activity')?.label, surface).toBe('▾')
+    expect(activityBody(tree), surface).toHaveLength(10)
+  }
+})
+
+test('the Activity rows count: rule, header, lanes, axis and +N more', () => {
+  // With no Total there is no split line, with or without the subagents: only the Activity block differs.
+  const log = logLines(60)
+  const withLanes: PaneData = { ...LANES, usage: { rateLimits: [] }, log, logCount: 60 }
+  const without: PaneData = { ...withLanes, agents: {}, tasks: {} }
+  for (const surface of SURFACES) {
+    for (const bodyColumns of [20, 45, 120]) {
+      const where = `${surface} ${bodyColumns}`
+      const tree = draw(onSurface(withLanes, surface), bodyColumns, 60)
+      const none = draw(onSurface(without, surface), bodyColumns, 60)
+      expect(rowsOf(activityOf(tree) as Node, bodyColumns, 1.5), where).toBe(12)
+      expect(rowsAbove(tree, bodyColumns, surface) - rowsAbove(none, bodyColumns, surface), where).toBe(12)
+      expect(logRows(none).length - logRows(tree).length, where).toBe(12)
+      expect(moreOf(tree), where).toBe(60 - logRows(tree).length)
+    }
+  }
+})
+
+test('while a subagent is restored main\'s lane value is a dim dash; with none restored it is Session', () => {
+  // LANES's Plan critique is restored: Session, Total less a cost that is not the whole, is not known.
+  const { a2, ...rest } = LANES.agents
+  const live: PaneData = { ...LANES, agents: { ...rest, a2: { ...(a2 as AgentRow), restored: undefined } } }
+  for (const surface of SURFACES) {
+    const mainOf = (data: PaneData): Node | undefined => activityBody(draw(onSurface(data, surface), 44))[0]
+    if (surface === 'desktop') {
+      const [, image, value] = childrenOf(mainOf(LANES))
+      expect(String(childrenOf(image)[0]?.props?.alt), surface).toBe('main, running, unknown')
+      expect(childrenOf(value).map(el => [textsOf(el)[0], el.props?.dimColor]), surface).toEqual([['—', true]])
+      const [, liveImage, liveValue] = childrenOf(mainOf(live))
+      expect(String(childrenOf(liveImage)[0]?.props?.alt), surface).toBe('main, running, $3.20')
+      expect(childrenOf(liveValue).map(el => [textsOf(el)[0], el.props?.dimColor]), surface).toEqual([
+        ['$3.20', undefined],
+      ])
+    } else {
+      const last = (data: PaneData): Node | undefined => childrenOf(childrenOf(mainOf(data)).at(-1))[0]
+      expect([textsOf(last(LANES))[0], last(LANES)?.props?.dimColor], surface).toEqual(['       —', true])
+      expect([textsOf(last(live))[0], last(live)?.props?.dimColor], surface).toEqual(['   $3.20', undefined])
+    }
+  }
 })

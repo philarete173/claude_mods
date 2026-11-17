@@ -290,7 +290,7 @@ function inBackground($: EngineInterface, job: () => Promise<void>): void {
   })
 }
 
-// Rebuilds the Subagents, Tasks and Log from the rows of the main conversation (restore.ts), under what is live. The
+// Rebuilds the subagents, tasks and Log from the rows of the main conversation (restore.ts), under what is live. The
 // reads were asked for in the frame of the hook, with the epoch and whether a reset ran, so nothing raced them: `asked`
 // is the rows (null when the read failed), `isEmpty` whether the pane was empty, `turnText` the text of the turn whose
 // own rows are cut (an in-process resume). A restore that began during a reset is dropped, and each write checks, in
@@ -1233,9 +1233,9 @@ export const register: Register = (on, options) => {
     if (spawned.agentId !== undefined) {
       const { agentId } = spawned
       const now = await $.clock.now()
-      // The Subagents list draws the description and the type as the row keeps them, and the Log draws the type as the
+      // An Activity lane draws the description and the type as the row keeps them, and the Log draws the type as the
       // `who` of the agent's lines, so both go through the pipeline of the spawn line here: the format and control
-      // characters (a U+202E would reorder what the list shows, and the engine refuses a text that holds a control
+      // characters (a U+202E would reorder what the lane shows, and the engine refuses a text that holds a control
       // character and draws its own pane in place of the mod's), then the secrets, then the cut. No other step writes a
       // row from what the engine gave: a sync and the end of a run only change a row that is there.
       const type = logText(e.subagentType ?? e.name ?? 'agent')

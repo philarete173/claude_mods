@@ -1,4 +1,4 @@
-// The rebuild of the session-panel mod's Subagents, Tasks and Log from the session's messages: one walk over the rows
+// The rebuild of the session-panel mod's subagents, tasks and Log from the session's messages: one walk over the rows
 // that `$.session.messages()` returns, each row drawn as the live hooks of register.tsx draw it. It imports nothing
 // from the engine and never takes `$`, so it can be tested on its own. The rows are untrusted (another plugin's hook
 // may answer the call): a row or a field of the wrong type counts as absent, ids key Maps only, and nothing read from
@@ -54,7 +54,7 @@ const textOf = (v: unknown): string | undefined => (typeof v === 'string' ? v : 
 const entry = (who: string, text: string, kind: LogKind, outcome?: string): LogEntry =>
   ({ at: null, who, text, kind, ...(outcome === undefined ? {} : { outcome }) })
 
-// The Subagents, Tasks and Log that the rows tell, oldest to newest in one pass, from the row after the latest
+// The subagents, tasks and Log that the rows tell, oldest to newest in one pass, from the row after the latest
 // compaction summary. Each line is kept as its builder and only the newest LOG_MAX are built (cleaned); a row is
 // cleaned once, when made. Restored rows have no clock: no start, no end time. `alive` holds the agents that still run.
 export function restoreFromMessages(rows: readonly unknown[], alive: ReadonlySet<string>, root: string): Restored {

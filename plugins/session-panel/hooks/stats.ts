@@ -251,16 +251,6 @@ export function splitCost(totalUsd: number | undefined, subagentsUsd: number): C
   }
 }
 
-// The order of the Subagents and of the Tasks: the rows that run first, then the newest start first; a row of no known
-// start goes last of its group. The input is left as it was.
-function orderByStart<T extends { status: string; startedAt: number | null }>(rows: T[]): T[] {
-  const rank = (r: T): number => (r.status === 'running' ? 0 : 2) + (r.startedAt === null ? 1 : 0)
-  return [...rows].sort((a, b) => rank(a) - rank(b) || (b.startedAt ?? 0) - (a.startedAt ?? 0))
-}
-
-// Running first, then the newest start first; a row of no known start last of its group, in the given order.
-export const orderAgents = (rows: AgentRow[]): AgentRow[] => orderByStart(rows)
-
 export const LOG_MAX = 200 // the most lines the Log keeps: the newest ones
 
 // Newest first, capped at LOG_MAX entries unless `max` says otherwise.
@@ -268,7 +258,7 @@ export function pushLog(log: LogEntry[], entry: LogEntry, max?: number): LogEntr
   return [entry, ...log].slice(0, max ?? LOG_MAX)
 }
 
-export const TYPE_MAX = 14 // the most an agent type takes: the log's `who`; the `@type` column adds the `@`
+export const TYPE_MAX = 14 // the most an agent type takes: the Log's `who`; a lane's tag adds the `@`
 
 // The agent type without its plugin prefix, at most 14 characters: a longer one is cut to 13 and ends in an ellipsis.
 export function shortType(type: string): string {
@@ -808,7 +798,7 @@ function runningTask(kind: TaskKind, id: string, texts: string[], now: number): 
 // The task that a tool call has started in the background, or null when it started none. A Bash command that runs in
 // the background has a `backgroundTaskId` in its result, whoever sent it there: its own input, its timeout or a move. A
 // Monitor and a Workflow have a `taskId`. Each is the id that the notification of the task names (`<task-id>`). Another
-// tool starts none that the pane tracks: a subagent has its row in Subagents. `now` is the time the call returned and
+// tool starts none that the pane tracks: a subagent has a row of its own. `now` is the time the call returned and
 // `calledAt` the time it began, before the engine ran it (`now` when not given). A task starts at `now`; a Bash command
 // may have begun earlier (see below).
 export function taskFromCall(
@@ -1024,9 +1014,6 @@ export function finishTask(
 
   return { ...row, status, endedAt: at, durationMs: durationMs ?? ran, ...(isBound ? { durationAtMost: true } : {}) }
 }
-
-// The same rule as orderAgents.
-export const orderTasks = (rows: TaskRow[]): TaskRow[] => orderByStart(rows)
 
 // The entries of `git status --porcelain -z`: `XY path`, the two status letters, a space and the path, each ended by a
 // NUL. A rename or a copy (an R or a C in either letter) is followed by a field that is not an entry: the path it came

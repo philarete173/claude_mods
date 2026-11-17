@@ -131,6 +131,49 @@ test('the moved taskTime is as it was', () => {
   expect(taskTime({ ...task('t', 'x', 'done', ago(9), ago(1), 8000), durationAtMost: true }, NOW)).toBe('\u{2264}8.0s')
 })
 
+// The cases of view.test.tsx's task rows before Activity, against taskTime: how long a running task has run, how long
+// a finished one ran, and null where that is not known or is wider than the value's 8 cells.
+test('taskTime: the time a task ran, null when not known or too wide for its cell', () => {
+  const hours = (h: number, m = 0): number => (h * 60 + m) * 60_000
+  const ran = (status: TaskRow['status'], patch: Partial<TaskRow> = {}): TaskRow =>
+    ({ ...task('t', 'x', status, ago(90), status === 'running' ? null : ago(1), status === 'running' ? null : 5000),
+      ...patch })
+  const cases: Array<[name: string, row: TaskRow, time: string | null]> = [
+    ['running since 90 s', ran('running'), '1m 30s'],
+    ['running since 0.4 s', ran('running', { startedAt: NOW - 400 }), '0.4s'],
+    ['running since 100 hours', ran('running', { startedAt: NOW - hours(100) }), '100h 00m'],
+    // A wall clock that was put back since the task began never gives a negative time.
+    ['running, the clock put back', ran('running', { startedAt: NOW + 5000 }), '0.0s'],
+    ['running, its start not seen', ran('running', { startedAt: null }), null],
+    // A task that has ended shows how long it ran, and not the time since its start.
+    ['done in 72 s', ran('done', { durationMs: 72_000, startedAt: NOW - 3_600_000 }), '1m 12s'],
+    ['failed in 5 s', ran('failed'), '5.0s'],
+    ['stopped after 2 min', ran('stopped', { durationMs: 120_300 }), '2m 00s'],
+    ['ended after 5 s', ran('ended'), '5.0s'],
+    ['done, no start but a duration', ran('done', { startedAt: null, durationMs: 72_000 }), '1m 12s'],
+    ['done, no duration', ran('done', { durationMs: null }), null],
+    ['done, no start and no duration', ran('done', { startedAt: null, durationMs: null }), null],
+    ['ended, no duration', ran('ended', { durationMs: null }), null],
+    // A time that ran to a late notice is a bound: `≤` (U+2264) stands before it.
+    ['done, at most 12.2 s', ran('done', { durationMs: 12_200, durationAtMost: true }), '\u{2264}12.2s'],
+    // A time is drawn whole or not at all: `999h 59m` is the widest that fits, `≤99h 59m` with a bound's `≤`.
+    ['a duration of 2^53 - 1 ms', ran('done', { durationMs: Number.MAX_SAFE_INTEGER }), null],
+    ['done in 1000 hours', ran('done', { durationMs: hours(1000) }), null],
+    ['done in 999h 59m', ran('done', { durationMs: hours(999, 59) }), '999h 59m'],
+    ['running since 1000 hours', ran('running', { startedAt: NOW - hours(1000) }), null],
+    ['running since 999h 59m', ran('running', { startedAt: NOW - hours(999, 59) }), '999h 59m'],
+    ['99h 59m, at most', ran('done', { durationMs: hours(99, 59), durationAtMost: true }), '\u{2264}99h 59m'],
+    ['100 hours, at most', ran('done', { durationMs: hours(100), durationAtMost: true }), null],
+  ]
+  for (const [name, row, time] of cases) {
+    expect(taskTime(row, NOW), name).toBe(time)
+    if (time !== null) expect(cellsOf(time), name).toBeLessThanOrEqual(TASK_TIME_CELLS)
+  }
+  // The time of a running task follows the clock of the drawing; a finished one's does not move.
+  expect(taskTime(ran('running'), NOW + 30_000)).toBe('2m 00s')
+  expect(taskTime(ran('done', { durationMs: 72_000 }), NOW + 30_000)).toBe('1m 12s')
+})
+
 test('hostile ids are plain ids', () => {
   const agents = JSON.parse(
     '{"__proto__": {"id": "__proto__", "description": "proto", "type": "a", "model": null, "status": "running",' +
