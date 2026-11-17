@@ -11,17 +11,24 @@ import { bandTerminal, drawBand } from './band'
 import type { BandInput } from './band'
 import type { Span } from './cells'
 import { TASK_TIME_CELLS, taskTime } from './lanes'
+import { drawRibbon, legendItems, ribbonFromAcc, ribbonFromTurn, ribbonTerminal, withLive } from './ribbon'
+import type { RibbonInput } from './ribbon'
 import {
-  fmtClock, fmtCountdown, fmtDuration, fmtPct, fmtRate, fmtTokens, fmtTtft, fmtUsd, orderAgents, orderTasks, shortType,
-  splitCost, TYPE_MAX,
+  computeTurnStats, fmtClock, fmtCountdown, fmtDuration, fmtPct, fmtRate, fmtTokens, fmtTtft, fmtUsd, normTurn,
+  orderAgents, orderTasks, shortType, splitCost, TYPE_MAX,
 } from './stats'
-import type { AgentRow, LogEntry, TaskStatus } from './stats'
-import { runningOf } from './stations'
+import type { AgentRow, LogEntry, TaskStatus, TurnStats } from './stats'
+import { runningOf, STATION_HUES, zeroStationMs } from './stations'
 import type { Motion } from './stations'
-import { BAD, BLUE, clampPct, GREEN, meterColor, NEUTRAL, OK, pctColor, RED, SVG_MAX_PX } from './svg'
+import {
+  BAD, BLUE, clampPct, GREEN, meterColor, NEUTRAL, OK, pctColor, RED, SVG_MAX_PX, svgPx, themeStyle,
+} from './svg'
 import type { Look } from './svg'
 
-export type SectionId = 'usage' | 'turn' | 'agents' | 'tasks' | 'mcp' | 'sources' | 'log'
+// `turnDetails` is a fold with no header of its own: the details of Turn stats, closed by default (isSectionFolded).
+export type SectionId = 'usage' | 'turn' | 'agents' | 'tasks' | 'mcp' | 'sources' | 'log' | 'turnDetails'
+// The sections that have a header row, an icon and a chevron.
+type HeaderId = Exclude<SectionId, 'turnDetails'>
 
 type State = PluginState['session-panel']
 
@@ -115,6 +122,10 @@ const LOG_GAP_CELLS = 1 // the gap between the cells of a log row
 const STATUS_GAP_CELLS = 1 // the gap between the cells of a subagent or task row, and between those of its group
 const STATUS_ROW_GAPS = 3 // the gaps of such a row that has its tag: two between its cells, one in its group
 const TEXT_MARK_CELLS = 1 // the mark of such a row where there is no icon slot
+const RIBBON_ROOM_PX = 64 // §5.1: the ribbon's area is the body less this, the gap and the elapsed time
+const RIBBON_PX = 16 // the ribbon's height
+const ELAPSED_CELLS = 7 // `2m 14s`, right-aligned
+const SWATCH_PX = 8 // the legend's Model swatch
 
 // The dot of an MCP chip. The no-break space keeps the gap: a plain space at the end of a flex item may be dropped.
 const DOT = '●\u00a0'
@@ -154,7 +165,7 @@ const ICON_ROOT =
 const icon = (body: string): string => `<svg ${ICON_ROOT}>${body}</svg>`
 const dot = (cy: number): string => `<circle cx="2.25" cy="${cy}" r=".9" fill="${NEUTRAL}" stroke="none"/>`
 
-const ICON: Record<SectionId | 'branch' | 'changes', string> = {
+const ICON: Record<HeaderId | 'branch' | 'changes', string> = {
   // Usage: a stopwatch.
   usage: icon('<circle cx="7" cy="8" r="4.75"/><path d="M5.5 1.5h3M7 1.5v1.75M7 8V5.75"/>'),
   // Turn stats: a bar chart.
@@ -188,6 +199,12 @@ const ICON: Record<SectionId | 'branch' | 'changes', string> = {
       '<path d="M6.25 11.5l-.5 1.75 1.75-.5 4-4a1.06 1.06 0 0 0-1.25-1.25z"/>',
   ),
 }
+
+// The legend's swatch: a rounded square in the Model hue of the ribbon (spec 0.7.0 §5.4).
+const SWATCH_SVG =
+  `<svg xmlns="http://www.w3.org/2000/svg" width="${SWATCH_PX}" height="${SWATCH_PX}"` +
+  ` viewBox="0 0 ${SWATCH_PX} ${SWATCH_PX}">${themeStyle([[STATION_HUES.model.dark, STATION_HUES.model.light]])}` +
+  `<rect width="${SWATCH_PX}" height="${SWATCH_PX}" rx="1.5" fill="${STATION_HUES.model.dark}"/></svg>`
 
 // Status icons, the Subagents' and the Tasks' alike, are shape-coded, so colour is never the only cue: a half-filled
 // circle, a check, a cross, a stop square, and an empty ring for a task that is over with no known end.
@@ -366,12 +383,18 @@ function row(d: Draw, label: string, value: string, color?: string): RenderEleme
   )
 }
 
-const isFolded = (d: Draw, id: SectionId): boolean => d.data.collapsed[id] === true
+// Whether a fold is closed. A section is open unless the map folds it; the details of Turn stats are closed unless the
+// map opens them (spec 0.7.0 §5.6). Own keys only: the map comes from the store.
+export const isSectionFolded = (collapsed: Record<string, boolean>, id: SectionId): boolean =>
+  id === 'turnDetails'
+    ? !(Object.hasOwn(collapsed, 'turnDetails') && collapsed.turnDetails === false)
+    : Object.hasOwn(collapsed, id) && collapsed[id] === true
+const isFolded = (d: Draw, id: SectionId): boolean => isSectionFolded(d.data.collapsed, id)
 
 // The header row of a section: an icon, the bold title, a dim chevron that folds it, a dim summary at the right. The
 // title is a Text because a Button label cannot be bold; the chevron is a plain Button, dim at rest and full strength
 // under the pointer or the focus (§5.4, §12.1).
-function sectionHeader(d: Draw, id: SectionId, title: string, summary: string): RenderElement {
+function sectionHeader(d: Draw, id: HeaderId, title: string, summary: string): RenderElement {
   const { Box, Text, Button } = d.ui
 
   return (
@@ -397,7 +420,7 @@ function sectionHeader(d: Draw, id: SectionId, title: string, summary: string): 
 // `contentRows` where the caller knows that they take another number (the chips of MCP wrap). These are the rows of the
 // section's own body, not the Pane's `bodyRows`, the rows the whole pane has.
 function section(
-  d: Draw, id: SectionId, title: string, summary: string, body: RenderElement[], contentRows = body.length,
+  d: Draw, id: HeaderId, title: string, summary: string, body: RenderElement[], contentRows = body.length,
 ): Block {
   const { Box } = d.ui
   const isOpen = !isFolded(d, id)
@@ -598,26 +621,85 @@ function usageSection(d: Draw): Block {
 
 type Line = [label: string, value: string | null, color?: string]
 
-// The last finished turn; a row whose figure is unknown is left out. With none, a dim line that a narrow pane cuts.
+// The turn the ribbon draws (spec 0.7.0 §5.7, §8.3): the running one, live, with its stats so far; else the last one;
+// else none. A lastTurn of 0.6.1 has no ribbon: its bar is empty.
+function turnShown(d: Draw): { input: RibbonInput; stats: TurnStats } | null {
+  const { turn, lastTurn, inFlight, now, usage } = d.data
+  if (turn !== null) {
+    const acc = normTurn(turn)
+    return {
+      input: ribbonFromAcc(acc, inFlight, now),
+      stats: computeTurnStats(acc, now - turn.startedAt, undefined, usage.costUsd ?? null),
+    }
+  }
+  if (lastTurn === null) return null
+  const ribbon = lastTurn.ribbon ?? {
+    startedAt: 0, endedAt: lastTurn.elapsedMs, steps: [], tools: [], earlier: zeroStationMs(),
+  }
+
+  return { input: ribbonFromTurn(ribbon), stats: lastTurn }
+}
+
+// Turn stats (spec 0.7.0 §5): the ribbon with the elapsed time, its legend, and the details Button that folds today's
+// table; a row of it whose figure is unknown is left out. With no turn, a dim line that a narrow pane cuts.
 function turnSection(d: Draw): Block {
-  const turn = d.data.lastTurn
-  if (turn === null) {
+  const { Box, Text, Button, Svg } = d.ui
+  const shownTurn = turnShown(d)
+  if (shownTurn === null) {
     return section(d, 'turn', 'Turn stats', '', [shrinkText(d, 'No completed turn yet', { dimColor: true })])
   }
-  const lines: Line[] = [
-    ['Response', orNull(turn.responseRate, fmtRate)],
-    ['Whole turn', orNull(turn.wholeTurnRate, fmtRate)],
-    ['Elapsed', fmtDuration(turn.elapsedMs)],
-    ['Model time', fmtDuration(turn.modelMs)],
-    ['Tool time', fmtDuration(turn.toolMs)],
-    ['Average TTFT', orNull(turn.ttftMs, fmtTtft)],
-    ['Steps', turn.steps > 1 ? String(turn.steps) : null],
-    ['Tokens', `${fmtTokens(turn.tokensIn)} ↑ · ${fmtTokens(turn.tokensOut)} ↓`],
-    ['Cache', orNull(turn.cachePct, pct => fmtPct(pct, 0)), (turn.cachePct ?? 0) >= 50 ? OK : undefined],
-    ['Cost', orNull(turn.costUsd, fmtUsd)],
-  ]
-  const rows = lines.flatMap(([label, value, color]) => (value === null ? [] : [row(d, label, value, color)]))
-  const summary = orNull(turn.responseRate ?? turn.wholeTurnRate, fmtRate) ?? ''
+  const { input, stats } = shownTurn
+  // The running part counts in the legend and the alt; the table is computeTurnStats' own.
+  const shown = withLive(stats, input)
+  const isOpen = !isFolded(d, 'turnDetails')
+  const rows: RenderElement[] = []
+  if (Svg === undefined) {
+    rows.push(spanLine(d, ribbonTerminal(input, d.cols)), spanLine(d, legendItems(shown, d.cols, 'terminal')))
+  } else {
+    const barPx = svgPx(d.bodyPx - RIBBON_ROOM_PX)
+    const ribbon = drawRibbon(input, barPx, d.look, shown)
+    rows.push(
+      <Box flexDirection="row" height={1} alignItems="center" columnGap={1}>
+        <Box flexDirection="row" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+          <Svg source={ribbon.svg} alt={ribbon.alt} width={barPx} height={RIBBON_PX} />
+        </Box>
+        <Box flexDirection="row" width={ELAPSED_CELLS} flexShrink={0} justifyContent="flex-end">
+          <Text>{fmtDuration(shown.elapsedMs)}</Text>
+        </Box>
+      </Box>,
+      <Box flexDirection="row" alignItems="center" columnGap={1}>
+        <Box flexDirection="row" width={1} flexShrink={0} alignItems="center">
+          <Svg source={SWATCH_SVG} alt="Model" width={SWATCH_PX} height={SWATCH_PX} />
+        </Box>
+        {spanLine(d, legendItems(shown, d.cols, 'desktop'))}
+      </Box>,
+    )
+  }
+  rows.push(
+    <Button
+      plain
+      dimColor
+      key="details:turn"
+      label={isOpen ? '▾ details' : '▸ details'}
+      onPress={() => d.handlers.onToggle('turnDetails')}
+    />,
+  )
+  if (isOpen) {
+    const lines: Line[] = [
+      ['Response', orNull(stats.responseRate, fmtRate)],
+      ['Whole turn', orNull(stats.wholeTurnRate, fmtRate)],
+      ['Elapsed', fmtDuration(stats.elapsedMs)],
+      ['Model time', fmtDuration(stats.modelMs)],
+      ['Tool time', fmtDuration(stats.toolMs)],
+      ['Average TTFT', orNull(stats.ttftMs, fmtTtft)],
+      ['Steps', stats.steps > 1 ? String(stats.steps) : null],
+      ['Tokens', `${fmtTokens(stats.tokensIn)} ↑ · ${fmtTokens(stats.tokensOut)} ↓`],
+      ['Cache', orNull(stats.cachePct, pct => fmtPct(pct, 0)), (stats.cachePct ?? 0) >= 50 ? OK : undefined],
+      ['Cost', orNull(stats.costUsd, fmtUsd)],
+    ]
+    rows.push(...lines.flatMap(([label, value, color]) => (value === null ? [] : [row(d, label, value, color)])))
+  }
+  const summary = orNull(stats.responseRate ?? stats.wholeTurnRate, fmtRate) ?? ''
 
   return section(d, 'turn', 'Turn stats', summary, rows)
 }
@@ -678,7 +760,7 @@ type StatusColumns = { desktopTagCells: number; terminalTagCells: number; valueC
 // The summary counts the rows that run (`2/5`), and all of them when none does. Up to MAX_STATUS_ROWS are drawn, and
 // the ones that do not fit are counted, in line with the descriptions. A row each, and the line that counts the rest is
 // one more.
-function statusSection(d: Draw, id: SectionId, title: string, items: StatusRow[], columns: StatusColumns): Block {
+function statusSection(d: Draw, id: HeaderId, title: string, items: StatusRow[], columns: StatusColumns): Block {
   const { Svg } = d.ui
   if (items.length === 0) return NO_BLOCK
   const running = items.filter(item => item.status === 'running').length

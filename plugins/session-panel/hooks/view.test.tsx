@@ -2,11 +2,12 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock, Plugin } from 'claude-code/testing'
 import type { On, RenderPropsOf, RenderSurface, SessionRateLimit } from 'claude-code'
 
-import { chipRows, limitMeterWidth, meterSvg, renderPane, spanLine } from './view'
+import { chipRows, isSectionFolded, limitMeterWidth, meterSvg, renderPane, spanLine } from './view'
 import type { PaneData } from './view'
 import { restoreFromMessages } from './restore'
-import { emptyStationsState } from './stations'
-import type { AgentRow, AgentStatus, LogEntry, TaskKind, TaskRow, TaskStatus, TurnStats } from './stats'
+import { emptyStationsState, STATION_HUES, zeroStationMs } from './stations'
+import { fmtDuration } from './stats'
+import type { AgentRow, AgentStatus, LogEntry, TaskKind, TaskRow, TaskStatus, TurnAcc, TurnStats } from './stats'
 
 // The state of the pane is seeded the way register.test.ts does it: the events of a session run through the real
 // hooks, over a bottom that answers as the engine would, and the pane is mounted on a surface to see what it draws.
@@ -523,6 +524,10 @@ const rowProblems = (tree: unknown): string[] => {
 test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   await seed($, clock, bottom(on, clock))
+  // The details of Turn stats are closed by default: one press opens them for both surfaces, which share the map.
+  const opener = await mountPane($, 'desktop')
+  await opener.press({ key: 'details:turn' })
+  await opener.unmount()
 
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
@@ -566,9 +571,10 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
     ])
     const buttons = await ui.findAll({ type: 'Button' })
     expect(buttons.map(button => button.key)).toEqual([
-      'toggle:usage', 'toggle:turn', 'toggle:agents', 'toggle:mcp', 'toggle:sources', 'toggle:log',
+      'toggle:usage', 'toggle:turn', 'details:turn', 'toggle:agents', 'toggle:mcp', 'toggle:sources', 'toggle:log',
     ])
-    // The chevron is a plain Button, dim at rest. The title is a Text, and the only bold ones are the titles.
+    // The chevron is a plain Button, dim at rest, and so is the details Button. The title is a Text, and the only bold
+    // ones are the titles.
     expect(buttons.every(button => button.props.plain === true && button.props.dimColor === true), surface).toBe(true)
     expect((await ui.findAll({ type: 'Text' })).filter(el => el.props.bold === true).map(el => el.text)).toEqual([
       'Session', 'Project', ...TITLES,
@@ -581,8 +587,12 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
     for (const text of ['5-hour', 'Weekly', '3%', '24%', '↻ 2h 13m', '↻ 5d 15h']) {
       expect(await has(ui, text), `${surface}: ${text}`).toBe(true)
     }
-    // Turn stats: every row of a turn that took two steps, in the order of the mockup. The answer ran 84 tokens over
-    // its request of 0.7 s.
+    // Turn stats: the legend of the ribbon, then, the details open, every row of a turn that took two steps, in the
+    // order of the mockup. The answer ran 84 tokens over its request of 0.7 s.
+    for (const text of ['Model', 'Tools', /^2.steps$/]) {
+      expect(await ui.find({ type: 'Text', text }), `${surface}: legend ${text}`).toBeDefined()
+    }
+    expect((await ui.find({ key: 'details:turn' }))?.props.label, surface).toBe('▾ details')
     for (const text of [
       'Response', '~120 tok/s', 'Whole turn', 'Elapsed', '33.5s', 'Model time', '1.7s', 'Tool time', '0.3s',
       'Average TTFT', 'Steps', 'Tokens', '912 ↑ · 777 ↓', 'Cache', '99%', 'Cost', '$0.005',
@@ -644,7 +654,7 @@ test('a chevron folds its section, the store keeps the map, a second press unfol
   // What the body of each section shows that its header does not.
   const bodies: [id: string, title: string, text: string | RegExp][] = [
     ['usage', 'Usage', 'Weekly'],
-    ['turn', 'Turn stats', 'Whole turn'],
+    ['turn', 'Turn stats', 'Tools'],
     ['agents', 'Subagents', /^Revert stockUnits$/],
     ['mcp', 'MCP', 'codebase-memory'],
     ['sources', 'Context sources', 'Skills'],
@@ -688,6 +698,7 @@ test('the folded sections of the last session stay folded: the map comes from th
       '▾ Usage', '▸ Turn stats', '▾ Subagents', '▾ MCP', '▾ Context sources', '▸ Log',
     ])
     expect(await has(ui, 'Whole turn')).toBe(false)
+    expect(await has(ui, 'Tools')).toBe(false) // the legend, which an open Turn stats shows with its details closed
     expect(await has(ui, 'fix the stock order qty')).toBe(false)
     // A folded section keeps its summary.
     expect(await ui.find({ type: 'Text', text: '~120 tok/s' })).toBeDefined()
@@ -898,7 +909,8 @@ test('the percent, the meter and the band\'s ring turn amber from 80% and red fr
 
 test('a turn of one tool step hides Response and Steps; the cache is green from 50%', SLOW, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
-  bottom(on, clock)
+  // The details of Turn stats open, as the store of the last session keeps them: the table is what is checked.
+  bottom(on, clock, { collapsed: { turnDetails: false } })
   await $.session.start(START)
   await clock.advance(1)
   // 100 of 1000 input tokens came from the cache.
@@ -1016,12 +1028,12 @@ test('a subagent shows its status as a shape and a colour: ✗ for failed, a dim
 
 // A body that leaves the Log room for 20 of the 22 events below. Above the Log the mounted pane has the Session card
 // (the Session row and the band: at the 40 columns of the mount the band is 5 rows on the desktop, and the core line
-// and 3 grid rows on the terminal), the placeholder of Turn stats (3) and the one subagent (3), and the Log's rule and
-// header are 2 more: 14 rows on the desktop, 13 on the terminal. The 21 rows that are left are 20 lines and the line
-// that counts the other 2.
+// and 3 grid rows on the terminal), Turn stats (5: the last start leaves a turn running, drawn as the ribbon) and the
+// one subagent (3), and the Log's rule and header are 2 more: 16 rows on the desktop, 15 on the terminal. The 21 rows
+// that are left are 20 lines and the line that counts the other 2.
 const BODY_FOR_20_LINES: Record<Surface, RenderPropsOf['Pane']> = {
-  desktop: { ...PANE_PROPS, scroll: { offset: 0, bodyRows: 35 } },
-  terminal: { ...PANE_PROPS, scroll: { offset: 0, bodyRows: 34 } },
+  desktop: { ...PANE_PROPS, scroll: { offset: 0, bodyRows: 37 } },
+  terminal: { ...PANE_PROPS, scroll: { offset: 0, bodyRows: 36 } },
 }
 
 test('the log shows 20 lines, newest first, an error in red, and a long text cut to one line', SLOW, async ($, on) => {
@@ -1083,18 +1095,19 @@ test('the mounted pane splits its Log by the rows of its body, and draws one Box
 
     // [the rows of the body, the lines of the head, the lines of the tail, the events that `+N more` counts], by the
     // surface. Above the Log are the Session card (the Session row and the band: at the 40 columns of the mount 5 rows
-    // on the desktop, the core line and 3 grid rows on the terminal) and the placeholder of Turn stats (3), and its
-    // rule and header are 2 more: the Log has the body's rows less 11 on the desktop and less 10 on the terminal. The
-    // log holds 30 events. When they all fit (a body of 41 on the desktop, 40 on the terminal) they all show; when
-    // they do not, a row goes to the `+N more` line, and the lines are never fewer than 8.
+    // on the desktop, the core line and 3 grid rows on the terminal) and Turn stats (5: the last start leaves a turn
+    // running, drawn as the ribbon), and the Log's rule and header are 2 more: the Log has the body's rows less 13 on
+    // the desktop and less 12 on the terminal. The log holds 30 events. When they all fit (a body of 43 on the
+    // desktop, 42 on the terminal) they all show; when they do not, a row goes to the `+N more` line, and the lines
+    // are never fewer than 8.
     const cases: Record<Surface, ReadonlyArray<readonly [number, number, number, number | undefined]>> = {
       desktop: [
-        [20, 8, 0, 22], [12, 8, 0, 22], [9, 8, 0, 22], [8, 8, 0, 22], [5, 8, 0, 22], [36, 8, 16, 6], [37, 8, 17, 5],
-        [40, 8, 20, 2], [41, 8, 22, undefined],
+        [20, 8, 0, 22], [12, 8, 0, 22], [9, 8, 0, 22], [8, 8, 0, 22], [5, 8, 0, 22], [36, 8, 14, 8], [37, 8, 15, 7],
+        [40, 8, 18, 4], [43, 8, 22, undefined],
       ],
       terminal: [
-        [20, 8, 1, 21], [12, 8, 0, 22], [9, 8, 0, 22], [8, 8, 0, 22], [5, 8, 0, 22], [36, 8, 17, 5], [37, 8, 18, 4],
-        [39, 8, 20, 2], [40, 8, 22, undefined],
+        [20, 8, 0, 22], [12, 8, 0, 22], [9, 8, 0, 22], [8, 8, 0, 22], [5, 8, 0, 22], [36, 8, 15, 7], [37, 8, 16, 6],
+        [40, 8, 19, 3], [42, 8, 22, undefined],
       ],
     }
     const moreProps = (surface: Surface) => ({
@@ -1300,7 +1313,8 @@ test('the row check reports each way a row can outgrow the pane, and passes the 
 
 test('the texts that can overrun a row carry the truncation props; the values never do', () => {
   for (const surface of SURFACES) {
-    const tree = draw(onSurface(FULL, surface))
+    // The details of Turn stats open, so that a label of their table is among the texts.
+    const tree = draw(onSurface({ ...FULL, collapsed: { turnDetails: false } }, surface))
     const cut = flat(tree)
       .filter(({ node }) => node.type === 'Text' && node.props?.wrap === 'truncate')
       .map(({ node }) => textsOf(node)[0])
@@ -1314,10 +1328,11 @@ test('the texts that can overrun a row carry the truncation props; the values ne
     ]) {
       expect(cut, `${surface}: ${text}`).toContain(text)
     }
-    // A figure, a percent (the terminal band's among them), a cost, the lines of the changes and a title are not cut.
+    // A figure, a percent (the terminal band's among them), a cost, the lines of the changes, a title and the legend's
+    // labels are not cut.
     for (const text of [
       '$148.59', ...(isDesktop ? [] : ['88%']), '120%', '1m 18s', '$2.50', '+1204', SEP, `${MINUS}387`, 'Usage',
-      'Session', 'Project',
+      'Session', 'Project', 'Model', 'Tools',
     ]) {
       const placed = textNode(tree, text)
       expect(placed, `${surface}: ${text}`).toBeDefined()
@@ -1338,7 +1353,8 @@ test('value columns hold their width and align right, so the figures line up on 
     isFixed(cell) && cell?.props?.justifyContent === 'flex-end' && hasWidth(cell)
 
   for (const surface of SURFACES) {
-    const tree = draw(onSurface(FULL, surface))
+    // The details of Turn stats open: their label/value rows are among those that line up.
+    const tree = draw(onSurface({ ...FULL, collapsed: { turnDetails: false } }, surface))
     const cellOf = (text: string): Node | undefined => textNode(tree, text)?.parent
     const widthOf = (cell: Node | undefined): number => Number(cell?.props?.width)
 
@@ -1909,10 +1925,11 @@ const logBody = (surface: Surface, rows: number): number => ABOVE_LOG[surface][4
 
 test('the Log is a rule, a header, a head of 8, a tail and a `+N more`, children of a root as tall as the body', () => {
   for (const surface of SURFACES) {
-    // The blocks above the Log take 49 rows on the desktop and 47 on the terminal (45 columns, FULL: the band is 5 rows
-    // there, and the core line and 2 grid rows here), and its rule and header 2: a body of 73 rows, or 71, leaves 22
-    // rows, 21 lines and the line that counts the other 116 of the 137 events.
-    const [above, bodyRows] = surface === 'desktop' ? [49, 73] : [47, 71]
+    // The blocks above the Log take 42 rows on the desktop and 40 on the terminal (45 columns, FULL: the band is 5 rows
+    // there, and the core line and 2 grid rows here; Turn stats is its ribbon, its legend and its closed details), and
+    // its rule and header 2: a body of 66 rows, or 64, leaves 22 rows, 21 lines and the line that counts the other 116
+    // of the 137 events.
+    const [above, bodyRows] = surface === 'desktop' ? [42, 66] : [40, 64]
     const tree = draw(onSurface({ ...FULL, log: logLines(60) }, surface), 45, bodyRows)
     expect(rowsAbove(tree, 45, surface), surface).toBe(above)
     // The root is at least as tall as the body, and has no height of its own.
@@ -2164,9 +2181,10 @@ test('the rows of the head and of the tail outgrow no pane, at the narrowest and
 // the Log has the rest. These are those rows for FULL with two short MCP servers: codebase-memory is 17 cells (its dot
 // and its name) and issue-hub 11, with the 2 cells between the chips 30, and a line of chips holds the body less 2. So
 // the chips are one row at 32 columns and two at 31. The Log of it holds 60 lines of 137 events.
-//   Session card 4 (the Session row, the context and its meter, the cost split), Project 4 (rule, title, branch,
-//   changes), Usage 6 (rule, header, 4 limits), Turn stats 12 (rule, header, 10 figures), Subagents 11 (rule, header, 8
-//   subagents, `+2 more`), MCP 3 (rule, header, the chips), Context sources 4 (rule, header, 2 figures): 44.
+//   Session card 7 (the Session row, the band's 5, the cost split; 6 on the terminal, whose band is 4 rows), Project 4
+//   (rule, title, branch, changes), Usage 6 (rule, header, 4 limits), Turn stats 5 (rule, header, the ribbon, its
+//   legend, the closed details; 10 figures more with them open), Subagents 11 (rule, header, 8 subagents, `+2 more`),
+//   MCP 3 (rule, header, the chips), Context sources 4 (rule, header, 2 figures): 40, 39 on the terminal.
 const SHORT_MCP = { servers: [{ name: 'codebase-memory' }, { name: 'issue-hub' }] }
 const SURROUNDED: PaneData = { ...FULL, mcp: SHORT_MCP, log: logLines(60) }
 const agentsOf = (rows: AgentRow[]): PaneData['agents'] => Object.fromEntries(rows.map(row => [row.id, row]))
@@ -2188,33 +2206,37 @@ type Surrounding = [
 // than 8) and the events counted (137 less the lines). At 31 and 32 columns the Session band is 5 rows on the desktop
 // and 4 on the terminal (the core line and 3 grid rows), so the terminal has a row less above the Log.
 const SURROUNDINGS: Surrounding[] = [
-  ['every block, a body of 40: not even 8 lines fit', {}, 32, 40, [47, 8, 129], [46, 8, 129]],
-  ['every block, a body of 60', {}, 32, 60, [47, 10, 127], [46, 11, 126]],
-  ['every block, a body of 70', {}, 32, 70, [47, 20, 117], [46, 21, 116]],
-  ['the MCP chips in two rows', {}, 31, 60, [48, 9, 128], [47, 10, 127]],
+  ['every block, a body of 40: not even 8 lines fit', {}, 32, 40, [40, 8, 129], [39, 8, 129]],
+  ['every block, a body of 60', {}, 32, 60, [40, 17, 120], [39, 18, 119]],
+  ['every block, a body of 70', {}, 32, 70, [40, 27, 110], [39, 28, 109]],
+  ['the MCP chips in two rows', {}, 31, 60, [41, 16, 121], [40, 17, 120]],
   [
     'eight subagents, so no `+N more` of theirs', { agents: agentsOf(AGENTS.slice(0, 8)) }, 32, 60,
-    [46, 11, 126], [45, 12, 125],
+    [39, 18, 119], [38, 19, 118],
   ],
-  ['three subagents', { agents: agentsOf(AGENTS.slice(0, 3)) }, 32, 60, [41, 16, 121], [40, 17, 120]],
-  ['no subagents, and no cost split with them', { agents: {} }, 32, 60, [35, 22, 115], [34, 23, 114]],
-  // The Tasks block adds its rule, its header, its rows (8 at the most) and the line that counts the rest, to the 47
-  // (46 on the terminal).
-  ['one task: 3 rows more', { tasks: tasksOf(TEN.slice(0, 1)) }, 32, 70, [50, 17, 120], [49, 18, 119]],
-  ['three tasks: 5 rows more', { tasks: tasksOf(TEN.slice(0, 3)) }, 32, 70, [52, 15, 122], [51, 16, 121]],
-  ['ten tasks: 8 rows and `+2 more`, 11 rows more', { tasks: tasksOf(TEN) }, 32, 70, [58, 9, 128], [57, 10, 127]],
+  ['three subagents', { agents: agentsOf(AGENTS.slice(0, 3)) }, 32, 60, [34, 23, 114], [33, 24, 113]],
+  ['no subagents, and no cost split with them', { agents: {} }, 32, 60, [28, 29, 108], [27, 30, 107]],
+  // The Tasks block adds its rule, its header, its rows (8 at the most) and the line that counts the rest, to the 40
+  // (39 on the terminal).
+  ['one task: 3 rows more', { tasks: tasksOf(TEN.slice(0, 1)) }, 32, 70, [43, 24, 113], [42, 25, 112]],
+  ['three tasks: 5 rows more', { tasks: tasksOf(TEN.slice(0, 3)) }, 32, 70, [45, 22, 115], [44, 23, 114]],
+  ['ten tasks: 8 rows and `+2 more`, 11 rows more', { tasks: tasksOf(TEN) }, 32, 70, [51, 16, 121], [50, 17, 120]],
   [
     'ten tasks, folded: their rule and header, 2 rows more',
-    { tasks: tasksOf(TEN), collapsed: { tasks: true } }, 32, 70, [49, 18, 119], [48, 19, 118],
+    { tasks: tasksOf(TEN), collapsed: { tasks: true } }, 32, 70, [42, 25, 112], [41, 26, 111],
   ],
-  ['no Usage', { usage: { ...FULL.usage, rateLimits: [] } }, 32, 60, [41, 16, 121], [40, 17, 120]],
-  ['no Project block', { project: { name: '', branch: null, changes: null } }, 32, 60, [43, 14, 123], [42, 15, 122]],
+  ['no Usage', { usage: { ...FULL.usage, rateLimits: [] } }, 32, 60, [34, 23, 114], [33, 24, 113]],
+  ['no Project block', { project: { name: '', branch: null, changes: null } }, 32, 60, [36, 21, 116], [35, 22, 115]],
+  [
+    'Turn stats with its details open: 10 rows more', { collapsed: { turnDetails: false } }, 32, 70,
+    [50, 17, 120], [49, 18, 119],
+  ],
   ['no completed turn: a placeholder of one row', { lastTurn: null }, 32, 60, [38, 19, 118], [37, 20, 117]],
   ['Turn stats folded: its rule and its header', { collapsed: { turn: true } }, 32, 60, [37, 20, 117], [36, 21, 116]],
   // The band keeps its rows with no reading: only its figures read —.
   [
     'no context reading: the band keeps its rows', { usage: { ...FULL.usage, contextPct: undefined } }, 32, 60,
-    [47, 10, 127], [46, 11, 126],
+    [40, 17, 120], [39, 18, 119],
   ],
   ['every section above the Log folded', { collapsed: FOLDED_ABOVE }, 32, 40, [21, 16, 121], [20, 17, 120]],
 ]
@@ -2242,17 +2264,17 @@ const CAPITAL_MCP = { servers: [{ name: 'GITHUB' }, { name: 'SLACK' }] }
 
 test('the chips of MCP are counted with the capital of the surface: a cell on the terminal, 1.5 on the desktop', () => {
   // [the columns, the surface, the rows above the Log, the lines it draws in a body of 60 rows, the events it counts]:
-  // the blocks above the Log are 47 rows on the desktop (the band is 5 rows) and 46 on the terminal (the core line and
+  // the blocks above the Log are 40 rows on the desktop (the band is 5 rows) and 39 on the terminal (the core line and
   // 3 grid rows) with the chips in one row (SURROUNDED), and a row more with them in two. The editor and the mobile
   // app draw the desktop's band; they are drawn where 1 and 1.5 differ, 24 and 19 columns, and count as the desktop
   // does.
   const cases = [
-    [25, 'terminal', 46, 11, 126], [25, 'desktop', 47, 10, 127],
-    [24, 'terminal', 46, 11, 126], [24, 'desktop', 48, 9, 128],
-    [24, 'vscode', 48, 9, 128], [24, 'mobile', 48, 9, 128],
-    [19, 'terminal', 46, 11, 126], [19, 'desktop', 48, 9, 128],
-    [19, 'vscode', 48, 9, 128], [19, 'mobile', 48, 9, 128],
-    [18, 'terminal', 47, 10, 127], [18, 'desktop', 48, 9, 128],
+    [25, 'terminal', 39, 18, 119], [25, 'desktop', 40, 17, 120],
+    [24, 'terminal', 39, 18, 119], [24, 'desktop', 41, 16, 121],
+    [24, 'vscode', 41, 16, 121], [24, 'mobile', 41, 16, 121],
+    [19, 'terminal', 39, 18, 119], [19, 'desktop', 41, 16, 121],
+    [19, 'vscode', 41, 16, 121], [19, 'mobile', 41, 16, 121],
+    [18, 'terminal', 40, 17, 120], [18, 'desktop', 41, 16, 121],
   ] as const
   for (const [columns, surface, above, drawn, more] of cases) {
     const where = `${surface} ${columns} columns`
@@ -2334,9 +2356,9 @@ test('the Log fills the body: no line is cut, and no row is left that a line cou
 
 test('the line that counts the rest is a dim Text, indented as the Subagents\', in a row that holds its size', () => {
   for (const surface of SURFACES) {
-    // FULL at 73 rows (71 on the terminal, whose band is 2 rows shorter) draws 21 lines and counts the other 116 of
+    // FULL at 66 rows (64 on the terminal, whose band is 2 rows shorter) draws 21 lines and counts the other 116 of
     // its 137 events; its Subagents count 2.
-    const tree = draw(onSurface({ ...FULL, log: logLines(60) }, surface), 45, surface === 'desktop' ? 73 : 71)
+    const tree = draw(onSurface({ ...FULL, log: logLines(60) }, surface), 45, surface === 'desktop' ? 66 : 64)
     const more = logMoreLine(tree)
     const indent = surface === 'desktop' ? 3 : 2
     // The last child of the pane, after the tail, and no cell of a row: the tail's growing leaves it its row.
@@ -3878,4 +3900,149 @@ test('the pane draws restored rows with hostile ids', () => {
   const tree = draw({ ...EMPTY, ...restored }, 45, 40)
   expect(rowProblems(tree)).toEqual([])
   expect(textsOf(tree).filter(text => text === 'Map the flow')).toHaveLength(3)
+})
+
+// ---- Turn stats as the ribbon (spec 0.7.0 §5) ----
+
+// A finished turn of two steps, as lastTurn keeps it: 38 s of model, a Bash call of 10 s, then 30 s of model.
+const TWO_STEPS = {
+  startedAt: NOW - 78_000, endedAt: NOW,
+  steps: [{ tStart: NOW - 78_000, tEnd: NOW - 40_000 }, { tStart: NOW - 30_000, tEnd: NOW }],
+  tools: [{ t0: NOW - 40_000, t1: NOW - 30_000, station: 'shell' as const, label: 'Bash ls', failed: false }],
+  earlier: zeroStationMs(),
+}
+const RIBBONED: PaneData = { ...FULL, lastTurn: { ...TURN, ribbon: TWO_STEPS } }
+// A turn that runs: a step of 5 s with a Bash call of 3 s after it, and the model at work since.
+const RUNNING: TurnAcc = {
+  turnId: 't9', startedAt: NOW - 20_000, costAtStart: null,
+  steps: [{ tStart: NOW - 20_000, tFirst: NOW - 19_500, tEnd: NOW - 15_000, usage: {}, hasTool: true, hasText: false }],
+  toolIntervals: [[NOW - 15_000, NOW - 12_000]],
+  tools: [{ t0: NOW - 15_000, t1: NOW - 12_000, station: 'shell', label: 'Bash ls', failed: false }],
+  earlier: zeroStationMs(),
+}
+// The rows of the Turn stats body, and its section.
+const turnSectionOf = (tree: unknown): Node | undefined =>
+  headerRows(tree).find(header => header.id === 'turn')?.section
+const turnBody = (tree: unknown): Node[] => childrenOf(childrenOf(turnSectionOf(tree))[2])
+// The ribbon's image: the Svg whose alt starts with `Turn` and a time (the icon's is `Turn stats`).
+const ribbonOf = (tree: unknown): Node | undefined =>
+  flat(tree).map(({ node }) => node).find(node => node.type === 'Svg' && /^Turn \d/.test(String(node.props?.alt)))
+// The right ends of the ribbon's parts, in px.
+const partEnds = (source: string): number[] =>
+  [...source.matchAll(/data-part="(?:model|tool|earlier|live)" x="([\d.]+)" y="3" width="([\d.]+)"/g)]
+    .map(([, x, w]) => Number(x) + Number(w))
+
+test('Turn stats is a bar row, a legend row and a closed details row', () => {
+  const tree = draw(RIBBONED)
+  const [bar, legend, details, ...rest] = turnBody(tree)
+  expect(rest).toEqual([])
+  // The bar row: the ribbon, min(45 × 8 − 64, 4096) px by 16, in a FLEX cell, and the elapsed time in a FIXED 7.
+  expect(bar?.props).toMatchObject({ flexDirection: 'row', height: 1, alignItems: 'center', columnGap: 1 })
+  const [area, elapsed] = childrenOf(bar)
+  expect(isFlex(area)).toBe(true)
+  expect(childrenOf(area)[0]?.props).toMatchObject({ width: 296, height: 16 })
+  expect(String(childrenOf(area)[0]?.props?.alt)).toStartWith('Turn 1m 18s: ')
+  expect(elapsed?.props).toMatchObject({ width: 7, flexShrink: 0, justifyContent: 'flex-end' })
+  expect(textsOf(elapsed)).toEqual(['1m 18s'])
+  // The legend: the swatch, 8 by 8 in the Model hue, alt `Model`, in a slot of a cell, then the Texts.
+  const [slot, items] = childrenOf(legend)
+  expect(slot?.props).toMatchObject({ width: 1, flexShrink: 0 })
+  expect(childrenOf(slot)[0]?.props).toMatchObject({ alt: 'Model', width: 8, height: 8 })
+  expect(String(childrenOf(slot)[0]?.props?.source)).toContain(`rx="1.5" fill="${STATION_HUES.model.dark}"`)
+  expect(textsOf(items).slice(0, 4)).toEqual(['Model', '\u{a0}85%', '\u{a0}·\u{a0}', 'Tools'])
+  // The details row: a plain dim Button, closed.
+  expect(details?.type).toBe('Button')
+  expect(details?.props).toMatchObject({ key: 'details:turn', label: '▸ details', plain: true, dimColor: true })
+  expect(textsOf(tree)).not.toContain('Whole turn')
+  expect(rowProblems(tree)).toEqual([])
+
+  // Open, it reads `▾ details` and today's rows follow it.
+  const open = draw({ ...RIBBONED, collapsed: { turnDetails: false } })
+  const openRows = turnBody(open)
+  expect(openRows[2]?.props?.label).toBe('▾ details')
+  expect(openRows.slice(3).map(row => textsOf(row)[0])).toEqual([
+    'Response', 'Whole turn', 'Elapsed', 'Model time', 'Tool time', 'Average TTFT', 'Steps', 'Tokens', 'Cache', 'Cost',
+  ])
+  expect(rowProblems(open)).toEqual([])
+
+  // The terminal: the bar, the legend and the details Button, 3 rows.
+  const terminal = turnBody(draw(onSurface(RIBBONED, 'terminal')))
+  expect(terminal).toHaveLength(3)
+  expect(spanTexts(terminal[0]).at(-1)).toBe(' 1m 18s')
+  expect(spanTexts(terminal[1])[0]).toBe('Model')
+  expect(terminal[2]?.props).toMatchObject({ key: 'details:turn', label: '▸ details' })
+})
+
+test('a running turn draws live and idle draws the last turn', () => {
+  const live = String(ribbonOf(draw({ ...RIBBONED, turn: RUNNING }))?.props?.source)
+  expect(live).toContain('data-part="cap"')
+  expect(live).toContain('data-part="rest"')
+
+  const idle = String(ribbonOf(draw(RIBBONED))?.props?.source)
+  expect(idle).not.toContain('data-part="cap"')
+  expect(idle).not.toContain('data-part="rest"')
+  expect(Math.max(...partEnds(idle))).toBe(296) // the bar fills its area
+
+  // Neither: today's placeholder, its rule, its header and its line.
+  const none = draw({ ...FULL, turn: null, lastTurn: null })
+  expect(textsOf(turnSectionOf(none))).toContain('No completed turn yet')
+  expect(rowsOf(turnSectionOf(none) as Node, 45, 1.5)).toBe(3)
+})
+
+test('the legend gives way on a narrow pane', () => {
+  const legend = (cols: number): string[] => textsOf(turnBody(draw(RIBBONED, cols))[1])
+  expect(legend(36)).toContain('TTFT')
+  expect(legend(35)).not.toContain('TTFT')
+  expect(legend(30).some(text => text.endsWith('steps'))).toBe(true)
+  expect(legend(29).some(text => text.endsWith('steps'))).toBe(false)
+})
+
+test('a lastTurn of 0.6.1 with no ribbon draws an empty bar', () => {
+  const { ribbon: _, ...old } = TURN
+  for (const surface of SURFACES) {
+    const tree = draw(onSurface({ ...FULL, lastTurn: old as never }, surface))
+    const rows = turnBody(tree)
+    expect(rows, surface).toHaveLength(3)
+    expect(rows[2]?.props?.key, surface).toBe('details:turn')
+    expect(rowProblems(tree), surface).toEqual([])
+  }
+  const image = ribbonOf(draw({ ...FULL, lastTurn: old as never }))
+  expect(String(image?.props?.alt)).toStartWith('Turn 1m 18s')
+  expect(String(image?.props?.source)).not.toContain('data-part=')
+  // A turn of 0.6.1, with no `tools` and no `earlier`, draws live.
+  const { tools: _t, earlier: _e, ...older } = RUNNING
+  expect(String(ribbonOf(draw({ ...FULL, turn: older as never }))?.props?.source)).toContain('data-part="cap"')
+})
+
+test('isSectionFolded inverts the default of turnDetails only', () => {
+  expect(isSectionFolded({}, 'turnDetails')).toBe(true)
+  expect(isSectionFolded({}, 'turn')).toBe(false)
+  expect(isSectionFolded({ turnDetails: false }, 'turnDetails')).toBe(false)
+  expect(isSectionFolded({ turnDetails: true }, 'turnDetails')).toBe(true)
+  expect(isSectionFolded({ turn: true }, 'turn')).toBe(true)
+  // A key that is no own key folds nothing; turnDetails keeps its default.
+  const hostile = JSON.parse('{"__proto__": true}') as Record<string, boolean>
+  for (const id of SECTIONS) expect(isSectionFolded(hostile, id), id).toBe(false)
+  expect(isSectionFolded(hostile, 'turnDetails')).toBe(true)
+  // An inherited key is no own key: it neither folds a section nor opens the details.
+  expect(isSectionFolded(Object.create({ turn: true }) as Record<string, boolean>, 'turn')).toBe(false)
+  expect(isSectionFolded(Object.create({ turnDetails: false }) as Record<string, boolean>, 'turnDetails')).toBe(true)
+})
+
+test('a running turn draws its own table, elapsed time and summary, not the last turn\'s', () => {
+  // The running step wrote 100 tokens in its 5 s: the live summary is ~20 tok/s; the last turn's would be ~62 tok/s.
+  const [step] = RUNNING.steps
+  const running: TurnAcc = { ...RUNNING, steps: step === undefined ? [] : [{ ...step, usage: { output_tokens: 100 } }] }
+  const tree = draw({ ...RIBBONED, turn: running, collapsed: { turnDetails: false } })
+  const rows = turnBody(tree)
+  // The elapsed time is the clock's (ruling D): now − startedAt = 20 s.
+  expect(textsOf(childrenOf(rows[0])[1])).toEqual([fmtDuration(NOW - running.startedAt)])
+  expect(fmtDuration(NOW - running.startedAt)).toBe('20.0s')
+  // The table is the running turn's: 5 s of model and 3 s of tools, where the last turn had 1m 06s and 11.4s.
+  const table = Object.fromEntries(rows.slice(3).map(row => [textsOf(row)[0], textsOf(row)[1]]))
+  expect(table).toMatchObject({ 'Elapsed': '20.0s', 'Model time': '5.0s', 'Tool time': '3.0s' })
+  expect(headerRows(tree).find(header => header.id === 'turn')?.summary).toBe('~20 tok/s')
+  // Before any step has stopped there is no rate: the summary cell is empty.
+  const unstarted = draw({ ...RIBBONED, turn: { ...RUNNING, steps: [], toolIntervals: [], tools: [] } })
+  expect(headerRows(unstarted).find(header => header.id === 'turn')?.summary).toBeUndefined()
 })

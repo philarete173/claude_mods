@@ -22,7 +22,7 @@ import type {
 import { cutAtTurn, restoreFromMessages } from './restore'
 import { emptyStationsState, STATION_ORDER, stationOf, zeroStationMs } from './stations'
 import type { InFlightCall, Motion, StationsState } from './stations'
-import { renderPane } from './view'
+import { isSectionFolded, renderPane } from './view'
 import type { PaneData, SectionId } from './view'
 
 // The changes of the working tree, as the project value keeps them.
@@ -355,13 +355,13 @@ async function whoIs($: EngineInterface, agentId: string | undefined): Promise<{
 
 // Folds or unfolds a section of the pane, and keeps the map in the store, where the next session finds it. The press
 // builds on the map of the store, which another session may have written since this one read it (or this one has not
-// read it yet): its folds stay, and only this section is set, to the opposite of what the pane shows now. When the
-// store has no map to give (it holds none, it cannot be read, or what it holds is no map of booleans) the pane's own
-// map is the base.
+// read it yet): its folds stay, and only this section is set, to the opposite of what the pane shows now (a fold's
+// default counts: the first press of the closed details of Turn stats opens them). When the store has no map to give
+// (it holds none, it cannot be read, or what it holds is no map of booleans) the pane's own map is the base.
 async function toggleSection($: EngineInterface, id: SectionId): Promise<void> {
   const stored = await $.store.get('collapsed').catch(() => undefined)
   const folded = await update($, collapsedAtom, held => ({
-    ...(isFoldedMap(stored) ? stored : held), [id]: held[id] !== true,
+    ...(isFoldedMap(stored) ? stored : held), [id]: !isSectionFolded(held, id),
   }))
   await $.store.set('collapsed', folded)
 }

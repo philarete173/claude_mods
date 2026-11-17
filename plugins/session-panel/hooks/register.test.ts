@@ -3,7 +3,7 @@ import type { Engine, MockClock, Plugin } from 'claude-code/testing'
 import type { On, PluginState, PromptOrigin, RenderPropsOf, RenderSurface, SessionMessage, UiPane } from 'claude-code'
 
 import { restoreFromMessages } from './restore'
-import { emptyStationsState, zeroStationMs } from './stations'
+import { emptyStationsState, STATION_HUES, zeroStationMs } from './stations'
 import type { InFlightCall, StationsState } from './stations'
 import { HANDBACK_TOOL, LOG_MAX } from './stats'
 import type { AgentRow, LogEntry, MainTurn, TaskRow, TurnAcc, TurnStats } from './stats'
@@ -7796,3 +7796,55 @@ test('a main turn during the reset of a /clear does not take the mark of the res
 
     expect(w.messageReads).toBe(1) // the read of session.start alone
   })
+
+// The details fold of Turn stats is closed by default (spec 0.7.0 §5.6): a press writes what the person then sees, the
+// open table as `turnDetails: false`, and a second press closes it again.
+test('a press of details opens the table and the store keeps turnDetails false; a second press closes it', WITH_STORE,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await startTurn($)
+    await runStep($, clock, { turnId: 't0', index: 0 })
+    await runStep($, clock, { turnId: 't0', index: 1 })
+    await endTurn($)
+    const ui = await mountPane($)
+    const label = async (): Promise<unknown> => (await ui.find({ key: 'details:turn' }))?.props.label
+    const hasTable = async (): Promise<boolean> => (await ui.find({ type: 'Text', text: 'Whole turn' })) !== undefined
+    expect([await label(), await hasTable()], 'closed').toEqual(['▸ details', false])
+
+    await ui.press({ key: 'details:turn' })
+    expect(await readStore($)).toEqual({ turnDetails: false })
+    expect((await readState($)).collapsed).toEqual({ turnDetails: false })
+    expect([await label(), await hasTable()], 'open').toEqual(['▾ details', true])
+
+    await ui.press({ key: 'details:turn' })
+    expect(await readStore($)).toEqual({ turnDetails: true })
+    expect([await label(), await hasTable()], 'closed again').toEqual(['▸ details', false])
+    await ui.unmount()
+  })
+
+// The pane reads `turn`, so a step and a call of the running turn draw the ribbon again.
+test('a step redraws the running ribbon', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  const ui = await mountPane($)
+  const ribbon = async (): Promise<string> =>
+    String((await ui.findAll({ type: 'Svg' })).find(el => /^Turn \d/.test(String(el.props.alt)))?.props.source)
+  // The Bash call's segment: a finished part in Shell's hue.
+  const shellPart = new RegExp(`data-part="tool"[^>]*fill="${STATION_HUES.shell.dark}"`)
+  await startTurn($)
+  await runStep($, clock, { turnId: 't0', index: 0 })
+  const afterStep = await ribbon()
+  expect(afterStep).toContain('data-part="model"')
+  expect(afterStep).not.toMatch(shellPart)
+
+  await drive(clock, $.tool.call({ tool: 'Bash', command: 'ls' }))
+  const afterCall = await ribbon()
+  expect(afterCall).not.toBe(afterStep)
+  expect(afterCall).toMatch(shellPart)
+  await ui.unmount()
+})
