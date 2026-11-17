@@ -22,3 +22,15 @@ export function padEnd(s: string, n: number): string {
 }
 
 export const spansCells = (spans: Span[]): number => spans.reduce((n, span) => n + cells(span.text), 0)
+
+// A row cut to `cols` cells, span by span; spans left empty go.
+export function fitRow(spans: Span[], cols: number): Span[] {
+  let room = Math.max(0, cols)
+  const out: Span[] = []
+  for (const span of spans) {
+    const text = cutCells(span.text, room)
+    room -= cells(text)
+    if (text !== '') out.push({ ...span, text })
+  }
+  return out
+}

@@ -2,7 +2,7 @@
 // a pulse from the core to a station on each call. drawBand gives the desktop's Svg source, bandTerminal the
 // terminal's rows. Pure: no `$`, no engine.
 
-import { cells, cutCells, padEnd, padStart, spansCells } from './cells'
+import { cells, cutCells, fitRow, padEnd, padStart, spansCells } from './cells'
 import type { Span } from './cells'
 import {
   LEFT_STATIONS, RIGHT_STATIONS, shortModel, STATION_HUES, STATION_ICONS, STATION_LABELS, STATION_ORDER,
@@ -334,18 +334,6 @@ function stationCell(input: BandInput, id: StationId, isFull: boolean): Span[] {
   return isFull
     ? [mark, { text: ' ' }, { text: padEnd(STATION_LABELS[id], 6), color: hue }, count, { text: ' ' }, badge]
     : [mark, { text: padEnd(SHORT_LABELS[id], 5), color: hue }, count, badge]
-}
-
-// A row cut to `cols` cells, span by span; spans left empty go.
-function fitRow(spans: Span[], cols: number): Span[] {
-  let room = Math.max(0, cols)
-  const out: Span[] = []
-  for (const span of spans) {
-    const text = cutCells(span.text, room)
-    room -= cells(text)
-    if (text !== '') out.push({ ...span, text })
-  }
-  return out
 }
 
 /** §4.10: the core line, then the stations' grid. */
