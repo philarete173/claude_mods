@@ -10,13 +10,15 @@ is a plugin marketplace, `philarete-mods`, that holds this one plugin.
 
 ## What it shows
 
-- **Session**: the session's total cost, a context meter, and the Session / Subagents split once subagents have run.
+- **Session**: the session's total cost; the Session band, the context ring with eight tool stations around it, their
+  counts, running and failure marks, and a pulse on each call; and the Session / Subagents split once subagents have
+  run.
 - **Project**: the project folder, its git branch, and the working tree's changes against HEAD.
 - **Usage**: the plan limits (5-hour, Weekly, Spend) as meters with a countdown to each reset.
-- **Turn stats**: the main agent's last finished turn: speed, elapsed, model and tool time, steps, tokens and cost.
-- **Subagents**: up to 8 rows, running ones first: a status mark, the description, `@type` and cost.
-- **Tasks**: the main agent's background Bash commands, Monitors and local Workflows, up to 8 rows, running ones first:
-  a status mark, the description, `@shell`, `@monitor` or `@workflow`, and the time.
+- **Turn stats**: the main agent's turn as a ribbon of model and tool time in the stations' hues, live while a turn
+  runs, with a legend; the table (speed, elapsed, model and tool time, steps, tokens and cost) behind a `details` fold.
+- **Activity**: lanes for the main agent, each subagent and each background task (Bash commands, Monitors and local
+  Workflows) on one time axis, 8 at most and then `+N more`, with the status by shape and the cost or the time.
 - **MCP**: the servers that have tools in the context, by name, with their count.
 - **Context sources**: how many skills and MCP servers feed the context.
 - **Log**: the last 200 events, newest first: prompts, tool calls, subagent spawns, resumes and results, the ends of
@@ -24,7 +26,8 @@ is a plugin marketplace, `philarete-mods`, that holds this one plugin.
   not fit.
 
 Every section below the Session and Project blocks can be folded, and the fold state persists. A reopened or resumed
-session is restored from its messages: Subagents, Tasks and the Log come back, with no clock times. Every rule is in
+session is restored from its messages: Activity's subagent and task lanes and the Log come back, with no clock times,
+and so do the stations' counts after the latest compaction and the compaction count. Every rule is in
 [the plugin's README](plugins/session-panel/README.md).
 
 ## Install

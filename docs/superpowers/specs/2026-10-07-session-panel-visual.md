@@ -13,7 +13,9 @@
 > v2 mock-up and predates these changes.
 
 Date: 2026-10-07. Status: implemented and shipped (0.6.0). The user approved the look in
-`docs/design/session-panel-preview.html` before implementation.
+`docs/design/session-panel-preview.html` before implementation. 0.7.0 replaced §6.2, §6.6 and §6.7 (the 0.7.0 spec,
+`2026-11-16-session-panel-visualizations-design.md`): where another section still shows the Context rows and their
+ring, the open Turn stats table or the Subagents and Tasks lists, it records 0.6.x, and the 0.7.0 spec wins.
 
 Scope: presentation only. The sections, their content, the formats and every formula of `2026-10-07-session-panel-design.md` §3–§4 stay as they are. Where the two specs differ on looks, this one replaces §3.1 of the main spec. Engine 2.1.288. "d.ts" below means `plugin-authoring/types/claude-code.d.ts` of that engine, cited by line.
 
@@ -504,72 +506,15 @@ function topBlock(d: Draw): Block {
 
 The total stays in primary weight: bold is kept for titles, so the number is not competing with them.
 
-### 6.2 Context rows (inside the top block)
+### 6.2 The Session band (0.7.0)
 
-```tsx
-function contextRows(d: Draw): RenderElement[] {
-  const { Box, Text } = d.ui
-  const { contextPct, contextTokens, contextWindow } = d.data.usage
-  const label = (
-    <Box flexDirection="row" flexShrink={0}>
-      <Text>Context</Text>
-    </Box>
-  )
-  if (contextPct === undefined || !Number.isFinite(contextPct)) {
-    return [
-      <Box flexDirection="row" alignItems="center" columnGap={1}>
-        {iconSlot(d, ringSvg(undefined), 'Context')}
-        {label}
-        {endText(d, '—', { dimColor: true })}
-      </Box>,
-    ]
-  }
-  const hasTokens = contextTokens !== undefined && contextWindow !== undefined
-  const note = hasTokens ? `${fmtTokens(contextTokens)} / ${fmtTokens(contextWindow)}` : ''
-  const pctText = fmtPct(contextPct, 1)
-
-  return [
-    <Box flexDirection="row" alignItems="center" columnGap={1}>
-      {iconSlot(d, ringSvg(contextPct), 'Context')}
-      {label}
-      {endText(d, note, { dimColor: true })}
-    </Box>,
-    <Box flexDirection="row" alignItems="center" justifyContent="space-between" columnGap={1}>
-      <Box flexDirection="row" flexShrink={1} minWidth={0} overflow="hidden">
-        {meter(d, contextPct, `Context ${pctText}`, d.contextMeterPx)}
-      </Box>
-      <Box flexDirection="row" width={PCT_CELLS} flexShrink={0} justifyContent="flex-end">
-        <Text color={pctColor(contextPct)}>{pctText}</Text>
-      </Box>
-    </Box>,
-  ]
-}
-```
-
-- **Label row:** ring, `Context`, and the dim `tokens / window` at the right edge.
-- **Meter row:** the bar from the left edge, then the percent at the right edge.
-  - The percent sits beside its bar and lines up with every other value in the pane.
-  - The bar needs no exact px width: whatever `CELL_PX` misses ends up as the space before the percent.
-  - The Box around the bar can shrink and clips, so an overestimate cannot push the percent out.
-- **Empty state:** an empty ring (track only), `Context`, and a dim `—` at the right. No meter row.
-
-`meter(d, pct, alt, widthPx)` is v1's `meter` with the width passed in. It draws `meterSvg` unchanged, or `▰▱` on the terminal.
-
-```ts
-// The context meter shares its row with the percent only: the body less the 1-cell gap and PCT_CELLS, up to SVG_MAX_PX,
-// so that it reaches the percent in a wide pane too.
-export function contextMeterWidth(bodyColumns: number): number {
-  return Math.min(SVG_MAX_PX, Math.max(48, (bodyColumns - 7) * CELL_PX))
-}
-```
-
-At the default width (≈ 45 columns) this gives 304 px. The bar ends about 25 px before the `8` of `88.2%`: the 8 px gap, the 0–7 px left over by `bodyColumns`, and the room `88.2%` leaves in its 6 cells.
-
-The bar stops at 4096 px (`SVG_MAX_PX`), so it reaches the percent in any pane up to about 4150 px wide (519 columns); a
-wider pane gets a gap before the percent. Until 0.4.3 it stopped at 560 px, the widest pane of the design preview, and
-in a pane maximized on a 21:9 monitor it ended far before its percent (the user's check, 2026-10-14). Whatever `CELL_PX`
-misses grows with the width: in a 3100 px pane a cell 1 % off is about 30 px, as space before the percent, or as the end
-of the bar cut off by its Box.
+0.7.0 replaced the Context label row and the meter row, with their ring and their `contextRows`, by the Session band:
+the context ring grown into a core in the middle, with the percent, the model and `tokens / window`, and eight tool
+stations around it (Model, Files, Shell, Web on the left; Agents, MCP, Skills, You on the right), each with its count,
+its running and failure marks and a pulse on each call. On the desktop it is one image of 5 rows (two rows of stations
+a side) or 4 (one row); in a terminal it is a core line and a grid of station cells. The split line follows it as
+before. The geometry, the states, the alt and the terminal strings are in the 0.7.0 spec
+(`2026-11-16-session-panel-visualizations-design.md`), §4.
 
 ### 6.3 Project block
 
@@ -744,255 +689,20 @@ At ≈ 45 columns this gives 160 px, and it too stops at 4096 px (until 0.4.3, a
 other: same label width, same meter width. The countdown is right-aligned and dim. A kind with no label of its own (raw
 `kind`) is cut inside its 7 cells.
 
-### 6.6 Turn stats
+### 6.6 Turn stats as the ribbon (0.7.0)
 
-Same rows and the same summary as v1, drawn with `row()` (§6.4); Cache stays `success` from 50 %. With no completed turn, the body is `shrinkText(d, 'No completed turn yet', { dimColor: true })`, so a narrow pane cuts it instead of wrapping it, and the summary is empty.
+0.7.0 replaced the always open table by three rows: the turn ribbon (a bar with a part for each model call and each
+step's tool calls, in the stations' hues, drawn live while the turn runs) with the elapsed time, a legend, and a
+`details` Button that folds the table of v1's rows, closed by default (key `turnDetails`). With no turn the body is
+still `No completed turn yet`. The details are in the 0.7.0 spec, §5.
 
-### 6.7 Subagent and task rows
+### 6.7 Activity (0.7.0)
 
-The Subagents and the Tasks are two lists of one kind of row, with one builder for a row (`statusRow`) and one for a
-list (`statusSection`). `agentsSection` and `tasksSection` turn the state into the items that `statusSection` takes, in
-the order the rows are drawn, and say what the two columns that differ hold: a subagent's tag is its `@type` and its
-value its cost, a task's tag is its `@kind` and its value its time.
-
-```tsx
-// What a row of the Subagents or of the Tasks is made of: its status, its description, the dim `@…` tag that says what
-// it is (the `@type` of a subagent, the `@kind` of a task), and the figure at the right edge (a subagent's cost, a
-// task's time), null where it is not known.
-type StatusRow = { status: TaskStatus; description: string; tag: string; value: string | null }
-
-// One row of such a list, in columns: the mark (a cell of its own), a group that takes the rest of the row, and the
-// value (right-aligned in a column of `valueCells`, a dim dash where it is not known). The group holds the
-// description, which grows and is cut to the room there is, and the tag, a column of `tagCells` on every row, so the
-// tags start at one x whatever the descriptions are. A pane too narrow to leave the description MIN_STATUS_DESC_CELLS
-// has no tag column (`tagCells` is 0): the description takes the whole group, on every row alike.
-function statusRow(d: Draw, item: StatusRow, tagCells: number, valueCells: number): RenderElement {
-  const { Box, Text, Svg } = d.ui
-  const mark = STATUS_MARKS[item.status]
-
-  return (
-    <Box flexDirection="row" alignItems="center" columnGap={STATUS_GAP_CELLS}>
-      {Svg === undefined ? (
-        <Box flexDirection="row" width={TEXT_MARK_CELLS} flexShrink={0}>
-          <Text color={mark.color} dimColor={mark.isDim}>
-            {mark.glyph}
-          </Text>
-        </Box>
-      ) : (
-        iconSlot(d, STATUS_SVG[item.status], item.status)
-      )}
-      <Box
-        flexDirection="row"
-        flexGrow={1}
-        flexShrink={1}
-        minWidth={0}
-        overflow="hidden"
-        columnGap={STATUS_GAP_CELLS}
-      >
-        {growText(d, item.description)}
-        {tagCells > 0 && (
-          <Box flexDirection="row" width={tagCells} flexShrink={0} overflow="hidden">
-            <Text dimColor wrap="truncate">{item.tag}</Text>
-          </Box>
-        )}
-      </Box>
-      <Box flexDirection="row" width={valueCells} flexShrink={0} justifyContent="flex-end">
-        {item.value === null ? <Text dimColor>—</Text> : <Text>{item.value}</Text>}
-      </Box>
-    </Box>
-  )
-}
-```
-
-```tsx
-// The widths, in cells, of the two columns in which the Subagents and the Tasks differ: the tag, which is
-// `desktopTagCells` wide on the desktop whatever it holds, and on the terminal as wide as the longest tag drawn, up to
-// `terminalTagCells`; and the value at the right edge, `valueCells` wide.
-type StatusColumns = { desktopTagCells: number; terminalTagCells: number; valueCells: number }
-
-// A section of rows with a status mark, the Subagents' and the Tasks' alike; `items` come in the order they are drawn.
-// The summary counts the rows that run (`2/5`), and all of them when none does. Up to MAX_STATUS_ROWS are drawn, and
-// the ones that do not fit are counted, in line with the descriptions. A row each, and the line that counts the rest is
-// one more.
-function statusSection(d: Draw, id: SectionId, title: string, items: StatusRow[], columns: StatusColumns): Block {
-  const { Svg } = d.ui
-  if (items.length === 0) return NO_BLOCK
-  const running = items.filter(item => item.status === 'running').length
-  const summary = running > 0 ? `${running}/${items.length}` : String(items.length)
-  const shown = items.slice(0, MAX_STATUS_ROWS)
-  // One width for the tag column of every row, as for the `who` of the log: the terminal takes the longest tag that is
-  // drawn, the desktop a width of its own.
-  const longest = Math.max(...shown.map(item => item.tag.length))
-  const tagCells = Svg === undefined ? Math.min(columns.terminalTagCells, longest) : columns.desktopTagCells
-  // What the description keeps beside the tag: the body less the mark, the tag, the value and the gaps of a row. With
-  // less than MIN_STATUS_DESC_CELLS the tag is left out of every row.
-  const descCells = d.cols - markCellsOf(d) - tagCells - columns.valueCells - STATUS_ROW_GAPS * STATUS_GAP_CELLS
-  const hasTag = descCells >= MIN_STATUS_DESC_CELLS
-  const rows = shown.map(item => statusRow(d, item, hasTag ? tagCells : 0, columns.valueCells))
-  const more = items.length - MAX_STATUS_ROWS
-  // The line starts where the descriptions do: after the mark and its gap.
-  if (more > 0) rows.push(moreLine(d, more))
-
-  return section(d, id, title, summary, rows)
-}
-```
-
-```tsx
-// The subagents, running ones first and then the newest; the value of a row is its cost. The cost of a restored row is
-// the cost since the restore, with a plus after it, so while a row is restored the cell has a cell more.
-function agentsSection(d: Draw): Block {
-  const agents = Object.values(d.data.agents)
-  const items = orderAgents(agents).map((agent): StatusRow => ({
-    status: agent.status,
-    description: agent.description,
-    tag: `@${shortType(agent.type)}`,
-    value: agent.costUsd === null ? null : `${fmtUsd(agent.costUsd)}${agent.restored === true ? '+' : ''}`,
-  }))
-  const costCells = COST_CELLS + (hasRestored(agents) ? 1 : 0)
-
-  return statusSection(
-    d, 'agents', 'Subagents', items,
-    { desktopTagCells: TYPE_CELLS, terminalTagCells: TYPE_CELLS_MAX, valueCells: costCells },
-  )
-}
-
-// What a task's row shows at the right: how long a running one has run, never under 0 (the wall clock may have been put
-// back since it began), and how long a finished one ran. Null where it is not known: a running task whose start the mod
-// did not see, a finished one that has no duration, and one whose time is wider than its cell (1000 hours or more: no
-// task runs that long, but a notice can carry any safe integer as its duration). A value is drawn whole, never cut, so
-// such a time is drawn as not known, and the row stays one line. A finished task whose time is a bound (durationAtMost)
-// has `≤` before it, and the width counts it.
-function taskTime(task: TaskRow, now: number): string | null {
-  const ran = task.startedAt === null ? null : Math.max(0, now - task.startedAt)
-  const ms = task.status === 'running' ? ran : task.durationMs
-  const text = ms === null ? null : `${task.durationAtMost === true ? '\u{2264}' : ''}${fmtDuration(ms)}`
-
-  return text === null || text.length > TASK_TIME_CELLS ? null : text
-}
-
-// The background tasks, running ones first and then the newest start, as the subagents are; the value of a row is its
-// time. The descriptions come from the state clean: the mod masked and cut them when it wrote them.
-function tasksSection(d: Draw): Block {
-  const items = orderTasks(Object.values(d.data.tasks)).map((task): StatusRow => ({
-    status: task.status,
-    description: task.description,
-    tag: `@${task.kind}`,
-    value: taskTime(task, d.data.now),
-  }))
-
-  return statusSection(
-    d, 'tasks', 'Tasks', items,
-    { desktopTagCells: TASK_TYPE_CELLS, terminalTagCells: TASK_TYPE_CELLS, valueCells: TASK_TIME_CELLS },
-  )
-}
-```
-
-The row has four columns. The description and the tag column sit in one group, between the mark and the value:
-
-1. **Status mark** (FIXED). One set of marks for both lists (below).
-2. **Description** (FLEX, grows: `growText`). It takes the rest of the row, so the tag column starts at the same x on
-   every row.
-3. **Tag** (FIXED, `tagCells` wide), while the description keeps room beside it (below). The tag is dim.
-   - Subagents, `@type`. Desktop: `TYPE_CELLS`, 15 cells (120 px). The cut types `@frontend-deve…` and
-     `@minimal-chang…` measure about 111 px on the live pane. Terminal: the longest `@type` drawn, at most
-     `TYPE_CELLS_MAX` (15).
-   - Tasks, `@kind`: `@shell`, `@monitor` or `@workflow`. Desktop: `TASK_TYPE_CELLS`, 10 cells (80 px). This width is an
-     estimate, not a measure: the widest kind, `@workflow`, is 9 characters, and the 111 px of the 15 characters of
-     `@frontend-deve…` make about 7.4 px a character, so about 66 px. The live check of 0.5.0 measures it (§11, check
-     21). Terminal: the longest `@kind` drawn, at most `TASK_TYPE_CELLS` (10).
-4. **Value** (FIXED, `valueCells` wide, right-aligned). A dim `—` stands where it is not known.
-   - Subagents: the cost, `COST_CELLS`, 7 cells. Costs line up on their right edge, and every description ends at the
-     same x. While a restored subagent is listed the cell is 8 cells, for the plus of its `$148.59+`. A restored
-     subagent's cost is a dim `—` until it is charged after the restore.
-   - Tasks: the time, `TASK_TIME_CELLS`, 8 cells (`taskTime`). A running task shows how long it has run, never under 0
-     (the wall clock may have been put back since it began); the pane redraws at least every 30 s, so the time moves
-     with it. An ended task shows how long it ran, and a time that is a bound has `≤` before it (below). The time is
-     unknown for a running task whose start the mod did not see, for an ended one with no duration, and for one whose
-     time is wider than the cell. A time from 100 hours on takes 8 cells (`100h 00m`), the widest this cell holds, so
-     `999h 59m` still fits; a bound takes a cell more for its `≤`, so `≤99h 59m` is the widest one shown and `≤100h 00m`
-     does not fit; a time of 1000 hours or more does not either: no task runs that long, but a notice can carry any safe
-     integer as its duration. A value is never cut, so such a time is drawn as not known, a dim `—`, and the row stays
-     one line.
-   - **A bound.** A shell notice carries no time, so the time runs from the start to the notice. The engine takes a
-     notice in at the next model request of a running turn, or when the session is idle, so it may come later than the
-     task's end. When it came into a running turn, less than 3 s after the main agent's last turn ended, or before the
-     pane has seen a turn end (just after it loaded), the task ran at most that long, and the time is a bound: `≤12.2s`.
-     A notice that comes after the session has been idle for 3 s or more is taken at the task's end, and the time is
-     exact. A notice that carries its own `<duration_ms>` (a Workflow's) and a `TaskStop`, which ends the row at once,
-     give exact times too. The end line of the Log has the same `≤` (§6.10).
-
-**In a narrow pane the tag gives way first**, as `who` does in the log (§6.10). `statusSection` works out what a
-description would keep beside the tag: the body less the mark (`markCellsOf(d)`: `ICON_CELLS` on the desktop,
-`TEXT_MARK_CELLS` on the terminal), the tag column, the value column and the gaps of the row (`STATUS_ROW_GAPS` of
-`STATUS_GAP_CELLS` each: two between the cells and one in the group). With fewer than `MIN_STATUS_DESC_CELLS` (12) cells
-the tag column leaves every row of the list, not some of them: `statusRow` gets `tagCells` 0, and the description takes
-the whole group. The choice is made once per list, so every description still ends at the same x. The two lists choose
-on their own columns: on the desktop the Subagents keep `@type` from 39 body columns (2 + 15 + 7 + 3 + 12; 40 with
-the 8-cell cost of a restored subagent) and the Tasks keep `@kind` from 35 (2 + 10 + 8 + 3 + 12).
-
-The list:
-
-- The header's summary is `running/total` while a row runs, and `total` otherwise.
-- The rows come running first and then the newest start (`orderAgents`, `orderTasks`). A task or a restored subagent
-  whose start is not known comes last of its group: after the live rows that run, or after the other live rows.
-- Up to `MAX_STATUS_ROWS` (8) rows are drawn, and the rest are counted in a `+N more` line (below).
-- A list with no rows is left out, with its rule and its header: there is no Tasks section until there is a task. A
-  folded list is its rule and its header (§5.4), and the fold is kept in `collapsed` under the section's id (`agents`
-  or `tasks`).
-
-**Marks.** One set for both lists, by status. The desktop draws an icon (§7), the terminal a glyph in a 1-cell Box:
-
-| Status | Desktop icon | Terminal glyph |
-|---|---|---|
-| `running` | half-filled ring, `BLUE` | `◐` blue |
-| `done` | check in a ring, `GREEN` | `✓` `success` |
-| `failed` | cross in a ring, `RED` | `✗` `error` |
-| `stopped` | stop square in a ring, `NEUTRAL` | `■` dim |
-| `ended` | empty ring, `NEUTRAL` | `○` dim |
-
-`ended` is a task or a subagent that is over with no known end (a restored row): nothing set it in 0.5.0, and the
-restore of 0.6.0 does, for a subagent too. A stopped row and an ended one are no failure, so neither is a cross, and
-failed and stopped differ by shape, not by colour alone. Until 0.5.0 the terminal drew a stopped subagent as a dim `✗`.
-
-```tsx
-// The marks of a status on a surface with no images. The Subagents and the Tasks share one set, keyed by the statuses
-// of a task. `ended` is a task or a subagent that is over with no known end (a restored row). A stopped row has a dim
-// square and an ended one a dim ring: neither is a failure, so neither is a cross.
-const STATUS_MARKS: Record<TaskStatus, { glyph: string; color?: string; isDim?: boolean }> = {
-  running: { glyph: '◐', color: BLUE },
-  done: { glyph: '✓', color: OK },
-  failed: { glyph: '✗', color: BAD },
-  stopped: { glyph: '■', isDim: true },
-  ended: { glyph: '○', isDim: true },
-}
-```
-
-The status icon's `alt` is the status word (`running`, `done`, `failed`, `stopped`, `ended`): the icon is the only place
-that says it.
-
-**"+N more"** aligns with the descriptions:
-
-```tsx
-// The cells in front of the text of a row that has a mark: the mark's slot and the gap after it.
-const markCellsOf = (d: Draw): number => (d.ui.Svg === undefined ? TEXT_MARK_CELLS : ICON_CELLS)
-
-// The dim line that counts what a list does not show: `+3 more`. It starts where the text of the rows above it does,
-// after the mark and its gap, for the Subagents, the Tasks and the Log alike (§6.7). `props` go to the Box that holds
-// it.
-function moreLine(d: Draw, count: number, props: Partial<BoxProps> = {}): RenderElement {
-  const { Box, Text } = d.ui
-
-  return (
-    <Box flexDirection="row" paddingLeft={markCellsOf(d) + STATUS_GAP_CELLS} {...props}>
-      <Text dimColor>{`+${count} more`}</Text>
-    </Box>
-  )
-}
-```
-
-The line starts at `markCellsOf(d)` + `STATUS_GAP_CELLS`, where the descriptions start whether or not the tag column is
-drawn. On the desktop that is 3 cells = the 2-cell icon slot + the 1-cell gap. On the terminal it is 2 cells = the
-1-cell mark + the 1-cell gap.
+0.7.0 replaced the Subagents and the Tasks lists, with `statusRow` and `statusSection`, by one Activity section: a lane
+for `main`, each subagent and each background task on one time axis, then the axis row and `+N more`. A lane is its
+label (with a dim `@type` or `@kind` tag from 24 label cells), its bar, drawn by status shape in its station's hue, and
+its value in 8 cells. Its fold key is `activity`; the old `agents` and `tasks` keys are ignored. The details are in the
+0.7.0 spec, §6.
 
 ### 6.8 MCP chips
 
@@ -1704,6 +1414,23 @@ Checks for the 0.6.1 release (the live check of 0.6.0, `docs/live-check-2026-11-
     typed.
 49. **A resume with a prompt (a terminal).** `claude --resume <id> "…"`: the pane restores, and the prompt is logged
     once (as check 44).
+
+Checks for the 0.7.0 release (the 0.7.0 spec, `2026-11-16-session-panel-visualizations-design.md`):
+
+50. **Image-mode animation.** Pending. Task 1's probe found that SMIL moves in an image Svg (ruling A). In the pane: a
+    pulse runs on each call, a running station's glow breathes, and the ribbon's live cap pulses and its live part
+    grows between redraws; no animation restarts or jerks on a redraw.
+51. **The theme.** Pending. In the app's dark and light themes the band, the ribbon and the lanes take that theme's
+    surfaces and hues.
+52. **Every width.** Pending. At 300, 360, 450, ≈ 496 and 900 px and in a pane maximized on a 21:9 monitor: the band's
+    rows (two a side below ≈ 496 px, one from there) and its stretch to the edges, the ribbon's count of detailed
+    steps, the lanes' axis, and the type tag from a pane of ≈ 670 px.
+53. **The terminal.** Pending. At 40, 44, 60 and 120 columns: the band's core line and grid (the 0.7.0 spec, §4.10),
+    the ribbon's bar and legend (§5.8) and the lanes (§6.5) fit their width, and a span row's colour runs are right.
+54. **Restored lanes.** Pending. After a reopen, a restored lane is dashed, an ended one ends in `○`, and the axis
+    does not reach back for them.
+55. **The `motion` setting.** Pending. With `reduced` (after a restart) the pane draws no animation: no pulses, no
+    breathing glows, still caps.
 
 Results of the live renders (2026-10-07, 2026-10-08, 2026-10-09, 2026-10-12 and 2026-10-13):
 

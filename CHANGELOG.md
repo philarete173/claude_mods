@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.7.0 — 2026-11-17
+
+- The Session band takes the place of the Context label row and the meter row. The context ring is its core, with the
+  percent, the model's short name, `tokens / window` and a tick for each compaction the mod saw (5 at most). Around it
+  stand eight tool stations, Model, Files, Shell and Web on the left and Agents, MCP, Skills and You on the right, each
+  with its icon in its own hue, its label and its count of calls for the session (Model counts model steps), the main
+  agent's and the subagents' alike. A station where something runs glows and shows `×N` when 2 or more run; a failed
+  call gives it a red disc with this turn's count until the main agent's next turn; a pulse runs from the core to the
+  station on each call. The band is two rows a side below a pane of about 496 px and one row from there, and it
+  stretches to the pane's edges. A terminal draws a core line and a grid of station cells.
+- Turn stats draws the turn as a ribbon: one bar with a part for each model call and each step's tool calls, in the
+  stations' hues, a failed call underlined in red, older steps merged into one part per station. The running turn is
+  drawn live against a scale, with a pulsing end that grows between redraws; when idle the last turn fills the bar. A
+  legend gives the model's and the tools' shares, the steps and the time to first token. The table moves behind a
+  `details` fold, closed by default (key `turnDetails`); while a turn runs it leaves out the running step, which the
+  bar and the legend count.
+- Activity takes the place of the Subagents and Tasks lists: one lane for the main agent, each subagent and each
+  background task on one time axis, 8 at most and then `+N more`, each with its description, its cost or time, and its
+  status by shape (a pulsing cap while it runs, then `✓`, `✗`, `■` or `○`). From a pane of about 670 px (80 terminal
+  columns) a dim `@type` or `@kind` tag follows the description. Restored lanes are dashed. Main's value is a dim `—`
+  while a restored subagent is listed, as the split line hides Session then. Activity folds under its own key,
+  `activity`; the stored folds of the old sections, `agents` and `tasks`, are ignored.
+- A setting, `motion`: `full` (the default) or `reduced`, which draws no animation. It is the plugin's first
+  `userConfig` option; the pane picks up a change after Claude Code restarts.
+- Every drawing is an image with an alt that says what it shows; there are no tooltips. The desktop's drawings follow
+  the app's theme; a terminal always gets the dark hues.
+- A reopen restores the stations' counts after the latest compaction summary and the number of compactions. It does
+  not restore calls in flight, failures, pulses, the ribbon or the main agent's turns.
+- Fix: an agent type longer than 14 characters was cut by UTF-16 units, so the cut could split an emoji and leave half
+  a surrogate pair. The cut keeps every pair whole now, in the lane's tag and in the Log's `who`.
+- The station idea and the Agents, Skills and You icons are adapted from lot-map by Aleksei Volodin (MIT), and so are
+  the phase-locked animations and the light-theme rules inside the images; THIRD_PARTY_NOTICES.md carries its notice.
+- Docs: the README has the band, the ribbon, Activity, a Settings section and the limits of the drawings. The visual
+  spec's §6.2, §6.6 and §6.7 point to the 0.7.0 spec, which records Task 1's live findings, and it has the checks 50
+  to 55.
+
 ## 0.6.1 — 2026-11-13
 
 - A subagent that the engine resumes keeps its row. From engine 2.1.308 a resume (SendMessage to a subagent that

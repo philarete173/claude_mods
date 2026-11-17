@@ -3,7 +3,7 @@
 ## 1. Status, summary, goals
 
 Date: 2026-11-16. Status: approved by the owner, round by round (rulings R1–R19) and section by section (technical
-decisions T1–T6). Not implemented yet. This spec consolidates the design record; it adds no decision of its own.
+decisions T1–T6). Implemented in 0.7.0. This spec consolidates the design record; it adds no decision of its own.
 Whatever the record leaves open is in §15.
 
 The record, in rising precedence: the first visual spec, the r3 and r4 addenda, the rulings (a later R over an earlier
@@ -42,8 +42,8 @@ Code references are into `plugins/session-panel/` as of main 453c46d (0.6.1).
 
 ### 1.3 Non-goals
 
-- No tooltips: 0.7.0 ships without them, and the alt texts carry the content (R16 b). The one conditional exception
-  is in §11.3.
+- No tooltips: 0.7.0 ships without them (R16 b; §11.3, ruling C-no). Each drawing is an image with an alt that says
+  what it shows.
 - No new disk writes: on disk the mod still touches only `$.store` `collapsed` (§13.3).
 - No totals across turns: Turn stats shows the running turn, else the last one.
 - No stats a restore cannot rebuild: restored lanes are dashed, restored stations have no running or failure marks
@@ -62,7 +62,7 @@ Model hue (`#e1ac6e` / `#b8762a`) is lot-map's warm accent. THIRD_PARTY_NOTICES.
 |---|---|---|
 | 1 | `Session` … `$4.97` | unchanged |
 | 2 | **The Session band** (§4) | new; replaces the Context label row and the meter row (base §6.2) |
-| 3 | The split line `Session $3.20 · Subagents $1.77` | unchanged |
+| 3 | The split line `Subagents $1.77+` (a restored row; else `Session $3.20 · Subagents $1.77`) | unchanged |
 | 4 | Project | unchanged |
 | 5 | Usage | unchanged |
 | 6 | **Turn stats as the ribbon** (§5) | replaces the Turn stats table (base §6.6), which moves behind `details` |
@@ -71,7 +71,8 @@ Model hue (`#e1ac6e` / `#b8762a`) is lot-map's warm accent. THIRD_PARTY_NOTICES.
 | 9 | Context sources | kept, unchanged (R4) |
 | 10 | Log | unchanged; fills the free height (base §6.12) |
 
-The band's core tooltip and alt do not mention skills: Context sources shows them (R4, over R3).
+The band is an image with an alt that says what it shows; the alt does not mention skills: Context sources shows
+them (R4, over R3).
 
 ### 2.2 Row counts
 
@@ -106,7 +107,7 @@ started `12:02:06` (relative times below are to now).
 - **The turn:** 6 model calls and 5 tool steps; elapsed 2m 14s, model 1m 18s, tools 56 s; Steps = 6 (a step is one
   model call); TTFT 1.2s; response `~42 tok/s`.
 
-| # | Segment | Station | Time | Label (tooltip) |
+| # | Segment | Station | Time | Label |
 |---|---|---|---|---|
 | 1 | model | Model | 9 s | `Model · 9s` |
 | 2 | tools | Files | 0.4 s | `Read ×2 (stats.ts, view.tsx) · Files · 0.4s` |
@@ -120,6 +121,8 @@ started `12:02:06` (relative times below are to now).
 | 10 | tool | MCP | 2.1 s | `codebase-memory:search_graph · MCP · 2.1s` |
 | 11 | model, live | Model | 18 s | `Model · 18s · running` |
 
+The labels are not drawn as tooltips: each drawing is an image with an alt that says what it shows (§11.3, C-no).
+
 - **Stations:** Model 31, Files 12, Shell 4, Web 1, MCP 3, Agents 5, Skills 6, You 3. Running: Model ×3 (main and
   the two running subagents are in model steps), Agents ×2, Shell 1 (the npm test task). Shell failed once this turn
   (tsc).
@@ -129,9 +132,10 @@ started `12:02:06` (relative times below are to now).
   - Map the mask `@explorer` `$0.120`: 12:03:11 → 12:03:34 (−1:09 → −0:46), done; the turn's step 6;
   - Repro check `@general-purpose` `$0.050`: 12:00:20 → 12:01:20 (−4:00 → −3:00), failed;
   - Engine facts `@general-purpose` `$0.880`: −12:00 → −4:00, done.
-- **Tasks:** npm test `@bash`, running for 3m 40s since 12:00:40 (−3:40); claude plugin test `@bash` 18.2s,
-  −9:40 → −9:22, done; dev server `@bash`, −10:00 → −6:00, stopped after 4m 00s.
-- **Main's turns:** −12:30 → −8:50, −6:20 → −3:40, −2:14 → now.
+- **Tasks:** npm test `@shell`, running for 3m 40s since 12:00:40 (−3:40); claude plugin test `@shell` 18.2s,
+  −9:40 → −9:22, done; dev server `@shell`, −10:00 → −6:00, stopped after 4m 00s.
+- **Main's turns:** −12:30 → −8:50, −6:20 → −3:40, −2:14 → now. Main's value is a dim `—`, and the split line
+  reads `Subagents $1.77+`, because Plan critique is restored (§6.4).
 - **Log** (8 newest, newest first; header `64`, then `+56 more`): 12:04:00 `codebase-memory:search_graph ✓ 2.1s`;
   12:03:42 `TodoWrite ✓ 0.2s`; 12:03:34 explorer `done — mask mapped ✓ 22s`; 12:03:11
   `spawned · explorer: Map the mask`; 12:02:26 `Bash tsc --noEmit ✗ 31s`; 12:02:15 `Read view.tsx ✓ 0.3s`;
@@ -402,9 +406,9 @@ reach the edges, and the circles and text keep their size; only the gaps grow (R
 | ≈ 3400 / 3368 | 1 | 411 | 10px stacked | 4 | 3360 |
 
 - The minimum gap between circles is `P − 22` (≥ 25 at every width here).
-- **Wider than 4096 px** (R19): on a body wider than 4096 px (`SVG_MAX_PX`) the band is drawn 4096 px wide, its
-  stretched layout is computed for that width (`W = 4096` in the formulas above), and it is centred in the body. Its
-  stations are never clipped. The ≈ 3400 px example is below this cap.
+- **Wider than 4096 px** (R19): on a body wider than 4096 px (`SVG_MAX_PX`) the band is laid out for `W = 4096`
+  with §4's `W − 8` rule, so it is 4088 px wide, and it is centred in the body. Its stations are never clipped. The
+  ≈ 3400 px example is below this cap.
 - The ribbon and the lanes stretch like the meters (§5.5, §6.6).
 
 ### 4.5 Trunk, forks and rails (R10)
@@ -478,7 +482,9 @@ Context 56%, 112k of 200k, opus 5.5, 1 compaction. Model 31, 3 running; Files 12
 this turn; Web 1; Agents 5, 2 running; MCP 3; Skills 6; You 3.
 ```
 
-The `<title>` texts, drawn only if §11.3 enables interactive mode:
+With 0 compactions the alt leaves out the compaction part (`…, opus 5.5. Model 31, …`).
+
+The `<title>` texts, drawn only if §11.3 enables interactive mode (not drawn in 0.7.0: §11.3, ruling C-no):
 
 ```text
 Context 56.0% · 112k / 200k · opus 5.5 · 1 compaction
@@ -499,9 +505,10 @@ The terminal has no ring: the core is a line, then the stations in a grid. The s
 **The core line:** `opus 5.5  ▰▰▰▰▰▰▱▱▱▱  56%` at the left, `112k / 200k ↻1` right-aligned at
 the edge.
 
-- `opus 5.5` primary · 2 spaces · the meter, 10 cells (`▰` in `meterColor`, `▱` dim; today's rule) · 2 spaces ·
-  `56%` primary (theme `warning` / `error` from 80 / 95 %) · the gap · `112k / 200k` dim · space · `↻1` dim
-  (`↻N`; left out at 0 compactions).
+- `opus 5.5` primary, by §4.1's model rule (`coreModel` in `hooks/band.ts`: the short model, its first word when it
+  is wider than 8 cells, cut to 8 cells) · 2 spaces · the meter, 10 cells (`▰` in `meterColor`, `▱` dim; today's
+  rule) · 2 spaces · `56%` primary (theme `warning` / `error` from 80 / 95 %) · the gap · `112k / 200k` dim ·
+  space · `↻1` dim (`↻N`; left out at 0 compactions).
 - 40–43 columns: `↻N` and its space are left out (38 cells). Wider, only the gap before the tokens grows.
 - **No context reading** (R16 i): the model name (or `—` when it is unknown), the empty meter (10 dim `▱`),
   then `—` for the percent and `—` for the tokens. `↻N` shows as usual and is left out at 0.
@@ -517,7 +524,7 @@ the edge.
 | mark, running | `●` | station hue |
 | mark, idle | `·` | dim |
 | label | `Model` … `You` | station hue (the terminal's colour key) |
-| count | digits; `1.2k` from 1000 | primary; dim at 0 |
+| count | digits; from 1000 `1k` … `99k` (whole thousands, 99k at most; the desktop keeps `1.2k`) | primary; dim at 0 |
 | badge, failure this turn | `!N` (`!9` at most) | theme `error`; wins the badge cell |
 | badge, N ≥ 2 running | `×N` (`×9` at most) | station hue |
 
@@ -571,20 +578,31 @@ Five rows: rule · header · bar row · legend row · details row.
 - **Segments:** one per model call and one per tool call. Parallel tool calls of one step are one segment in the hue
   of the first one's station.
   - model: the `Model` hue, solid. There is no waiting-for-the-first-token part; the legend's TTFT carries it (R5);
-  - tool: the station's hue, at least 2 px wide (the room comes out of the neighbouring model segment);
+  - tool: the station's hue, at least 2 px wide (§5.3's layout makes the room);
   - a **1 px gap** (the pane bg shows through) between any two segments.
-- **Rest of the scale** (running turn only): a 1 px hairline at y 8 from the bar's end + 2 px to the area's end,
-  `ash` at opacity 0.5, `stroke-dasharray="1 3"`, and a 1 × 6 px tick (y 5–11) at the area's end.
+- **Rest of the scale** (running turn only): a 1 px hairline on pixel row 8 (its centre y 8.5) from the bar's
+  end + 2 px to the area's end, `ash` at opacity 0.5, `stroke-dasharray="1 3"`, and a 1 × 6 px tick (y 5–11) at the
+  area's end.
 
 ### 5.3 Colour rules, the merged earlier part and N (R5, R14)
 
 - Every mark is drawn in the exact hue of its station in the band (§3.3), at full strength. No opacity-dimmed or
   "hot" variant of a hue: a state shows by shape, never by a lighter or darker colour.
-- **Detailed steps:** the ribbon draws the latest **N = clamp(floor(barPx / 20), 6, 60)** steps in detail; that is at
-  most one step per 20 px on average, so the bar never turns into a barcode. A step is one model call (R1); it draws
-  as its model segment and the tool segment after it.
-- **Earlier steps** merge into one leftmost "earlier" segment: one part per station, each in its hue, joined with no
+- **Detailed steps:** the latest **N = clamp(floor(barPx / 20), 6, 60)** steps (`ribbonDetail(barPx)`) are always
+  drawn in detail, about one step per 20 px, so the bar never turns into a barcode. A step is one model call (R1); it
+  draws as its model segment and the tool segment after it.
+- **Earlier steps** merge into one leftmost "earlier" block: one part per station, each in its hue, joined with no
   gaps, in station order (§3.4), then the usual 1 px gap.
+- **Layout** (`ribbonSegments` in `hooks/ribbon.ts`), on the scale's px:
+  - forward: each detailed part starts 1 px after the one before (the first 1 px after the block) and ends at the
+    greater of its own end and its start + its minimum, 2 px for a tool part and 1 px otherwise; the last part ends
+    at the turn's end;
+  - pull-back: when the last part ends past the lesser of the bar's end and the live end, the parts are pulled back
+    from the end, each keeping its minimum and the 1 px gap before it;
+  - the `earlier` block gives way first: it ends 1 px before the first detailed part, its parts split by largest
+    remainder, each at least 1 px;
+  - only when the block is down to 1 px a part and the parts still do not fit does the oldest detailed step merge
+    into it, one step a pass. With no step left to merge, the layout stands as it is.
 
 | Pane | Bar | N |
 |---|---|---|
@@ -604,7 +622,7 @@ Five rows: rule · header · bar row · legend row · details row.
   without redraws. The elapsed Text updates on redraws only.
 - **Alt:** `Turn 2m 14s: model 58%, tools 42%, 6 steps, 1 failed call`.
 - **`<title>` per segment** (only with §11.3's interactive mode): the labels of §2.3, e.g.
-  `Bash tsc --noEmit · Shell · 31s · failed`.
+  `Bash tsc --noEmit · Shell · 31s · failed`. Not drawn in 0.7.0 (§11.3, ruling C-no).
 - **Legend row** (one row): `[swatch][gap 1]` + Texts: dim `Model` primary `58%` · dim `Tools` primary `42%` ·
   primary `6 steps` · dim `TTFT` primary `1.2s`. Separators ` · ` dim. The swatch is an Svg 8 × 8 rect rx 1.5 in the
   Model hue, in a 1-cell slot, alt `Model`.
@@ -707,8 +725,8 @@ Row 2 is 43 cells. Widths: the bar is 36 cells at 44 columns, 112 at 120, 192 at
 Rule · header · up to 8 lanes · axis row · `+N more`: **12 rows** in the example, as today's Subagents and Tasks.
 
 - **Header:** the Activity icon (§3.6), bold `Activity`, the chevron, dim summary `3/8`: running / total of the
-  subagents and tasks. The main lane is not counted. The fold key is `activity`; the old `agents` and `tasks` keys are
-  ignored.
+  subagents and tasks, or the total alone when nothing runs. The main lane is not counted. The fold key is
+  `activity`; the old `agents` and `tasks` keys are ignored.
 - **Lane order:** `main` first; then the running lanes, the older start first; then the ended lanes, the newer end
   first. At most 8 lanes; the rest are counted in `+N more` (dim, no indent).
 - **Unknown times** (R16 e): among the running lanes, those with an unknown start sort after those with a known
@@ -721,7 +739,7 @@ Rule · header · up to 8 lanes · axis row · `+N more`: **12 rows** in the exa
 
 | # | Lane | Hue | Span | Status | Value |
 |---|---|---|---|---|---|
-| 1 | `main` | Model | −12:30 → −8:50, −6:20 → −3:40, −2:14 → now | running | `$3.20` |
+| 1 | `main` | Model | −12:30 → −8:50, −6:20 → −3:40, −2:14 → now | running | `—` (a row is restored) |
 | 2 | `Review the diff` | Agents | −6:00 → now | running | `$0.310` |
 | 3 | `npm test` | Shell | −3:40 → now | running | `3m 40s` |
 | 4 | `Plan critique` | Agents | unknown start (restored) | running | `$0.410+` |
@@ -747,11 +765,14 @@ A lane row, one row, `alignItems="center"`:
 | failed | 3 px bar, as done | `✗` 9 px, `RED`, centred at end + 6 |
 | stopped | 3 px bar, as done | `■` 5 × 5 rx 1, `NEUTRAL`, centred at end + 6 |
 | ended, unknown span (restored) | the dashed line (below) | `○` ring r 3.5, `NEUTRAL` stroke 1.4, at x A + 6 |
+| done, failed or stopped, unknown start (restored) | the dashed line | its `✓`, `✗` or `■`, centred at x A + 6 |
 | running, unknown start (restored) | the dashed line | the live cap |
 | started before the axis | left end square, an 8 px fade-in at the left edge (`linearGradient` 0 → the hue) | — |
 
-The dashed line is 2 px, from 0 to A at y 9.5, in full hue, `stroke-dasharray="3 3"`. Status marks keep the pane's
-status colours: `✓` success green, `✗` red, `■` and `○` neutral.
+The dashed line is 2 px, from 0 to A at y 9.5, in full hue, `stroke-dasharray="3 3"`. Any lane but `main` with no
+known start draws it (`spansOf` and `drawLane` in `hooks/lanes.ts`). A restored lane whose end was seen live keeps
+that end: it sorts by it (§6.1) and draws its status mark at A + 6; a lane with neither time sorts as an unknown one.
+Status marks keep the pane's status colours: `✓` success green, `✗` red, `■` and `○` neutral.
 
 **Svg alt:** `<description> (@type), <status>, <value>` at every width (R16 d, §6.4); for example
 `Review the diff (@code-reviewer), running, $0.310`.
@@ -778,15 +799,20 @@ status colours: `✓` success green, `✗` red, `■` and `○` neutral.
   A; ticks 1 × 4 px (y 1–5) at round clock times; labels 9px `ash` `HH:MM`, centred under their ticks, baseline y 14;
   `now` right-aligned to x A + 4.
 - **Tick step,** at any width: the least `s` of {1, 2, 5, 10, 15, 30, 60, 120, 240, …} minutes with
-  `s × A / spanMin ≥ 48` px. A clock label closer than 36 px to `now` is left out; its tick stays.
+  `s × A / spanMin ≥ 48` px. A clock label closer than 36 px to `now` is left out; its tick stays. So is a clock
+  label closer than 14 px to the axis start (half its width, which the image would clip); its tick stays too.
 - **Alt:** `axis 11:52 to now`.
 - Example at 360: span 12 min, step 5 m; `11:55` at x 31.1, `12:00` at x 89.4, `now` at 140.
 
 ### 6.4 Values, the type tag, `+N more`
 
-- **Values:** an agent's cost in view.tsx's cost format, a task's time. Main's value is its cost.
-- **The type tag (R15):** a lane's `@type` tag (`@code-reviewer`, `@bash`) is drawn dim after its label when the
-  label column is at least 24 cells wide. That holds from a pane of about 670 px (body 80 cells) and from a terminal
+- **Values:** an agent's cost in view.tsx's cost format, a task's time. Main's value is its cost (Session's figure),
+  and a dim `—` while any subagent row is restored: main's cost is not known then, and the split line hides Session
+  for the same reason (0.6.1).
+- **The type tag (R15):** a lane's `@type` tag (`@code-reviewer`, `@shell`) is drawn dim after its label when the
+  label column is at least 24 cells wide. A subagent's tag is `@` + its type as the Log shows it (`shortType`: the
+  plugin prefix dropped, cut at 14 characters with `…`, so `@general-purpo…`); a task's tag is its kind, `@shell`,
+  `@monitor` or `@workflow` (`TaskKind`). That holds from a pane of about 670 px (body 80 cells) and from a terminal
   of 80 columns. Below that, the tag is not drawn.
 - **When label and tag do not fit** the column (R16 d): the description gives way first, cut with `…`, down to
   6 cells; then the tag is cut with `…`.
@@ -814,7 +840,7 @@ Label colour: running lanes and `main` primary, the rest dim.
 
 ```text
 Activity ▾                               3/8
-main          ─────    ─────  ━━━━◐    $3.20
+main          ─────    ─────  ━━━━◐        —
 Review the d…           ━━━━━━━━━━◐   $0.310
 npm test                    ━━━━━━◐   3m 40s
 Plan critique ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄◐  $0.410+
@@ -840,7 +866,7 @@ Bar strings, 21 cells each (`␣` = space):
 | dev server | 3 `␣`, 7 `─`, `■`, 10 `␣` |
 | axis | `␣␣11:55␣␣␣␣12:00␣␣now` (2, 5, 4, 5, 2, 3) |
 
-Values (8, right): `   $3.20`, `  $0.310`, `  3m 40s`, ` $0.410+`, `  $0.120`, `  $0.050`, `  $0.880`, `  4m 00s`.
+Values (8, right): `       —`, `  $0.310`, `  3m 40s`, ` $0.410+`, `  $0.120`, `  $0.050`, `  $0.880`, `  4m 00s`.
 
 ### 6.6 Widths
 
@@ -878,14 +904,24 @@ All SMIL, inside the Svgs; nothing animates in the terminal.
 - **Phase-locking.** Every redraw makes a new Svg, so the animations are phase-locked to continue where they were:
   - a pulse's `begin` is −age (age = now − the station's `lastCallAt`); the pulse, its fade and its flash are drawn
     while the age is below the travel duration + 150 ms + 300 ms (R16 g), each part with its own phase offset;
-  - a loop's `begin` is −(now mod period).
+  - a loop's `begin` is −(now mod period);
+  - each element's static attributes are its resting state: a pulse dot at opacity 0, a station circle at its own
+    stroke width;
+  - a one-shot part whose own interval is already over when the image is made is dropped by the engine, its
+    `fill="freeze"` end state included (§11.3), so it changes nothing. The arrival flash ends at the resting stroke
+    width, so a flash that is over leaves the station as it was;
+  - a pulse dot needs more: its `<set>` of opacity has no end, so it still shows the dot once its `animateMotion` (and
+    its fade) are dropped, and the dot would sit at the band's origin. So `pulseSvg` leaves out a dot whose travel is
+    over (age − its lag ≥ the travel time);
+  - a growth whose start state is computed from now (the ribbon's live part and its cap, from their width at now to
+    the ceiling, `dur` = what is left) starts when the image is created, with no `begin`: a redraw computes it again.
 - In the pane, pulses fire on real calls. Badges and failure marks appear without animation.
 - Redraws come from state writes (at most 10 a second, the engine's cap) and the existing 30 s tick
   (`hooks/register.tsx:42`, `:762`). No new timers.
 - **`motion: reduced`** (§9.5) turns off the pulses and the glows' breathing and makes the caps static: no animation
   at all is drawn (§12). The glow stays at its resting mid opacity, the caps at 1.
 - The glow has one opacity range for both themes: SMIL values cannot follow the media query (R16 h, §9.3).
-- Whether image-mode SMIL moves on the desktop is checked first (§11.3).
+- Image-mode SMIL moves on the desktop (§11.3, ruling A).
 
 ## 8. Data and state (T1)
 
@@ -907,7 +943,7 @@ unknown tool goes to Shell.
 - **Model:** the model's own steps (main and subagents); no tool.
 - **Files:** Read, Write, Edit, MultiEdit, NotebookEdit, Grep, Glob, LSP.
 - **Shell:** Bash, PowerShell, Monitor, background-shell tools; **any tool no other row names** (lot-map's fallback).
-- **Web:** WebFetch, WebSearch; the claude.ai publishing tools (Artifact, ArtifactComments, ArtifactData, …).
+- **Web:** WebFetch, WebSearch, Artifact, ArtifactComments, ArtifactData.
 - **MCP:** every `mcp__*` tool; ListMcpResourcesTool, ReadMcpResourceTool, ReadMcpResourceDirTool.
 - **Agents:** Agent, Task, Workflow, SendMessage, TaskStop, ListAgents, SubagentHandback, ScheduleWakeup, Cron*.
 - **Skills:** Skill, ToolSearch; ListSkills, SearchSkills, SuggestSkills, ListPlugins, SearchPlugins,
@@ -936,8 +972,8 @@ unknown tool goes to Shell.
 ### 8.3 The turn ribbon
 
 - The turn accumulator (the `turn` atom, `types/index.d.ts:123-139`) gains main's tool segments
-  `{t0, t1 | null, station, label, failed}`, with `t1` null while the call is in flight. Its `steps: StepTiming[]`
-  stays as it is.
+  `{t0, t1, station, label, failed}`. A segment is written when its call returns, so `t1` is a number; the running
+  call is the live part, drawn from `inFlight`. Its `steps: StepTiming[]` stays as it is.
 - Storage keeps the latest 60 steps in detail. Older steps fold into per-station duration sums (`earlier`, Model
   included). The drawing then merges down to R14's N (§5.3).
 - `PaneData` gains `turn`, and the render reads it, so step and call writes redraw the pane and the ribbon draws the
@@ -987,13 +1023,14 @@ New atoms are declared in `types/index.d.ts` (`PluginState`), as today.
 ### 9.2 Image mode
 
 The Svgs are drawn without `isInteractive`. 0.7.0 ships without tooltips; each Svg's `alt` describes it, using the
-alt texts of §4.9, §5.4 and §6.2. Conditional rule (R16 b): if Task 1's third result holds (§11.3), the band and the
-ribbon get `isInteractive` and the spec's `<title>`s.
+alt texts of §4.9, §5.4 and §6.2. R16 b's conditional rule is settled (§11.3, ruling C-no): an interactive Svg is
+mounted again on every redraw, so every Svg stays an image, with no `isInteractive` and no `<title>`.
 
 ### 9.3 Palette
 
 Dark values go in the attributes. Light overrides go in `<style>@media (prefers-color-scheme: light){…}</style>`
-inside each SVG, as lot-map does (lot-map `hooks/palette.ts:58-63`).
+inside each SVG, as lot-map does (lot-map `hooks/palette.ts:58-63`). An image's `prefers-color-scheme` follows the
+app's theme (§11.3, ruling B1), so there is no `theme` setting.
 
 ### 9.4 Motion
 
@@ -1010,13 +1047,17 @@ pulses and the glows' breathing and makes the caps static.
 - No images. Text rows follow §4.10, §5.8 and §6.5.
 - The station hues are raw hex from the dark set, as today's terminal meter passes raw hex (`hooks/view.tsx:142-147`,
   `:302`).
-- The mod cannot know a terminal's background, so on a light terminal the hues look pale. That is a known limit. If
-  §11.3 adds the `theme` setting, that setting picks the terminal set too.
+- The mod cannot know a terminal's background, so on a light terminal the hues look pale. That is a known limit, and
+  no setting changes it (§11.3, ruling B1): the terminal always uses the dark set.
 
 ### 9.7 Budgets
 
-- The draws are pure string builders with fixed element counts: the band ≤ ~70 (core 5 + ≤ 5 ticks; per station
-  ≤ 7 parts + 1 pulse group; trunks, forks and rails), the ribbon ≤ ~131 at the widest, the lanes ≤ 9 × 6.
+- The draws are pure string builders with fixed element counts: the band ≤ 82 (core 5 + ≤ 5 ticks; 8 stations ×
+  (≤ 7 parts + 1 pulse group); ≤ 8 lines of trunks, forks and rails; `BAND_PARTS_MAX`), the ribbon ≤ ~131 at the
+  widest, the lanes ≤ 9 × 6. A station's 7 parts are its glow, circle, icon, `×N` badge, failure disc, label and count;
+  the icon, the badge (its circle and text), the disc (its circle and text) and a pulse group (its three dots) count
+  one each, and the inline label and count of two rows a side are one `text`, so that layout has 6. The `<style>` and
+  the animation elements are not counted.
 - A redraw at the caps takes ≤ 2 ms in tests.
 - Every Svg is ≤ 4096 px wide (`SVG_MAX_PX`, `hooks/view.tsx:88`) and its source is < 131072 characters.
 
@@ -1037,9 +1078,9 @@ pulses and the glows' breathing and makes the caps static.
   - With no subagents and no tasks, the block is hidden.
   - The type tag follows R15.
 - **Edge cases:**
-  - counts ≥ 1000 read `1.2k`;
-  - on a body wider than 4096 px the band is drawn 4096 px wide, laid out for that width and centred; no station is
-    clipped (R19);
+  - counts ≥ 1000 read `1.2k` on the desktop, `1k` … `99k` in a terminal (§4.10);
+  - on a body wider than 4096 px the band is laid out for `W = 4096` with §4's `W − 8` rule, so it is 4088 px wide,
+    and centred; no station is clipped (R19);
   - running counts above 9 read `×9+`;
   - lanes past 8 go into `+N more`;
   - steps past N merge;
@@ -1059,10 +1100,15 @@ pulses and the glows' breathing and makes the caps static.
 
 ### 11.2 Risks
 
-- Nothing verifies that image-mode SMIL animates on the desktop.
-- Nothing verifies that an image-mode SVG's `prefers-color-scheme` follows the app's theme.
-- A redraw of an interactive Svg may flicker.
-- The compaction counter is best effort (§8.5).
+Task 1 (§11.3) turned three of the first risks into facts, and the build found one more:
+
+- Image-mode SMIL animates on the desktop (ruling A).
+- An image-mode SVG's `prefers-color-scheme` follows the app's theme (ruling B1).
+- A redraw of an interactive Svg mounts it again: it jerks, and its tooltip blinks (ruling C-no).
+- Chromium drops a SMIL animation whose whole interval ends before the image's time 0 (begin + dur ≤ 0), and its
+  `fill="freeze"` end state is not applied (§7).
+
+One risk stays: the compaction counter is best effort (§8.5).
 
 ### 11.3 Task 1 of the plan: a live check with the owner
 
@@ -1072,12 +1118,22 @@ In the desktop app, a throwaway mod shows:
 2. an image-mode SVG with the `prefers-color-scheme` palette;
 3. an interactive SVG redrawn every second, with a phase-locked loop and a `<title>`.
 
-The rules for each result:
+The rules for each result, as planned:
 
 - if (1) does not move, keep the static picture; the motion is decoration;
 - if (2) does not follow the app's theme, add `theme: auto | dark | light`, which also picks the terminal set;
 - if (3) redraws without a flicker, use `isInteractive` for the band and the ribbon, with the spec's `<title>`
   tooltips (§4.9, §5.4). Otherwise 0.7.0 ships without tooltips (R16 b).
+
+The results and the owner's rulings (the live check with the owner, desktop 2.1.321, 2026-11-16):
+
+- **A:** (1) moves: SMIL animates in an image Svg. The motion ships as designed.
+- **B1:** (2) follows the app's theme. There is no `theme` setting; the terminal always uses the dark set (§9.6).
+- **C-no:** (3) is mounted again on every redraw, so it jerks and its tooltip blinks. Every Svg stays an image: no
+  `isInteractive` and no `<title>`; the alts carry what a tooltip would have said (§9.2).
+- **D:** the engine makes an image Svg again on every redraw, even when its source is unchanged, so a fixed
+  `begin="0s"` would restart each time. Every animation takes its `begin` from the wall clock: −(now mod period) for
+  a loop, −age for a one-shot; a growth whose start state is computed from now takes none (§7).
 
 ## 12. Testing (T5)
 

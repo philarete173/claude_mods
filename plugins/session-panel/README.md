@@ -14,10 +14,46 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
 (`session-panel@philarete-mods`), and a copy loaded from a folder, as in development, writes
 `session-panel_inline-fb64dc720a6f.json` (`session-panel@inline`).
 
-- **Session**: the session's total cost; a context meter (tokens against the window, in percent); the Session /
-  Subagents split once subagents have run, and `Subagents $Y+` alone while a restored subagent is listed and the Total
-  is known (see "What a reopen restores"). The window is the one auto-compaction uses, so a custom `autoCompactWindow`
-  is honoured.
+- **Session**: the session's total cost; the Session band (below); the Session / Subagents split once subagents have
+  run, and `Subagents $Y+` alone while a restored subagent is listed and the Total is known (see "What a reopen
+  restores").
+- **The Session band**: the core, which shows the context, in the middle, and eight tool stations, four on each side.
+  - The core is a ring of the context (tokens against the window): blue below 80 %, amber from 80 %, red from 95 %.
+    Inside it are the percent and the model's short name, and under it `tokens / window`. The window is the one
+    auto-compaction uses, so a custom `autoCompactWindow` is honoured. With no reading the core shows `—`. A tick
+    around the ring stands for each compaction the mod saw, 5 at most.
+  - The stations are Model, Files, Shell and Web on the left, and Agents, MCP, Skills and You on the right. Each is a
+    circle with its icon in its own hue, its label and its count for the session, the main agent's and the
+    subagents' alike. A station at 0 is dim. The ribbon and the lanes below use the same hues, so the band is their
+    colour key. What each counts:
+    - Model: the model's steps (one model request), the main agent's and the subagents'.
+    - Files: Read, Write, Edit, MultiEdit, NotebookEdit, Grep, Glob and LSP calls.
+    - Shell: Bash, PowerShell and Monitor calls, and the calls of any tool that no other station names.
+    - Web: WebFetch, WebSearch, Artifact, ArtifactComments and ArtifactData calls.
+    - Agents: Agent, Task, Workflow, SendMessage, TaskStop, ListAgents, SubagentHandback, ScheduleWakeup and `Cron…`
+      calls.
+    - MCP: every `mcp__…` tool's calls, and ListMcpResourcesTool, ReadMcpResourceTool and ReadMcpResourceDirTool.
+    - Skills: Skill, ToolSearch, ListSkills, SearchSkills, SuggestSkills, ListPlugins, SearchPlugins and
+      SuggestPluginInstall calls.
+    - You: AskUserQuestion, TodoWrite, TaskCreate, TaskUpdate, TaskList, TaskGet, EnterPlanMode, ExitPlanMode,
+      PushNotification and SendUserFile calls.
+  - A station where something runs glows, and its circle takes its hue. Model runs for each agent in a model step
+    (the main agent while its turn runs, each running subagent, while it has no call in flight); Agents for each
+    running subagent and Workflow task; Shell for each of its calls in flight and each running shell or Monitor task;
+    any other station for each of its calls in flight. With 2 or more at once a badge shows `×N` (`×9+` from 10).
+  - A failed call (one the Log draws as an error, with ✗; a denied or abandoned call is none) gives its station a red
+    circle and a red disc with this turn's count of failures (`9+` from 10). It stays until the main agent's next turn
+    starts.
+  - On each call (a model step, for Model) a pulse of three dots runs from the core to the station, and the circle
+    flashes when it arrives.
+  - Below a pane of about 496 px each side is two rows of two stations; from there it is one row of four. The core
+    stays in the middle and the stations reach the pane's edges: on a wider pane only the gaps grow. On a body wider
+    than 4096 px the band is laid out 4096 px wide and centred. When the labels do not fit, the counts stay.
+  - In a terminal the band is a core line, `opus 5.5  ▰▰▰▰▰▰▱▱▱▱  56%     112k / 200k ↻1` (`↻N` is the compaction
+    count), and a grid of station cells: `●` running or `·` idle, the label in its hue, the count, and `!N` for this
+    turn's failures or `×N` for what runs. The grid is 3 rows at 40–42 columns, 2 up to 118 and 1 from 119; below 59
+    columns the cells are compact, with a cut label and `!` or `×` alone. Counts from 1000 read `1.2k` on the desktop
+    and `1k` … `99k` in a terminal.
 - **Project**: the project folder, its git branch, and the working tree's changes against HEAD: `12 files changed`
   and `+2061 / −111`. New files count too, with their lines counted for the first 50, and your
   `status.showUntrackedFiles` is followed: with `no`, no untracked file is walked. A count that is only a lower bound
@@ -44,32 +80,54 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   tree has no changes row.
 - **Usage**: the plan limits (5-hour, Weekly, Spend) as meters with a countdown to each reset. Hidden when the engine
   reports no plan limits, for example with an API key or a third-party provider.
-- **Turn stats**: the last finished turn of the main agent (a turn stopped before any response leaves the previous
-  one shown): response and whole-turn speed (tok/s), elapsed, model and tool time, average time to first token,
-  steps, tokens in (what the turn sent at full price or more: the input that was not cached and what was written to
-  the cache; what it read from the cache is cheap and left out, and the cache hit rate still counts it) and out, cache
-  hit rate and cost. So `↑` roughly follows the cost: a usual turn reads `3.1k ↑`, and a turn after the cache went cold
-  `92k ↑`. Only roughly, since a cache read still costs a tenth of the input price: a long turn over a large context can
-  spend most of its cost on the reads that `↑` leaves out.
-- **Subagents**: up to 8 rows, running ones first, in columns: a status mark, the description, `@type` and cost; the
-  rest are counted as `+N more`. In a narrow pane `@type` gives way first. A subagent resumed with SendMessage shows as
-  running again. A restored subagent whose run is over and whose end is not known is `ended` (`○`, dim). Its cost is
-  `—`, or `$x+` once it is charged after the restore; the cost cell is a cell wider while a restored subagent is listed.
-- **Tasks**: the background tasks of the main agent: up to 8 rows, running ones first and then the newest start, in
-  columns: a status mark, the description, `@shell`, `@monitor` or `@workflow`, and the time; the rest are counted as
-  `+N more`. The header reads `running/total` while a task runs and the total otherwise, and a pane with no tasks has no
-  section. A running task's time is how long it has run (the pane redraws at least every 30 s), and an ended task's is
-  how long it ran. In a narrow pane `@kind` gives way first, on every row. The marks are `◐` running, `✓` done, `✗`
-  failed, `■` stopped and `○` ended in a terminal, and status icons on the desktop (a half-filled ring, a check, a
-  cross, a stop square, an empty ring). Subagents use the same marks: a stopped subagent is `■` and a failed one `✗`,
-  so the two differ by shape, not by colour alone. A row comes from a call of the main agent that started a task: a
+- **Turn stats**: the main agent's running turn, drawn live, or when it is idle its last finished turn (a turn stopped
+  before any response leaves the previous one shown), as a ribbon, a legend and a `details` fold.
+  - The ribbon is one bar with a part for each model call and one for each step's tool calls (parallel calls of one
+    step are one part, in the hue of the call that started first), each in its station's hue, and the elapsed time
+    at its right. A failed call's part is underlined in red. The latest steps are drawn in detail, one for every 20 px
+    of bar or so (6 to 60); older ones merge into one part per station at the left. A running turn is drawn against a
+    scale (15 s, 30 s, 1 m and so on up to 3 h, then every hour) whose rest is a dotted line with a tick at its end;
+    its live end is a pulsing cap in the hue of what runs, and between redraws it grows. A finished turn fills the bar.
+  - The legend: the model's and the tools' share of the time, the steps and the average time to first token. Below
+    36 cells (44 columns in a terminal) the time to first token is left out, and below 30 (34) the steps too.
+  - `▸ details` opens the table, and is closed by default (its fold key is `turnDetails`). While a turn runs, the table
+    leaves out the running step, which the bar and the legend count. The table holds response and whole-turn speed
+    (tok/s), elapsed, model and tool time, average time to first token, steps, tokens in (what the turn sent at full
+    price or more: the input that was not cached and what was written to the cache; what it read from the cache is
+    cheap and left out, and the cache hit rate still counts it) and out, cache hit rate and cost. So `↑` roughly
+    follows the cost: a usual turn reads `3.1k ↑`, and a turn after the cache went cold `92k ↑`. Only roughly, since a
+    cache read still costs a tenth of the input price: a long turn over a large context can spend most of its cost on
+    the reads that `↑` leaves out.
+  - In a terminal the bar is `cols − 8` cells in the parts' hues, the last cell of a failed part is a red `✗`, and
+    `·` marks the rest of the scale.
+- **Activity**: the main agent, the subagents and the main agent's background tasks, as lanes on one time axis. The
+  header reads `running/total` of the subagents and tasks while one runs, and the total otherwise; with no subagent and
+  no task the section is left out. Activity has a fold of its own (`activity`): the folds of the Subagents and Tasks
+  sections it replaced (`agents`, `tasks`) are ignored. `main` comes first, with its latest 6 turns; then the running
+  lanes, the older start first; then the ended ones, the newer end first. Up to 8 lanes show, and the rest are counted
+  as `+N more`. A lane is its label, its bar and its value. The label is the description and, from a pane of about 670
+  px (80 columns in a terminal), a dim tag after it: a subagent's `@type` as the Log shows it (with no plugin prefix,
+  cut at 14 characters: `@general-purpo…`), or a task's `@shell`, `@monitor` or `@workflow`. The description gives way
+  first, down to 6 cells, and then the tag. The value is main's cost (Session's figure, and a dim `—` while a restored
+  subagent is listed, since the split does not show Session then), a subagent's cost or a task's time. Main's lane is in
+  the Model hue, a subagent's in the Agents hue and a task's in the Shell hue. A running lane is a thick bar up to now,
+  ending in a pulsing cap; a finished one is a thin bar and a mark after it: `✓` done (green), `✗` failed (red), `■`
+  stopped or `○` ended (grey), so the statuses differ by shape, not by colour alone. A lane that started before the axis
+  fades in at its left end. The axis runs from the oldest start among the lanes shown (main's aside) to now, 2 minutes
+  at least, with ticks at round clock times, `HH:MM` labels and `now` at the end; a label closer than 36 px to `now` or
+  14 px to the axis start is left out, and its tick stays. In a terminal a lane is a row of `━` (running), `─`
+  (finished) or `┄` (start not known), with `◐` at the end of a running lane and the same marks after a finished one. A
+  subagent resumed with SendMessage runs again. A restored subagent whose run is over and whose end is not known is
+  `ended` (`○`); its cost is `—`, or `$x+` once it is charged after the restore. A running task's time is how long it
+  has run (the pane redraws at least every 30 s), and an ended task's is how long it ran. A task's lane comes from a
+  call of the main agent that started a task: a
   Bash command that runs in the background, however it got there (it asked for it, a host sent it there by its timeout,
   or it was moved there while it ran: Ctrl+B in a terminal, a plugin's abort of the turn, or any other way), a Monitor,
   or a local Workflow. The desktop (2.1.288, 2.1.299 and 2.1.304) moves no command to the background for its timeout:
   one that runs past it is killed, with exit code 143, and gets no row. A message you type while a foreground command
   runs waits until it ends on the desktop 2.1.288; since 2.1.299 the engine moves the command to the background so that
   the message can reach the model, and the command gets a row, timed from its call's start, and `→ background` in the
-  Log. Its own task list shows foreground calls and agents too, so it holds more than Tasks does. A remote Workflow is
+  Log. Its own task list shows foreground calls and agents too, so it holds more than Activity. A remote Workflow is
   no task, since its end never reaches this session, and neither is a Workflow whose syntax check failed (its result has
   a non-empty `error`); a subagent's background call makes no row: its task is its own and may end with it. The
   description is the Bash description or else its command, the Monitor's description or the workflow's name, cleaned as
@@ -144,7 +202,7 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   error because it was abandoned (you interrupted it, or a stop did) is not drawn as an error: it is not red, its `who`
   and outcome are dim as on every line that is no error, and its outcome is the time alone, with no ✗; this rests on the
   engine's `next.signal`, and was seen live for a subagent stopped with `TaskStop` and for Esc on the main agent, while
-  a call that fails by itself stays red. A call of an agent that is not in Subagents is labeled `agent`, and its failure
+  a call that fails by itself stays red. A call of an agent that is not in Activity is labeled `agent`, and its failure
   is drawn dim, not red: the pane cannot tell a fork's refused try from a real failure. Such an agent is one of the
   engine's own forks (most of them have every tool refused), or, on engines before 2.1.308, a subagent that was started
   before the session was reopened (or Claude Code restarted) and is resumed after it, whose row the restore could not
@@ -157,7 +215,7 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   front of the text; where there is no `who`, a prompt reads `you › …` and an engine message (a tagged one, such as
   `agent-message`) reads `engine › …`. A subagent's type then shows in the Log only in its `spawned · type: …` line, if
   the cut leaves it: a known limit. Unicode format characters (the bidi controls, zero-width spaces, the BOM and the
-  rest) are taken out of the branch (or the short commit of a detached HEAD), the folder name, the Subagents rows, the
+  rest) are taken out of the branch (or the short commit of a detached HEAD), the folder name, the Activity lanes, the
   MCP server names, the kind of a rate limit and every log text, since a U+202E would reorder what the pane shows. A ZWJ
   or ZWNJ stays only between two characters that are above U+007F and are no spaces, so emoji sequences joined by ZWJ
   stay whole and Persian and Indic scripts keep their joiners. Tag characters go too, since they can carry invisible
@@ -175,7 +233,7 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   its end on the same line, a CSI (7-bit or 8-bit), an `ESC ( B` such as `tput sgr0` ends in, a two-byte escape such as
   `ESC 7`. A stray ESC or U+009B goes alone, and a control string that nothing ends on its line loses its introducer
   only (the ESC alone, for `ESC P` and `ESC X`: the letter stays). A mask then hides secrets in every Log line, the
-  Subagents rows (a subagent's type and description) and the Tasks rows. It takes the credential of an Authorization
+  Activity lanes (a subagent's type and description, a task's description). It takes the credential of an Authorization
   header (Bearer and Basic keep the scheme: `Bearer •••`; any other scheme goes with it: `Authorization: •••`), a quoted
   Authorization value whole, the value of a key named like a secret (`password`, `token`, `api_key` and the like) after
   `:` or `=`, also when a quote closes the name, as in JSON, a Python dict and a curl body (`"password": "…"`), tokens
@@ -214,20 +272,51 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   aws_secret_access_key in the file` reads `••• the file`. Section 4.7 of the design spec (in Russian, linked from the
   [docs](https://github.com/philarete173/claude_mods/blob/main/docs/README.md) page) has the full list.
 
+## Settings
+
+The plugin has one option, `motion`: `full` (the default) or `reduced`. With `reduced` the pane draws no animation:
+no pulses, no breathing glows, and the live ends of the ribbon and the lanes stand still, so the ribbon's live part
+grows only when the pane redraws.
+
+- In `/config`, the enabled plugin's option shows as a picker row.
+- `/plugin configure session-panel@philarete-mods` sets it.
+- At install from a shell: `claude plugin install session-panel@philarete-mods --config motion=reduced`.
+
+An install through `/plugin` asks for the option while it is unset; an install from a shell does not ask, and the
+option keeps its default. The mod reads the option when it loads, so the pane picks up a change after Claude Code
+restarts.
+
+## Limits of the drawings
+
+- No tooltips. Every drawing is an image: an interactive one is mounted again on every redraw, so it jerks and its
+  tooltip blinks. Each drawing has a text alternative, its alt, that says what it shows: the band's counts, the turn's
+  shares, a lane's description, type, status and value.
+- Pale hues on a light terminal. The desktop's drawings follow the app's theme, dark or light. A terminal always gets
+  the dark set of hues, since the mod cannot know the terminal's background, and on a light one they look pale. No
+  setting changes that.
+- The compaction ticks are best effort: one for each main `session.compact` the mod sees. Another plugin can keep the
+  event from the mod, as cc-plugin-sec-default does, and then no tick is drawn.
+- Restored lanes are dashed, and restored stations have no running or failure marks of their own (see "What a reopen
+  restores").
+- A call whose `tool.call` another plugin answers never reaches the mod's hook, so it stays in flight, and its station
+  running, until its agent's next model request.
+
 ## What a reopen restores
 
-- When: at `session.start`, when Subagents, Tasks and the Log are all empty: a new process (the desktop app reopened,
-  `claude --resume`, the mod enabled mid-session). A hot reload keeps the state and restores nothing. After an
+- When: at `session.start`, when the subagents, the tasks and the Log are all empty: a new process (the desktop app
+  reopened, `claude --resume`, the mod enabled mid-session). A hot reload keeps the state and restores nothing. After an
   in-process `/resume` (a terminal's REPL) it restores at the first turn of the main agent, without that turn's own
   rows. Not after `/clear`, and a `/clear` after a `/resume` cancels the restore that the resume left due. It also
   restores at the first turn of the main agent, without that turn's own rows, when another plugin sent `session.start`
   past the mod (the pane, its command and its timer start there too), unless something was drawn before that turn (a
   subagent the engine resumed), which keeps the restore out as a hot reload's state does. To keep the mod off, disable
   it.
-- What: from the newest 4096 rows of the main conversation, walked from the latest compaction summary on. Subagents:
-  every Agent call that has an agent id, `done` or `failed` by its result, `done`, `failed` or `stopped` by a task
-  notice or a `TaskStop`, else `running` when the engine still lists it alive, or `ended`. Tasks: the background calls,
-  closed by notices or `TaskStop`, else `ended`. The Log: prompts, the turns the engine opened,
+- What: from the newest 4096 rows of the main conversation, walked from the latest compaction summary on. The
+  subagents: every Agent call that has an agent id, `done` or `failed` by its result, `done`, `failed` or `stopped` by a
+  task notice or a `TaskStop`, else `running` when the engine still lists it alive, or `ended`. The tasks: the
+  background calls, closed by notices or `TaskStop`, else `ended`. The band: each station's count of calls, and
+  Model's of steps, after the latest compaction summary, added to the counts it holds; and the compactions, one for
+  each compaction summary among the rows. The Log: prompts, the turns the engine opened,
   as live (`engine › task-notification`, a `!` command or a skill's command that the model answered; a local command
   that asks the model nothing has no line), task notices, subagent and task lines, and the main agent's tool calls with
   `✓` or `✗`; the newest 200 are kept, and the header counts all.
@@ -237,17 +326,22 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
   without one, a subagent's end line keeps its `✓` or `✗` and a task's has no outcome, and a stop has none. An end line
   has no answer when the notice says, in the engine's own sentence, that the agent ended without a report or that its
   report came as a message (an answer that holds such a sentence loses its text); a notice that says the agent has not
-  reported yet closes nothing. A restored subagent or task has no known start, so it is listed after the live rows of
-  its group, newest first.
+  reported yet closes nothing. A restored subagent or task has no known start, so its lane is dashed over the whole
+  axis, with the pulsing cap while it runs and its mark otherwise, and the axis does not reach back for it. A running
+  one comes after the running lanes whose start is known; an ended one comes last, unless its end was seen live, which
+  places it among the others by its end.
 - Live rows win on an id, and restored lines are older than live ones.
 - Not restored: subagents' own tool calls; subagents' hand-backs, which the engine keeps out of the messages (so a
   subagent that reported between turns and has no notice row is `ended`); prompts, notices and other agents' messages
   that arrived mid-turn, which are not rows; tool times, denials and interruptions (a denied or interrupted call reads
-  `✗`); Turn stats (`No completed turn yet` until a new turn); the `compacted` and `resumed` lines; costs before the
-  restore; rows before the latest compaction after a restart. A task that was restored while it still ran stays `ended`
-  when its notice comes, and a task that the engine's own notice after a reopen names (`failed` or `stopped`, with a
-  note) stays `ended` too. A notice that is typed, pasted or sent through the SDK, or that another plugin forges, can
-  close a restored row (display only), and a prompt that starts with the summary's phrase hides the rows before it.
+  `✗`); Turn stats (`No completed turn yet` until a turn starts); main's turns in Activity (its lane shows the turns
+  that start after the restore); the band's calls in flight, failures and pulses, so a restored station has no running
+  or failure mark of its own (a restored subagent that runs still counts at Agents and Model); the `compacted` and
+  `resumed` lines; costs before the restore; rows before the latest compaction after a restart. A task that was
+  restored while it still ran stays `ended` when its notice comes, and a task that the engine's own notice after a
+  reopen names (`failed` or `stopped`, with a note) stays `ended` too. A notice that is typed, pasted or sent through
+  the SDK, or that another plugin forges, can close a restored row (display only), and a prompt that starts with the
+  summary's phrase hides the rows before it.
 
 ## How costs are measured
 
