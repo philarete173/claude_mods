@@ -5,6 +5,7 @@ import type { On, RenderPropsOf, RenderSurface, SessionRateLimit } from 'claude-
 import { chipRows, contextMeterWidth, limitMeterWidth, meterSvg, renderPane, ringSvg } from './view'
 import type { PaneData } from './view'
 import { restoreFromMessages } from './restore'
+import { emptyStationsState } from './stations'
 import type { AgentRow, AgentStatus, LogEntry, TaskKind, TaskRow, TaskStatus, TurnStats } from './stats'
 
 // The state of the pane is seeded the way register.test.ts does it: the events of a session run through the real
@@ -369,14 +370,21 @@ const EMPTY: PaneData = {
   usage: { rateLimits: [] },
   project: { name: '', branch: null, changes: null },
   mcp: null,
+  turn: null,
   lastTurn: null,
   agents: {},
   tasks: {},
   log: [],
   logCount: 0,
   collapsed: {},
+  stations: emptyStationsState(),
+  inFlight: {},
+  mainModel: null,
+  compactions: 0,
+  mainTurns: [],
   now: NOW,
   surface: 'desktop',
+  motion: 'full',
 }
 
 const agent = (n: number, status: AgentStatus, patch: Partial<AgentRow> = {}): AgentRow => ({
@@ -449,17 +457,24 @@ const FULL: PaneData = {
       { name: 'issue-hub' },
     ],
   },
+  turn: null,
   lastTurn: {
     elapsedMs: 78_000, modelMs: 66_000, toolMs: 11_400, steps: 5, ttftMs: 4900, wholeTurnRate: 72, responseRate: 62,
-    tokensIn: 845, tokensOut: 4700, cachePct: 80, costUsd: 3.21,
+    tokensIn: 845, tokensOut: 4700, cachePct: 80, costUsd: 3.21, ribbon: null,
   },
   agents: Object.fromEntries(AGENTS.map(row => [row.id, row])),
   tasks: {},
   log: LOG,
   logCount: 137, // every event of the session: many more than the lines the log keeps
   collapsed: {},
+  stations: emptyStationsState(),
+  inFlight: {},
+  mainModel: null,
+  compactions: 0,
+  mainTurns: [],
   now: NOW,
   surface: 'desktop',
+  motion: 'full',
 }
 // The sections in the order they are drawn, by id and by title.
 const SECTIONS = ['usage', 'turn', 'agents', 'mcp', 'sources', 'log'] as const

@@ -11,16 +11,17 @@ import type {
 } from 'claude-code'
 
 import {
-  addAgentCost, agentOutcome, attributeCost, computeTurnStats, endKind, engineLineText, finishTask, fmtDuration,
-  fmtTokens, HANDBACK_TOOL, LOG_MAX, logText, MAIN_TURNS_MAX, parseStatus, parseTaskNotification, promptKind, pushLog,
-  shortType, SPAWN_TOOLS, stripFormat, sumNumstat, TASK_END, taskFromCall, taskLine, toolLabel,
+  addAgentCost, addStep, addTool, agentOutcome, attributeCost, computeTurnStats, endKind, engineLineText, finishTask,
+  fmtDuration, fmtTokens, HANDBACK_TOOL, LOG_MAX, logText, MAIN_TURNS_MAX, normTurn, parseStatus, parseTaskNotification,
+  promptKind, pushLog, ribbonOf, shortType, SPAWN_TOOLS, stripFormat, sumNumstat, TASK_END, taskFromCall, taskLine,
+  toolLabel,
 } from './stats'
 import type {
   AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, TaskEndStatus, TaskRow, Usage,
 } from './stats'
 import { cutAtTurn, restoreFromMessages } from './restore'
-import { emptyStationsState, STATION_ORDER, stationOf } from './stations'
-import type { InFlightCall, StationsState } from './stations'
+import { emptyStationsState, STATION_ORDER, stationOf, zeroStationMs } from './stations'
+import type { InFlightCall, Motion, StationsState } from './stations'
 import { renderPane } from './view'
 import type { PaneData, SectionId } from './view'
 
@@ -844,7 +845,8 @@ async function startPane($: EngineInterface): Promise<void> {
   if ((await $.session.surfaces()).includes('desktop')) await $.ui.open({ id: PANE, title: 'Session' })
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const motion: Motion = options.motion === 'reduced' ? 'reduced' : 'full'
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     // A reload in the middle of a call leaves no call in flight behind.
@@ -992,7 +994,8 @@ export const register: Register = on => {
     const now = await $.clock.now()
     const { cost } = await $.session.usage()
     await update($, turnAtom, () => ({
-      turnId: e.turnId, startedAt: now, costAtStart: cost?.usd ?? null, steps: [], toolIntervals: [],
+      turnId: e.turnId, startedAt: now, costAtStart: cost?.usd ?? null, steps: [], toolIntervals: [], tools: [],
+      earlier: zeroStationMs(),
     }))
     // A main turn starts the failures of every station over, and opens a main turn.
     await update($, stationsAtom, held => Object.fromEntries(
@@ -1066,7 +1069,7 @@ export const register: Register = on => {
     }
     if (tEnd !== null && e.agentId === undefined) {
       const step: StepTiming = { tStart, tFirst, tEnd, usage, hasTool, hasText }
-      await update($, turnAtom, acc => acc && { ...acc, steps: [...acc.steps, step] })
+      await update($, turnAtom, acc => acc && addStep(acc, step))
     }
 
     return await stream.result
@@ -1080,9 +1083,9 @@ export const register: Register = on => {
     // wait.
     const isAbandoned = ran.isError === true && next.signal.aborted
     const t1 = await $.clock.now()
-    // The call's station, its flight and its turn are written first, before any read that can throw (a root). A
-    // failure is one whose Log line is an error with a mark: not denied, not abandoned, not of an agent with no row
-    // (the line's kind below).
+    // The call's station, its flight and its turn interval are written first, as soon as the call has returned, so
+    // nothing later in the hook can skip them. A failure is one whose Log line is an error with a mark: not denied, not
+    // abandoned, not of an agent with no row (the line's kind below).
     const station = stationOf(e.tool)
     const { who, isUnknown } = await whoIs($, e.agentId)
     const isStationFailure = ran.isError === true && ran.deny === undefined && !isAbandoned && !isUnknown
@@ -1125,18 +1128,27 @@ export const register: Register = on => {
     const isAgentCall =
       SPAWN_TOOLS.includes(e.tool) || e.tool === HANDBACK_TOOL ||
       (e.tool === 'SendMessage' && typeof e.to === 'string' && Object.hasOwn(await read($, agentsAtom), e.to))
-    if (isFailed || !isAgentCall) {
+    const isLogged = isFailed || !isAgentCall
+    // One read of the root serves the Log line and main's segment; a call that needs neither reads none. A read that
+    // rejects gives no root, so the path stays whole and the line and the segment are written all the same.
+    const label = isLogged || e.agentId === undefined
+      ? logText(toolLabel(e.tool, e, await $.session.root().catch(() => '')))
+      : ''
+    if (isLogged) {
       // How it went is the outcome, a column of its own: the time it took behind a mark, or `denied`. An abandoned call
       // has the time alone, as a stopped subagent has, and is news, not a fault.
       const took = fmtDuration(t1 - t0)
       const outcome = ran.deny !== undefined ? 'denied' : isAbandoned ? took : `${isFailed ? '✗' : '✓'} ${took}`
-      const label = logText(toolLabel(e.tool, e, await $.session.root()))
       // The engine's own forks and a workflow's agents carry ids that no agent.spawn announced, so the agents atom has
       // no row for them. Core refuses the tools of most forks, so a fork that tries one would show a red failure that
       // nobody caused (the 0.4.1 live check). The pane cannot tell a fork from a workflow's agent, whose failure is
       // real, so the failure of an agent with no row is drawn dim, and still shown.
       const kind: LogKind = isAbandoned || (isFailed && isUnknown) ? 'info' : isFailed ? 'error' : 'ok'
       await addLog($, t1, who, label, kind, task === null ? outcome : '→ background')
+    }
+    if (e.agentId === undefined) {
+      const segment = { t0, t1, station, label, failed: isStationFailure }
+      await update($, turnAtom, acc => acc && addTool(acc, segment))
     }
     // A TaskStop that went through ends the task it names, by `task_id` or by the deprecated `shell_id`: it gives no
     // notice of its own (the v2 spec, §8.5), so a task it names that is left running would stay so for good.
@@ -1176,7 +1188,9 @@ export const register: Register = on => {
         // A turn stopped before any response leaves the previous one shown: the spec shows the last completed turn.
         if (acc.steps.length > 0) {
           const { cost } = await $.session.usage()
-          await update($, lastTurnAtom, () => computeTurnStats(acc, e.durationMs, e.usage, cost?.usd ?? null))
+          await update($, lastTurnAtom, () => ({
+            ...computeTurnStats(normTurn(acc), e.durationMs, e.usage, cost?.usd ?? null), ribbon: ribbonOf(acc, now),
+          }))
         }
         await update($, turnAtom, () => null)
       }
@@ -1312,18 +1326,26 @@ export const register: Register = on => {
   // not wait for it, and a write that fails (the store) is not a failed press: the section has folded all the same.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const els = $.ui.resolve(e)
+    const turn = await read($, turnAtom)
     const data: PaneData = {
       usage: await read($, usageAtom),
       project: await read($, projectAtom),
       mcp: await read($, mcpAtom),
+      turn: turn === null ? null : normTurn(turn),
       lastTurn: await read($, lastTurnAtom),
       agents: await read($, agentsAtom),
       tasks: await read($, tasksAtom),
       log: await read($, logAtom),
       logCount: await read($, logCountAtom),
       collapsed: await read($, collapsedAtom),
+      stations: await read($, stationsAtom),
+      inFlight: await read($, inFlightAtom),
+      mainModel: await read($, mainModelAtom),
+      compactions: await read($, compactionsAtom),
+      mainTurns: await read($, mainTurnsAtom),
       now: await $.clock.now(),
       surface: e.surface,
+      motion,
     }
 
     return renderPane(els, data, e.props, {

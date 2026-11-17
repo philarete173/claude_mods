@@ -3,7 +3,7 @@ import type { Engine, MockClock, Plugin } from 'claude-code/testing'
 import type { On, PluginState, PromptOrigin, RenderPropsOf, RenderSurface, SessionMessage, UiPane } from 'claude-code'
 
 import { restoreFromMessages } from './restore'
-import { emptyStationsState } from './stations'
+import { emptyStationsState, zeroStationMs } from './stations'
 import type { InFlightCall, StationsState } from './stations'
 import { HANDBACK_TOOL, LOG_MAX } from './stats'
 import type { AgentRow, LogEntry, MainTurn, TaskRow, TurnAcc, TurnStats } from './stats'
@@ -570,6 +570,7 @@ type World = {
   maxGitInFlight: number
   rootLag: number // how long session.root() takes, in mock ms
   rootFailures: number // how many of the next session.root() calls reject
+  rootReads: number // how many session.root() calls were made
   root: string // what session.root() answers
   isReadOnly: boolean // core ran the next calls of tools read-only: their results say so
   listed: { id: string; status: string }[] // what $.agent.list() answers
@@ -662,6 +663,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     maxGitInFlight: 0,
     rootLag: 0,
     rootFailures: 0,
+    rootReads: 0,
     root: ROOT,
     isReadOnly: false,
     listed: [],
@@ -779,6 +781,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
   })
   on('session.surfaces', () => ({ value: w.surfaces }))
   on('session.root', async () => {
+    w.rootReads += 1
     if (w.rootLag > 0) await clock.sleep(w.rootLag)
     if (w.rootFailures > 0) {
       w.rootFailures -= 1
@@ -3586,6 +3589,81 @@ test('the station write lands before a root read that fails', SLOW_READER, async
   const state = await readState($)
   expect(state.stations.shell.calls).toBe(1)
   expect(state.inFlight).toEqual({})
+})
+
+// Main's turn with a step and two calls: an Edit that took 300 ms and a Bash that failed at once. Answers the two
+// segments the calls should have written.
+const twoCalls = async ($: Engine, clock: MockClock) => {
+  await $.session.start(START)
+  await startTurn($)
+  await runStep($, clock, { turnId: 't0', index: 0 })
+  const editAt = clock.now()
+  await drive(clock, $.tool.call(edit()))
+  const bashAt = clock.now()
+  await $.tool.call({ tool: 'Bash', command: 'fail now' })
+
+  return [
+    { t0: editAt, t1: editAt + 300, station: 'files', label: 'Edit a.ts', failed: false },
+    { t0: bashAt, t1: bashAt, station: 'shell', label: 'Bash fail now', failed: true },
+  ]
+}
+
+test('a main call adds its segment: station, the Log\'s label, failure', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  const segments = await twoCalls($, clock)
+  const state = await readState($)
+  expect(state.turn?.tools).toEqual(segments)
+  expect(state.log.slice(0, 2).map(line => line.text)).toEqual(['Bash fail now', 'Edit a.ts']) // newest first
+
+  await drive(clock, $.tool.call({ ...edit(), agentId: 'zz' } as never))
+  expect((await readState($)).turn?.tools).toEqual(segments) // a subagent's call adds none
+})
+
+test('turn.complete keeps the turn\'s ribbon in lastTurn', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  const segments = await twoCalls($, clock)
+  const { turn } = await readState($)
+  const endedAt = clock.now()
+  await endTurn($)
+  expect((await readState($)).lastTurn?.ribbon).toEqual({
+    startedAt: turn?.startedAt,
+    endedAt,
+    steps: turn?.steps.map(({ tStart, tEnd }) => ({ tStart, tEnd })),
+    tools: segments,
+    earlier: zeroStationMs(),
+  })
+  expect(turn?.steps.length).toBe(1)
+})
+
+test('one root read serves the Log line and the segment', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await startTurn($)
+  await runStep($, clock, { turnId: 't0', index: 0 })
+  await clock.advance(10)
+
+  const before = w.rootReads
+  await $.tool.call({ tool: 'Bash', command: 'fail now' })
+  expect(w.rootReads).toBe(before + 1)
+})
+
+test('a root read that rejects still writes the segment and the Log line', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await startTurn($)
+  await runStep($, clock, { turnId: 't0', index: 0 })
+  await clock.advance(10)
+
+  w.rootFailures = 1
+  expect(await drive(clock, $.tool.call(edit()))).toEqual({ result: { stdout: 'ok' }, text: 'ok' })
+  const state = await readState($)
+  const label = `Edit ${ROOT}/a.ts` // the path whole: with no root nothing is cut from it
+  expect(state.log[0]?.text).toBe(label)
+  expect(state.turn?.tools.map(tool => tool.label)).toEqual([label])
 })
 
 test('main\'s turns are kept, the latest 6: a start opens one, a complete ends it', SLOW_READER, async ($, on) => {

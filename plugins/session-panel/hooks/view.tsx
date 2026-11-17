@@ -12,18 +12,21 @@ import {
   splitCost, TYPE_MAX,
 } from './stats'
 import type { AgentRow, LogEntry, TaskRow, TaskStatus } from './stats'
+import type { Motion } from './stations'
 
 export type SectionId = 'usage' | 'turn' | 'agents' | 'tasks' | 'mcp' | 'sources' | 'log'
 
 type State = PluginState['session-panel']
 
-// What the pane is drawn from: the atoms it shows, the time for the countdowns and the running time of a task, and the
-// surface it is drawn on.
+// What the pane is drawn from: the atoms it shows, the time for the countdowns and the running time of a task, the
+// surface it is drawn on and the `motion` option. Reading `turn` makes each step and call of the turn redraw the pane.
 export type PaneData = Pick<
-  State, 'usage' | 'project' | 'mcp' | 'lastTurn' | 'agents' | 'tasks' | 'log' | 'logCount' | 'collapsed'
+  State, 'usage' | 'project' | 'mcp' | 'turn' | 'lastTurn' | 'agents' | 'tasks' | 'log' | 'logCount' | 'collapsed'
+  | 'stations' | 'inFlight' | 'mainModel' | 'compactions' | 'mainTurns'
 > & {
   now: number
   surface: RenderSurface
+  motion: Motion
 }
 
 // The part of the Pane props the drawing reads.

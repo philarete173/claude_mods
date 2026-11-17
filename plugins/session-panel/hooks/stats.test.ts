@@ -1,6 +1,9 @@
 import { test, expect } from 'claude-code/testing'
+import { zeroStationMs } from './stations'
 import {
   addAgentCost,
+  addStep,
+  addTool,
   agentOutcome,
   attributeCost,
   cacheHitPct,
@@ -20,6 +23,7 @@ import {
   LOG_MAX,
   LOG_TEXT_MAX,
   mergedLength,
+  normTurn,
   orderAgents,
   orderTasks,
   parseStatus,
@@ -28,6 +32,7 @@ import {
   promptKind,
   pushLog,
   redact,
+  ribbonOf,
   shortType,
   shorten,
   splitCost,
@@ -42,7 +47,7 @@ import {
   wordHead,
 } from './stats'
 import type {
-  AgentRow, AgentStatus, Interval, LogEntry, StepTiming, TaskEnd, TaskRow, TaskStatus, TurnAcc, Usage,
+  AgentRow, AgentStatus, Interval, LogEntry, StepTiming, TaskEnd, TaskRow, TaskStatus, ToolSegment, TurnAcc, Usage,
 } from './stats'
 
 // claude-code/testing has no toBeCloseTo, so a tolerance is checked by hand.
@@ -61,7 +66,8 @@ const U: Usage = {
   input_tokens: 12, output_tokens: 777, cache_read_input_tokens: 99000, cache_creation_input_tokens: 900,
 }
 const A: TurnAcc = {
-  turnId: 't', startedAt: 0, costAtStart: 5, steps: [S1, S2], toolIntervals: [[5000, 5600], [5200, 5900]],
+  turnId: 't', startedAt: 0, costAtStart: 5, steps: [S1, S2], toolIntervals: [[5000, 5600], [5200, 5900]], tools: [],
+  earlier: zeroStationMs(),
 }
 
 const agent = (status: AgentStatus, startedAt: number | null, id = `${status}@${startedAt}`): AgentRow => ({
@@ -193,6 +199,54 @@ test('computeTurnStats: Tokens in is the input at full price or more, the cache 
     expect(s.tokensIn, JSON.stringify(usage)).toBe(tokensIn)
     expect(s.cachePct, JSON.stringify(usage)).toBe(cachePct)
   }
+})
+
+// A turn of 60 steps, each followed by a tool: step i runs from i × 2000 for 1000 ms, its tool for the next 500 ms,
+// Files for an even i and Shell for an odd one. Then a 61st step.
+const stepAt = (i: number): StepTiming => ({
+  tStart: i * 2000, tFirst: null, tEnd: i * 2000 + 1000, usage: {}, hasTool: true, hasText: false,
+})
+const toolAt = (i: number): ToolSegment => ({
+  t0: i * 2000 + 1000, t1: i * 2000 + 1500, station: i % 2 === 0 ? 'files' : 'shell', label: `tool ${i}`,
+  failed: false,
+})
+const turn61 = (): TurnAcc => {
+  let acc: TurnAcc = { ...A, steps: [], toolIntervals: [], tools: [], earlier: zeroStationMs() }
+  for (let i = 0; i < 60; i += 1) acc = addTool(addStep(acc, stepAt(i)), toolAt(i))
+
+  return addStep(acc, stepAt(60))
+}
+// An accumulator that 0.6.1 wrote: no tools, no earlier.
+const OLD = {
+  turnId: 't', startedAt: 0, costAtStart: 5, steps: [S1, S2], toolIntervals: [[5000, 5600]],
+} as unknown as TurnAcc
+
+test('addStep keeps the tools of the latest 60 steps and folds the older ones into earlier', () => {
+  const acc = turn61()
+  expect(acc.steps.length).toBe(61)
+  expect(acc.earlier).toEqual({ ...zeroStationMs(), model: 1000, files: 500 })
+  expect(acc.tools.length).toBe(59)
+  expect(acc.tools.some(tool => tool.t0 < 2000)).toBe(false) // 2000: the tStart of steps[1]
+})
+
+test('normTurn fills an accumulator of 0.6.1', () => {
+  const filled = normTurn(OLD)
+  expect(filled).toEqual({ ...OLD, tools: [], earlier: zeroStationMs() })
+  expect(filled.steps).toBe(OLD.steps)
+  expect(filled.toolIntervals).toBe(OLD.toolIntervals)
+  expect(normTurn(A)).toBe(A)
+  expect(addTool(OLD, toolAt(0)).tools).toEqual([toolAt(0)])
+  expect(addStep(OLD, stepAt(5))).toEqual({ ...OLD, steps: [S1, S2, stepAt(5)], tools: [], earlier: zeroStationMs() })
+})
+
+test('ribbonOf keeps the latest 60 steps as times, the tools and earlier', () => {
+  const acc = turn61()
+  const ribbon = ribbonOf(acc, 130_000)
+  expect(ribbon.steps.length).toBe(60)
+  expect(ribbon.steps[0]).toEqual({ tStart: 2000, tEnd: 3000 })
+  expect([ribbon.startedAt, ribbon.endedAt]).toEqual([acc.startedAt, 130_000])
+  expect([ribbon.tools, ribbon.earlier]).toEqual([acc.tools, acc.earlier])
+  expect(ribbonOf(OLD, 5).tools).toEqual([])
 })
 
 test('computeTurnStats: costUsd is null unless both readings exist', () => {
@@ -1655,6 +1709,10 @@ test('toolLabel', () => {
     ['TodoWrite', { todos: [] }, 'TodoWrite'],
   ]
   for (const [tool, input, want] of cases) expect(toolLabel(tool, input, '/r'), `toolLabel(${tool})`).toBe(want)
+})
+
+test('toolLabel with an empty root keeps a path whole', () => {
+  expect(toolLabel('Read', { file_path: '/a/b.ts' }, '')).toBe('Read /a/b.ts')
 })
 
 // The arguments are what the tool.call hook has once next(e) is back: the input of the call, and its result.

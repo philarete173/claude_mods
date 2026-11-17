@@ -2,6 +2,9 @@
 // tasks, redaction and display formats. It imports nothing from the engine and never takes `$`, so every function can
 // be tested on its own.
 
+import { zeroStationMs } from './stations'
+import type { StationMs, ToolStationId } from './stations'
+
 export type Usage = {
   input_tokens?: number
   output_tokens?: number
@@ -25,6 +28,15 @@ export type TurnAcc = {
   costAtStart: number | null
   steps: StepTiming[]
   toolIntervals: Interval[]
+  // Main's calls of the latest RIBBON_STEPS steps; older calls, and older steps' model time, fold into `earlier`.
+  tools: ToolSegment[]
+  earlier: StationMs
+}
+export type ToolSegment = { t0: number; t1: number; station: ToolStationId; label: string; failed: boolean }
+// What the turn ribbon draws of a turn: its latest RIBBON_STEPS steps as times, its calls and what folded before them.
+export type RibbonTurn = {
+  startedAt: number; endedAt: number; steps: { tStart: number; tEnd: number }[]; tools: ToolSegment[]
+  earlier: StationMs
 }
 export type TurnStats = {
   elapsedMs: number
@@ -40,6 +52,7 @@ export type TurnStats = {
   tokensOut: number
   cachePct: number | null
   costUsd: number | null
+  ribbon: RibbonTurn | null
 }
 // `ended`: the subagent is over, and how it ended is not known (a restored row).
 export type AgentStatus = 'running' | 'done' | 'failed' | 'stopped' | 'ended'
@@ -169,6 +182,54 @@ export function computeTurnStats(
     tokensOut: total.output_tokens ?? 0,
     cachePct: cacheHitPct(total),
     costUsd: costNow !== null && acc.costAtStart !== null ? costNow - acc.costAtStart : null,
+    ribbon: null,
+  }
+}
+
+export const RIBBON_STEPS = 60
+
+// A turn atom written by 0.6.1 before a hot reload has neither `tools` nor `earlier`.
+export function normTurn(acc: TurnAcc): TurnAcc {
+  return acc.tools !== undefined && acc.earlier !== undefined
+    ? acc
+    : { ...acc, tools: acc.tools ?? [], earlier: acc.earlier ?? zeroStationMs() }
+}
+
+// Appends a step. Once there are more than RIBBON_STEPS, the step that leaves the window adds its model time to
+// `earlier`, and the calls before the window's first step fold into their stations. `steps` stays whole: the turn's
+// stats need every step.
+export function addStep(acc: TurnAcc, step: StepTiming): TurnAcc {
+  const held = normTurn(acc)
+  const steps = [...held.steps, step]
+  // The index of the window's first step; past 0, the step before it (gone) has just left the window.
+  const first = steps.length - RIBBON_STEPS
+  const gone = steps[first - 1]
+  const from = steps[first]
+  let out: TurnAcc = { ...held, steps }
+  if (gone !== undefined && from !== undefined) {
+    const earlier = { ...held.earlier, model: held.earlier.model + gone.tEnd - gone.tStart }
+    const tools: ToolSegment[] = []
+    for (const tool of held.tools) {
+      if (tool.t0 < from.tStart) earlier[tool.station] += tool.t1 - tool.t0
+      else tools.push(tool)
+    }
+    out = { ...out, tools, earlier }
+  }
+
+  return out
+}
+
+export function addTool(acc: TurnAcc, segment: ToolSegment): TurnAcc {
+  const held = normTurn(acc)
+
+  return { ...held, tools: [...held.tools, segment] }
+}
+
+export function ribbonOf(acc: TurnAcc, endedAt: number): RibbonTurn {
+  const { startedAt, steps, tools, earlier } = normTurn(acc)
+
+  return {
+    startedAt, endedAt, steps: steps.slice(-RIBBON_STEPS).map(({ tStart, tEnd }) => ({ tStart, tEnd })), tools, earlier,
   }
 }
 
@@ -678,8 +739,9 @@ export const logHead = (text: string): string => wordHead(stripFormat(text), TEX
 export const logText = (text: string): string => shorten(redact(logHead(text)), LOG_TEXT_MAX)
 
 const str = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback)
+// An empty root (one that could not be read) cuts nothing: `/` would take the leading slash.
 const relativeTo = (path: string, root: string): string =>
-  path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path
+  root !== '' && path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path
 
 function hostOf(url: string): string {
   try {

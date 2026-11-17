@@ -24,6 +24,13 @@ export type TurnAcc = {
   costAtStart: number | null
   steps: StepTiming[]
   toolIntervals: Interval[]
+  tools: ToolSegment[]
+  earlier: StationMs
+}
+export type ToolSegment = { t0: number; t1: number; station: ToolStationId; label: string; failed: boolean }
+export type RibbonTurn = {
+  startedAt: number; endedAt: number; steps: { tStart: number; tEnd: number }[]; tools: ToolSegment[]
+  earlier: StationMs
 }
 export type TurnStats = {
   elapsedMs: number
@@ -39,6 +46,7 @@ export type TurnStats = {
   tokensOut: number
   cachePct: number | null
   costUsd: number | null
+  ribbon: RibbonTurn | null
 }
 // `ended`: the subagent is over, and how it ended is not known (a restored row).
 export type AgentStatus = 'running' | 'done' | 'failed' | 'stopped' | 'ended'
