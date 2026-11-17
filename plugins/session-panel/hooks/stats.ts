@@ -274,7 +274,7 @@ export const TYPE_MAX = 14 // the most an agent type takes: the log's `who`; the
 export function shortType(type: string): string {
   const name = type.slice(type.lastIndexOf(':') + 1)
 
-  return name.length > TYPE_MAX ? `${name.slice(0, TYPE_MAX - 1)}…` : name
+  return name.length > TYPE_MAX ? `${textHead(name, TYPE_MAX - 1)}…` : name
 }
 
 // The patterns below are copied verbatim from claude-flightdeck/hooks/core.ts, commit f31daca

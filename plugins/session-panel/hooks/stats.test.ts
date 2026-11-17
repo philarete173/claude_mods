@@ -324,6 +324,11 @@ test('shortType', () => {
   }
 })
 
+test('shortType never splits a surrogate pair', () => {
+  // 12 letters and an astral emoji take 14 units: the cut at 13 would keep the emoji's high half alone.
+  expect(shortType('abcdefghijkl\u{1F600}xyz')).toBe('abcdefghijkl…')
+})
+
 test('shorten', () => {
   expect(shorten('  a \n  b  ', 10)).toBe('a b')
   expect(shorten('abcdefghijk', 5)).toBe('abcd…')
