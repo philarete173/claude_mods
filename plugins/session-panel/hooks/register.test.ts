@@ -7858,3 +7858,60 @@ test('a step redraws the running ribbon', SLOW_READER, async ($, on) => {
   expect(afterCall).toMatch(shellPart)
   await ui.unmount()
 })
+
+// The `motion` option reaches the draws (spec 0.7.0 §7.4): the same state, a pulse due, a running turn and a running
+// subagent, drawn with the option `reduced` and with none. The pulse is the model station's, which a step stamps.
+const motionPane = async ($: Engine, on: On, surface: RenderSurface = 'desktop') => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  await startTurn($)
+  await $.agent.spawn(SPAWN)
+  await runStep($, clock, { turnId: 't0', index: 0 })
+
+  return mountPane($, surface)
+}
+const svgSources = async (ui: Awaited<ReturnType<typeof mountPane>>): Promise<string[]> =>
+  (await ui.findAll({ type: 'Svg' })).map(el => String(el.props.source))
+// The sources of the three images that move under `full`, found by their alts among the mounted Svgs: the band, the
+// ribbon of the running turn and a running lane. A rule or an icon has none of these alts.
+type Movers = Record<'band' | 'ribbon' | 'lane', string>
+const movers = async (ui: Awaited<ReturnType<typeof mountPane>>): Promise<Movers> => {
+  const svgs = await ui.findAll({ type: 'Svg' })
+  const sourceOf = (isIt: (alt: string) => boolean): string => {
+    const found = svgs.filter(el => isIt(String(el.props.alt)))
+    expect(found.length > 0, 'an image the pane draws').toBe(true)
+
+    return String(found[0]?.props.source)
+  }
+
+  return {
+    band: sourceOf(alt => alt.startsWith('Context ')),
+    ribbon: sourceOf(alt => /^Turn \d/.test(alt)),
+    lane: sourceOf(alt => /, running, /.test(alt)),
+  }
+}
+
+test('motion reduced draws no animation anywhere', {
+  options: { motion: 'reduced' }, plugins: [READER], timeoutMs: 30_000,
+}, async ($, on) => {
+  const ui = await motionPane($, on)
+  // The band, the ribbon and a running lane are all there, so that the absence of `<animate` is not an empty pane's.
+  const images = await movers(ui)
+  for (const source of Object.values(images)) expect(source).not.toContain('<animate')
+  for (const source of await svgSources(ui)) expect(source).not.toContain('<animate')
+  expect((await svgSources(ui)).join('')).not.toContain('<set ')
+  await ui.unmount()
+})
+
+test('motion full, the default, draws the pulse', { plugins: [READER], timeoutMs: 30_000 }, async ($, on) => {
+  const ui = await motionPane($, on)
+  const images = await movers(ui)
+  expect(images.band).toContain('data-part="pulse"')
+  expect(images.band).toContain('<animateMotion')
+  // The control of the reduced test: the same state moves the ribbon and the running lane, so that test could fail.
+  expect(images.ribbon).toContain('<animate')
+  expect(images.lane).toContain('<animate')
+  await ui.unmount()
+})

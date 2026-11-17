@@ -5,8 +5,9 @@ import type { On, RenderPropsOf, RenderSurface, SessionRateLimit } from 'claude-
 import { chipRows, isSectionFolded, limitMeterWidth, meterSvg, renderPane, spanLine } from './view'
 import type { PaneData } from './view'
 import { restoreFromMessages } from './restore'
-import { emptyStationsState, STATION_HUES, zeroStationMs } from './stations'
-import { fmtDuration } from './stats'
+import { emptyStationsState, STATION_HUES, STATION_ORDER, zeroStationMs } from './stations'
+import type { ToolStationId } from './stations'
+import { addStep, addTool, fmtDuration } from './stats'
 import type { AgentRow, AgentStatus, LogEntry, TaskRow, TaskStatus, TurnAcc, TurnStats } from './stats'
 
 // The state of the pane is seeded the way register.test.ts does it: the events of a session run through the real
@@ -4022,6 +4023,203 @@ test('while a subagent is restored main\'s lane value is a dim dash; with none r
       const last = (data: PaneData): Node | undefined => childrenOf(childrenOf(mainOf(data)).at(-1))[0]
       expect([textsOf(last(LANES))[0], last(LANES)?.props?.dimColor], surface).toEqual(['       —', true])
       expect([textsOf(last(live))[0], last(live)?.props?.dimColor], surface).toEqual(['   $3.20', undefined])
+    }
+  }
+})
+
+// ---- The whole pane at its limits (spec 0.7.0 §9) ----
+
+// A turn of `count` steps with a call after each, built the way the hooks build it: addStep folds what leaves the
+// window of 60 steps, addTool adds each call. The calls go round the seven tool stations.
+const TOOL_STATIONS: ToolStationId[] = STATION_ORDER.filter((id): id is ToolStationId => id !== 'model')
+const stepsTurn = (count: number): TurnAcc => {
+  const startedAt = NOW - count * 2000
+  let acc: TurnAcc = {
+    turnId: 't1', startedAt, costAtStart: null, steps: [], toolIntervals: [], tools: [], earlier: zeroStationMs(),
+  }
+  for (let i = 0; i < count; i++) {
+    const t = startedAt + i * 2000
+    acc = addStep(acc, {
+      tStart: t, tFirst: t + 100, tEnd: t + 1000, usage: { output_tokens: 10 }, hasTool: true, hasText: false,
+    })
+    acc = { ...acc, toolIntervals: [...acc.toolIntervals, [t + 1000, t + 1800]] }
+    acc = addTool(acc, {
+      t0: t + 1000, t1: t + 1800, station: TOOL_STATIONS[i % TOOL_STATIONS.length] as ToolStationId,
+      label: `Read file${i}.ts`, failed: i % 3 === 0,
+    })
+  }
+
+  return acc
+}
+// The caps: all eight stations running and failing with a pulse due, a turn of `steps` steps, 8 lanes and 20 more
+// (14 subagents and 14 tasks, main's lane makes the 8), and a Log of 200 lines.
+const atCaps = (steps = 60): PaneData => ({
+  ...FULL,
+  mainModel: 'claude-sonnet-5',
+  turn: stepsTurn(steps),
+  stations: Object.fromEntries(
+    STATION_ORDER.map(id => [id, { calls: 12, failedThisTurn: 2, lastCallAt: NOW - 100 }]),
+  ) as never,
+  inFlight: Object.fromEntries(
+    TOOL_STATIONS.map((station, i) => [`u${i}`, { station, agentId: null, at: NOW - 200, label: station }]),
+  ),
+  agents: agentsOf(Array.from({ length: 14 }, (_, i) => (
+    agent(i + 1, i % 3 === 2 ? 'failed' : 'running', { startedAt: NOW - (i + 1) * 20_000 })
+  ))),
+  tasks: tasksOf(Array.from({ length: 14 }, (_, i) => task(i + 1, i % 2 === 0 ? 'running' : 'done'))),
+  mainTurns: [{ start: NOW - 400_000, end: NOW - 300_000 }, { start: NOW - 20_000, end: null }],
+  log: logLines(200),
+  logCount: 450,
+})
+// Every Svg of a tree.
+const svgsOf = (tree: unknown): Node[] => flat(tree).map(({ node }) => node).filter(node => node.type === 'Svg')
+
+test('regression check: no Svg is interactive and no source holds a title, on either surface', SLOW, async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  await seed($, clock, bottom(on, clock))
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    const svgs = await ui.findAll({ type: 'Svg' })
+    // The desktop draws images, the terminal none: the check is not empty where there is something to check.
+    expect(svgs.length > 0, surface).toBe(surface === 'desktop')
+    for (const svg of svgs) {
+      expect(svg.props.isInteractive, `${surface} ${svg.props.alt}`).toBeUndefined()
+      expect(String(svg.props.source), `${surface} ${svg.props.alt}`).not.toContain('<title')
+    }
+    await ui.unmount()
+  }
+  for (const surface of SURFACES) {
+    for (const svg of svgsOf(draw(onSurface(atCaps(), surface), 120))) {
+      expect(svg.props?.isInteractive, `${surface} ${svg.props?.alt}`).toBeUndefined()
+      expect(String(svg.props?.source), `${surface} ${svg.props?.alt}`).not.toContain('<title')
+    }
+  }
+})
+
+// The Svgs that draw something: not a rule, a meter (its alt ends in `%`) or an icon (14 px square: the view's
+// ICON_PX).
+const isDrawing = (node: Node): boolean => {
+  const isIcon = node.props?.width === 14 && node.props?.height === 14
+
+  return node.props?.alt !== 'rule' && !/%$/.test(String(node.props?.alt)) && !isIcon
+}
+
+test('regression check: at most 12 drawing Svgs at the caps: band, ribbon, swatch, 8 lanes, axis', () => {
+  const alts = svgsOf(draw(atCaps(), 120)).filter(isDrawing).map(node => String(node.props?.alt))
+  // Every Svg left is one of the 12 by its alt: a new drawing would be left over.
+  const kinds: [string, (alt: string) => boolean, number][] = [
+    ['band', alt => alt.startsWith('Context '), 1],
+    ['ribbon', alt => /^Turn \d/.test(alt), 1],
+    ['swatch', alt => alt === 'Model', 1],
+    ['lanes', alt => /^.+, (running|done|failed|stopped|ended), /.test(alt), 8],
+    ['axis', alt => /^axis /.test(alt), 1],
+  ]
+  const left = alts.filter(alt => !kinds.some(([, isKind]) => isKind(alt)))
+  expect(left).toEqual([])
+  for (const [name, isKind, count] of kinds) expect(alts.filter(isKind), name).toHaveLength(count)
+  expect(alts).toHaveLength(12)
+})
+
+// Every tag of a source closes, in order: a stack over the tags, a self-closing one pushes nothing.
+const isBalanced = (source: string): boolean => {
+  const stack: string[] = []
+  for (const [tag, name, selfClosing] of source.matchAll(/<\/?([a-zA-Z][\w-]*)[^>]*?(\/?)>/g)) {
+    if (selfClosing === '/') continue
+    if (!tag.startsWith('</')) stack.push(String(name))
+    else if (stack.pop() !== name) return false
+  }
+
+  return stack.length === 0
+}
+
+test('regression check: isBalanced tells a closed source from an open one and a stray tag', () => {
+  expect(isBalanced('<svg><g><path d="x"/><text>a</text></g></svg>')).toBe(true)
+  expect(isBalanced('<svg><g></svg>')).toBe(false)
+  expect(isBalanced('<svg><text>a<b</text></svg>')).toBe(false)
+  expect(isBalanced('<svg></g></svg>')).toBe(false)
+})
+
+const HOSTILE_AGENT = '<script>&"\'\u{1}'
+const HOSTILE: PaneData = {
+  ...atCaps(),
+  mainModel: 'claude-<x>',
+  agents: agentsOf([agent(1, 'running', { description: HOSTILE_AGENT, type: '<script>&"\'\u{1}' })]),
+  tasks: tasksOf([task(1, 'running', { description: 'a<b' })]),
+  // Under C-no no Svg draws a tool label (no `<title>`): the `<x>` absence below guards against a future `<title>`.
+  turn: {
+    ...RUNNING, tools: [{ t0: NOW - 15_000, t1: NOW - 12_000, station: 'files', label: 'Read <x>.ts', failed: false }],
+  },
+}
+
+test('regression check: hostile texts keep every Svg well-formed and raw texts out of every source', () => {
+  for (const bodyColumns of [45, 120]) {
+    const svgs = svgsOf(draw(HOSTILE, bodyColumns))
+    // The hostile texts are drawn, so that their absence from a source is the escaping's and not a missing text.
+    const alts = svgs.map(svg => String(svg.props?.alt))
+    expect(alts.some(alt => alt.includes('<script>&"\'')), 'agent').toBe(true)
+    expect(alts.some(alt => alt.includes('a<b')), 'task').toBe(true)
+    expect(alts.some(alt => alt.includes('<x>')), 'model').toBe(true)
+    for (const svg of svgs) {
+      const where = String(svg.props?.alt)
+      const source = String(svg.props?.source)
+      expect(isBalanced(source), where).toBe(true)
+      // The tool label's `<x>` is no Svg's text today (C-no): this guards against a future `<title>`.
+      for (const raw of ['<script', 'a<b', '<x>', '\u{1}']) expect(source, `${where}: ${raw}`).not.toContain(raw)
+      expect(String(svg.props?.alt), where).not.toContain('\u{1}')
+    }
+  }
+})
+
+test('regression check: tiny panes draw and do not throw: Svgs in [1, 4096], no terminal row too wide', () => {
+  for (const surface of SURFACES) {
+    for (const data of [FULL, atCaps(), HOSTILE]) {
+      for (const cols of [0, 8, 20, 39]) {
+        const where = `${surface} ${cols}`
+        const tree = draw(onSurface(data, surface), cols)
+        for (const { props } of svgsOf(tree)) {
+          expect(props?.width, where).toBeGreaterThanOrEqual(1)
+          expect(props?.width, where).toBeLessThanOrEqual(4096)
+          expect(props?.height, where).toBeGreaterThanOrEqual(1)
+          expect(props?.height, where).toBeLessThanOrEqual(4096)
+        }
+        if (surface === 'terminal') {
+          // The rows 0.7.0 draws as spans: the band's, the ribbon's and legend's, the lanes'. (Usage's text meter is
+          // a fixed cell of 10 that its Box clips, by design.)
+          const rows = [childrenOf(tree)[0], turnSectionOf(tree), activityOf(tree)]
+            .flatMap(block => flat(block).map(({ node }) => node))
+            .filter(isSpanLine)
+          expect(rows.length > 0, where).toBe(true)
+          for (const row of rows) {
+            expect([...spanTexts(row).join('')].length, `${where} ${spanTexts(row).join('')}`)
+              .toBeLessThanOrEqual(Math.max(cols, 0))
+          }
+        }
+      }
+    }
+  }
+})
+
+// The mean of a call of `renderPane` in ms: the best of 5 batches of 20 calls, after 5 warm-ups.
+const bestBatchMs = (data: PaneData, bodyColumns: number): number => {
+  for (let i = 0; i < 5; i++) draw(data, bodyColumns)
+  const means: number[] = []
+  for (let batch = 0; batch < 5; batch++) {
+    const start = performance.now()
+    for (let i = 0; i < 20; i++) draw(data, bodyColumns)
+    means.push((performance.now() - start) / 20)
+  }
+
+  return Math.min(...means)
+}
+
+test('regression check: a redraw at the caps takes 2 ms or less, with a turn of 60 steps and of 5000', () => {
+  const numbers: string[] = []
+  for (const steps of [60, 5000]) {
+    const caps = atCaps(steps)
+    for (const [surface, bodyColumns] of [['desktop', 421], ['terminal', 200]] as const) {
+      const ms = bestBatchMs(onSurface(caps, surface), bodyColumns)
+      numbers.push(`${steps} steps ${surface}: ${ms.toFixed(3)} ms`)
+      expect(ms, numbers.join('; ')).toBeLessThanOrEqual(2)
     }
   }
 })

@@ -10,5 +10,14 @@
   "repository": "https://github.com/philarete173/claude_mods",
   "license": "MIT",
   "keywords": ["session", "stats", "cost", "context", "usage", "subagents", "git", "pane", "desktop"],
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "motion": {
+      "type": "string",
+      "title": "Motion",
+      "options": ["full", "reduced"],
+      "default": "full",
+      "description": "With reduced, the pane draws no animation: no pulses, no breathing glows, still end caps."
+    }
+  }
 }
