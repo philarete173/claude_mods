@@ -204,7 +204,9 @@ function pulseRoute(l: BandLayout, s: BandStation): { path: string; durMs: numbe
 
 // Three dots ride the path, the trailing two 40 and 80 ms behind; each shows at its start and fades on arrival.
 function pulseSvg(path: string, durMs: number, age: number, hue: string): string {
-  const dots = DOTS.map(([r, opacity, lag]) =>
+  // A dot whose travel is over is left out: an image drops a motion that ended before its time 0, freeze and all,
+  // and the dot would sit at the origin.
+  const dots = DOTS.filter(([, , lag]) => age - lag < durMs).map(([r, opacity, lag]) =>
     `<circle r="${r}" opacity="0"><set attributeName="opacity" to="${opacity}" begin="${beginAt(age - lag)}"/>` +
     `<animateMotion path="${path}" begin="${beginAt(age - lag)}" dur="${durMs / 1000}s" keyPoints="0;1"` +
     ` keyTimes="0;1" calcMode="spline" keySplines="${EASE_OUT}" fill="freeze"/>` +

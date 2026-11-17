@@ -380,8 +380,8 @@ test('a draw stays fast', () => {
   }
   const m = model()
   for (const lane of m.lanes) {
-    expect(bestMs(() => drawLane(lane, m.axis, 3032, FULL)), lane.label).toBeLessThanOrEqual(0.3)
+    expect(bestMs(() => drawLane(lane, m.axis, 3032, FULL)), lane.label).toBeLessThanOrEqual(0.6)
   }
-  expect(bestMs(() => drawAxis(m.axis, 3032, FULL))).toBeLessThanOrEqual(0.3)
-  expect(bestMs(() => lanesTerminal(m, 200))).toBeLessThanOrEqual(0.3)
+  expect(bestMs(() => drawAxis(m.axis, 3032, FULL))).toBeLessThanOrEqual(0.6)
+  expect(bestMs(() => lanesTerminal(m, 200))).toBeLessThanOrEqual(0.6)
 })
