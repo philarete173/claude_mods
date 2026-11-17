@@ -337,11 +337,11 @@ restarts.
   `✗`); Turn stats (`No completed turn yet` until a turn starts); main's turns in Activity (its lane shows the turns
   that start after the restore); the band's calls in flight, failures and pulses, so a restored station has no running
   or failure mark of its own (a restored subagent that runs still counts at Agents and Model); the `compacted` and
-  `resumed` lines; costs before the restore; rows before the latest compaction after a restart. A task that was
-  restored while it still ran stays `ended` when its notice comes, and a task that the engine's own notice after a
-  reopen names (`failed` or `stopped`, with a note) stays `ended` too. A notice that is typed, pasted or sent through
-  the SDK, or that another plugin forges, can close a restored row (display only), and a prompt that starts with the
-  summary's phrase hides the rows before it.
+  `resumed` lines; the core's model name, which is blank until the main agent's first step; costs before the restore;
+  rows before the latest compaction after a restart. A task that was restored while it still ran stays `ended` when its
+  notice comes, and a task that the engine's own notice after a reopen names (`failed` or `stopped`, with a note) stays
+  `ended` too. A notice that is typed, pasted or sent through the SDK, or that another plugin forges, can close a
+  restored row (display only), and a prompt that starts with the summary's phrase hides the rows before it.
 
 ## How costs are measured
 

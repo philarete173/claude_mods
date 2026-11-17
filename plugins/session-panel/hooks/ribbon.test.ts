@@ -370,6 +370,12 @@ test('the terminal bar at 44 columns', () => {
   expect(joined(done)).not.toContain('·')
 })
 
+test('the terminal time is the elapsedMs passed, else the input\'s span', () => {
+  const input = { ...FINISHED, endMs: s(134) }
+  expect(joined(ribbonTerminal(input, 44, 135_000)).endsWith(' 2m 15s')).toBe(true)
+  expect(joined(ribbonTerminal(input, 44)).endsWith(' 2m 14s')).toBe(true)
+})
+
 test('no terminal row is longer than its width', () => {
   for (const cols of [0, 8, 20, 39, 40, 60, 120, 200]) {
     for (const input of [EXAMPLE, FINISHED]) {

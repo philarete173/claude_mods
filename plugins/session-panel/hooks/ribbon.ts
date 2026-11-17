@@ -326,8 +326,13 @@ export function legendItems(stats: TurnStats, cols: number, surface: 'desktop' |
   return isDesktop ? row.map((span) => ({ ...span, text: span.text.replaceAll(' ', '\u{a0}') })) : row
 }
 
-/** §5.8's bar row: the bar in `cols − 8` cells, a space and the elapsed time in 7; never longer than `cols`. */
-export function ribbonTerminal(input: RibbonInput, cols: number): Span[] {
+/**
+ * §5.8's bar row: the bar in `cols − 8` cells, a space and the elapsed time in 7; never longer than `cols`. The bar
+ * is drawn from the input; `elapsedMs` is only the time printed, the stats' own when the caller has them.
+ */
+export function ribbonTerminal(
+  input: RibbonInput, cols: number, elapsedMs: number = input.endMs - input.startedAt,
+): Span[] {
   const bar = Math.max(0, cols - 8)
   const elapsed = input.endMs - input.startedAt
   const ceiling = ribbonCeilingMs(elapsed, input.isLive)
@@ -365,6 +370,6 @@ export function ribbonTerminal(input: RibbonInput, cols: number): Span[] {
     }
   })
   if (bar > filled) spans.push({ text: '·'.repeat(Math.max(0, bar - filled)), dimColor: true })
-  spans.push({ text: ' ' }, { text: padStart(fmtDuration(elapsed), 7) })
+  spans.push({ text: ' ' }, { text: padStart(fmtDuration(elapsedMs), 7) })
   return fitRow(spans, cols)
 }

@@ -360,11 +360,33 @@ test('a restored lane that ended live keeps its end and its status mark', () => 
   expect(rows[2]?.find((span) => span.text === '✗')).toEqual({ text: '✗', color: BAD })
 })
 
-test('a span of years caps its ticks', () => {
-  const axis = { startMs: NOW - 3650 * 86_400_000, nowMs: NOW }
+const DAY_MS = 86_400_000
+// The x of each tick of an axis source: the rect's x is the tick's centre less half its width.
+const tickXs = (svg: string): number[] =>
+  [...svg.matchAll(/data-part="tick" x="(-?[\d.]+)"/g)].map(([, x = '']) => Number(x) + 0.5)
+const gapsOf = (xs: number[]): number[] => xs.slice(1).map((x, i) => x - (xs[i] ?? 0))
+
+test('over many days the ticks stay a gap apart, on the desktop and in a terminal', () => {
+  const month = { startMs: NOW - 30 * DAY_MS, nowMs: NOW }
+  const at400 = tickXs(drawAxis(month, 400, FULL).svg)
+  expect(at400.length).toBeGreaterThan(1)
+  for (const gap of gapsOf(at400)) expect(gap).toBeGreaterThanOrEqual(47.99)
+  const years = drawAxis({ startMs: NOW - 2000 * DAY_MS, nowMs: NOW }, 4096, FULL)
+  expect(years.svg).toContain('data-part="tick"')
+  expect(years.svg).not.toBe('<svg xmlns="http://www.w3.org/2000/svg"/>')
+  for (const gap of gapsOf(tickXs(years.svg))) expect(gap).toBeGreaterThanOrEqual(47.99)
+  const rows = lanesTerminal({ ...model(), axis: month }, 120)
+  expect(cellsOf(joined(rows[model().lanes.length] ?? []))).toBeLessThanOrEqual(120)
+})
+
+test('a span of years keeps its ticks bounded', () => {
+  const axis = { startMs: NOW - 3650 * DAY_MS, nowMs: NOW }
   const { svg } = drawAxis(axis, 152, FULL)
   expect(svg.length).toBeLessThan(SVG_SOURCE_MAX)
   expect(svg).toContain('data-part="now"')
+  // 140 px at 48 px a tick is a step of 1252 days: three ticks at most, 48 px apart.
+  expect(svg.split('data-part="tick"').length - 1).toBeLessThanOrEqual(3)
+  for (const gap of gapsOf(tickXs(svg))) expect(gap).toBeGreaterThanOrEqual(47.99)
   const rows = lanesTerminal({ ...model(), axis }, 44)
   expect(joined(rows[8] ?? []).endsWith('now')).toBe(true)
 })

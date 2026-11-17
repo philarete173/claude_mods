@@ -3740,6 +3740,13 @@ test('Turn stats is a bar row, a legend row and a closed details row', () => {
   expect(terminal[2]?.props).toMatchObject({ key: 'details:turn', label: '▸ details' })
 })
 
+test('the terminal bar row prints the stats\' elapsed time, as the desktop does, not its ribbon\'s span', () => {
+  // The ribbon spans 78 s; the engine's duration for the same turn is 80 s.
+  const data: PaneData = { ...RIBBONED, lastTurn: { ...TURN, elapsedMs: 80_000, ribbon: TWO_STEPS } }
+  expect(spanTexts(turnBody(draw(onSurface(data, 'terminal')))[0]).at(-1)).toBe(' 1m 20s')
+  expect(textsOf(childrenOf(turnBody(draw(data))[0])[1])).toEqual(['1m 20s'])
+})
+
 test('a running turn draws live and idle draws the last turn', () => {
   const live = String(ribbonOf(draw({ ...RIBBONED, turn: RUNNING }))?.props?.source)
   expect(live).toContain('data-part="cap"')

@@ -109,6 +109,16 @@ test('runningOf with no main turn and no running rows counts only the calls in f
   expect(runningOf(inFlight, {}, {}, false)).toEqual(counts({ web: 1 }))
 })
 
+test('runningOf counts a foreground subagent once at Agents: its own row, not main\'s Agent call', () => {
+  const inFlight = { u: call('agents', null) }
+  const rowsOf = rows([agent('a1', 'running')])
+  expect(runningOf(inFlight, rowsOf, {}, true)).toEqual(counts({ model: 1, agents: 1 }))
+})
+
+test('runningOf counts no Agents call in flight without a running row', () => {
+  expect(runningOf({ u: call('agents', null) }, {}, {}, true)).toEqual(counts({ agents: 0 }))
+})
+
 test('runningOf takes hostile ids as plain ids', () => {
   const hostile: Record<string, AgentRow> = {}
   for (const id of ['__proto__', 'constructor']) {

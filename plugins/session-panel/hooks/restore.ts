@@ -7,7 +7,7 @@ import {
   agentOutcome, endKind, engineLineText, HANDBACK_TOOL, LOG_MAX, logText, parseTaskNotification, promptKind,
   shortType, SPAWN_TOOLS, stripFormat, tagText, TASK_END, taskFromCall, taskLine, toolLabel,
 } from './stats'
-import { STATION_ORDER, stationOf } from './stations'
+import { stationOf, zeroStationMs } from './stations'
 import type { StationId } from './stations'
 import type { AgentRow, LogEntry, LogKind, TaskEndStatus, TaskRow } from './stats'
 
@@ -41,8 +41,6 @@ const NO_ANSWER_NOTES = [
 // The engine's sentence for an agent that has stopped its turn but still waits on its own background work: its notice
 // is no end, and a later one closes it.
 const WAITING_NOTE = 'This agent has not reported yet:'
-const noCalls = (): Record<StationId, number> =>
-  Object.fromEntries(STATION_ORDER.map(id => [id, 0])) as Record<StationId, number>
 const answerOf = (text: string): string => (NO_ANSWER_NOTES.some(note => text.includes(note)) ? '' : text)
 
 // A value read as a record of fields, or as a string; a value of another type counts as absent.
@@ -62,7 +60,7 @@ export function restoreFromMessages(rows: readonly unknown[], alive: ReadonlySet
   const tasks = new Map<string, TaskRow>()
   const lines: (() => LogEntry)[] = []
   let isAfterResults = false
-  let stationCalls = noCalls()
+  let stationCalls = zeroStationMs()
   let compactions = 0
 
   // An agent's end: its status (endedAt stays null) and its end line.
@@ -162,7 +160,7 @@ export function restoreFromMessages(rows: readonly unknown[], alive: ReadonlySet
         agents.clear()
         tasks.clear()
         lines.length = 0
-        stationCalls = noCalls()
+        stationCalls = zeroStationMs()
         compactions += 1
       } else if (shown.kind === 'prompt') {
         // A prompt right after tool results is one of the engine's mid-turn rows (a skill body or note), not typed.

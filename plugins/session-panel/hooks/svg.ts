@@ -55,7 +55,10 @@ export function xmlText(s: string): string {
     .replace(/[&<>"']/g, (c) => ENTITIES[c] ?? '')
 }
 
-/** Outside text for an `alt` prop: the controls, lone surrogates and U+10EEEE go; the rest stays as it is. */
+/**
+ * Outside text for an `alt` prop: the controls, lone surrogates and U+10EEEE go; the rest stays as it is. U+10EEEE is
+ * the engine's own placeholder, and the engine refuses a text that holds it (see `stripFormat` in stats.ts).
+ */
 export function altText(s: string): string {
   return s.replace(/[\u{0}-\u{8}\u{B}\u{C}\u{E}-\u{1F}\u{7F}-\u{9F}\u{D800}-\u{DFFF}\u{10EEEE}]/gu, '')
 }

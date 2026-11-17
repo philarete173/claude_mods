@@ -599,7 +599,9 @@ function turnSection(d: Draw): Block {
   const isOpen = !isFolded(d, 'turnDetails')
   const rows: RenderElement[] = []
   if (Svg === undefined) {
-    rows.push(spanLine(d, ribbonTerminal(input, d.cols)), spanLine(d, legendItems(shown, d.cols, 'terminal')))
+    rows.push(
+      spanLine(d, ribbonTerminal(input, d.cols, shown.elapsedMs)), spanLine(d, legendItems(shown, d.cols, 'terminal')),
+    )
   } else {
     const barPx = svgPx(d.bodyPx - RIBBON_ROOM_PX)
     const ribbon = drawRibbon(input, barPx, d.look, shown)

@@ -186,9 +186,10 @@ export function drawLane(lane: Lane, axis: LaneAxis, areaPx: number, look: Look)
   return { svg: fitSvg(svg), alt: laneAlt(lane) }
 }
 
-// §6.3 and §6.6: the least step whose ticks are `gap` units apart, at `perMin` units a minute.
+// §6.3 and §6.6: the least step whose ticks are `gap` units apart, at `perMin` units a minute; past 1440 m, the least
+// whole number of days that is wide enough.
 const tickStepMs = (perMin: number, gap: number): number =>
-  (STEPS_MIN.find((s) => s * perMin >= gap) ?? 1440) * 60_000
+  (STEPS_MIN.find((s) => s * perMin >= gap) ?? Math.ceil(gap / perMin / 1440) * 1440) * 60_000
 
 // The clock times on the axis whose minutes since local midnight are a multiple of the step.
 function ticksOf(axis: LaneAxis, stepMs: number, max: number): number[] {

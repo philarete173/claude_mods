@@ -100,7 +100,7 @@ export const emptyStationsState = (): StationsState =>
 /**
  * What runs at each station now (§8.2). Model counts the running agents (main while its turn runs, each subagent
  * with a running row) that have no call in flight; Agents the running subagent rows and workflow tasks; Shell the
- * calls in flight and the running shell and monitor tasks; every other station the calls in flight.
+ * calls in flight and the running shell and monitor tasks; every station but Agents the calls in flight.
  */
 export function runningOf(
   inFlight: Record<string, InFlightCall>,
@@ -112,7 +112,8 @@ export function runningOf(
   // The agents with a call in flight, by id; main is `null`.
   const inCall = new Set<string | null>()
   for (const call of Object.values(inFlight)) {
-    out[call.station] += 1
+    // An Agents call in flight is no count: its subagent's own row counts it.
+    if (call.station !== 'agents') out[call.station] += 1
     inCall.add(call.agentId)
   }
   if (isMainRunning && !inCall.has(null)) out.model += 1
