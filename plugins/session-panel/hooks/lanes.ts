@@ -218,7 +218,8 @@ export function drawAxis(axis: LaneAxis, areaPx: number, look: Look): { svg: str
       const x = a - ((axis.nowMs - t) * a) / spanMs
       body += `<rect data-part="tick" x="${num(x - 0.5)}" y="1" width="1" height="4" fill="${SURFACE.ash.dark}"/>`
       // A label closer than 36 px to `now` is left out; its tick stays.
-      if (a - x >= 36) body += axisText(x, 'label', 'middle', hhmm(t))
+      // So is one closer than 14 px to the axis start (half its width), which the image would clip.
+      if (a - x >= 36 && x >= 14) body += axisText(x, 'label', 'middle', hhmm(t))
     }
   }
   body += axisText(a + 4, 'now', 'end', 'now')

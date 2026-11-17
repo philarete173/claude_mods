@@ -278,11 +278,12 @@ test('the axis ticks at every width', () => {
   expect(at152.svg).toMatch(/<text data-part="now" x="144" [^>]*text-anchor="end"[^>]*>now<\/text>/)
   expect(at152.alt).toBe('axis 11:52 to now')
   expect(at152.svg).toContain('width="152" height="16"')
-  // 12:00 is 60 s before now, 11.7 px from it: its label goes, its tick stays.
+  // 12:00 is 60 s before now, 11.7 px from it, and 11:50 is 11.7 px from the axis start:
+  // their labels go, their ticks stay.
   const late = new Date(2026, 10, 16, 12, 1, 0).getTime()
   const close = drawAxis({ startMs: late - 720_000, nowMs: late }, 152, FULL).svg
   expect(ticks(close)).toBe(3)
-  expect([...close.matchAll(/data-part="label"[^>]*>([\d:]+)</g)].map(([, t]) => t)).toEqual(['11:50', '11:55'])
+  expect([...close.matchAll(/data-part="label"[^>]*>([\d:]+)</g)].map(([, t]) => t)).toEqual(['11:55'])
   for (const area of [12, 0, -8]) {
     const svg = drawAxis(m.axis, area, FULL).svg
     expect(ticks(svg), String(area)).toBe(0)
@@ -292,6 +293,30 @@ test('the axis ticks at every width', () => {
       expect(px).toBeLessThanOrEqual(4096)
     }
   }
+})
+
+test('a clock label closer than 14 px to the axis start is left out; its tick stays', () => {
+  const minute = new Date(2026, 10, 16, 14, 39, 0).getTime()
+  const spanMs = 600_000
+  const a = 1264 - 12
+  // The first round minute is `lead` ms after the start, so its tick lands at lead * a / spanMs px.
+  const drawn = (lead: number): { ticks: number; labels: [string, number][] } => {
+    const svg = drawAxis({ startMs: minute - lead, nowMs: minute - lead + spanMs }, 1264, FULL).svg
+    const labels = [...svg.matchAll(/data-part="label" x="([\d.]+)"[^>]*>([\d:]+)</g)]
+    return {
+      ticks: svg.split('data-part="tick"').length - 1,
+      labels: labels.map(([, x = '', t = '']): [string, number] => [t, Number(x)]),
+    }
+  }
+  const first = drawn(1000)
+  expect((1000 * a) / spanMs).toBeLessThan(14)
+  expect(first.ticks).toBe(10)
+  expect(first.labels.map(([t]) => t).slice(0, 2)).toEqual(['14:40', '14:41'])
+  expect(Math.min(...first.labels.map(([, x]) => x))).toBeGreaterThanOrEqual(14)
+  // The boundary: a label at 14.02 px stays, one at 13.88 px goes.
+  expect(drawn(6720).labels[0]?.[0]).toBe('14:39')
+  expect(drawn(6650).labels[0]?.[0]).toBe('14:40')
+  expect(drawn(6650).ticks).toBe(drawn(6720).ticks)
 })
 
 test('the alts carry the tag at every width', () => {
