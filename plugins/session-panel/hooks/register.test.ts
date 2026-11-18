@@ -6357,6 +6357,118 @@ test('a compaction is logged and refreshes usage; a skipped one and a subagent\'
     expect((await readState($)).log).toHaveLength(1)
   })
 
+// A compaction another plugin kept from the mod (§8): a usage reading with no tokens while the usage held some. Each
+// test starts with the start's refresh holding 100k, unless it says otherwise.
+const holdTokens = async ($: Engine, on: On): Promise<{ clock: MockClock; w: World }> => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  w.tokens = 100_000
+  await $.session.start(START)
+  await clock.advance(1)
+
+  return { clock, w }
+}
+const compactedLines = async ($: Engine): Promise<LogEntry[]> =>
+  ((await readState($)).log ?? []).filter(entry => entry.text === 'compacted')
+
+test('a compaction another plugin hid is counted at the tick\'s reading, once', WITH_READER, async ($, on) => {
+  const { clock, w } = await holdTokens($, on)
+  w.tokens = undefined
+  await clock.advance(60_000)
+  const state = await readState($)
+  expect(state.compactions).toBe(1)
+  expect(state.log?.[0]).toEqual({ at: expect.any(Number), who: 'main', text: 'compacted', kind: 'info' })
+  expect(state.usage.contextTokens).toBeUndefined()
+
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await clock.advance(1)
+  expect((await readState($)).compactions).toBe(1)
+  expect(await compactedLines($)).toHaveLength(1)
+})
+
+test('a compaction found at a main turn.start: its line under the prompt\'s, and a refresh', WITH_READER,
+  async ($, on) => {
+    const { clock, w } = await holdTokens($, on)
+    w.tokens = undefined
+    const asked = w.breakdowns
+    const at = clock.now()
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await clock.advance(1)
+    const state = await readState($)
+    expect(state.compactions).toBe(1)
+    expect(state.log?.slice(0, 2)).toEqual([
+      { at, who: 'you', text: 'go', kind: 'info' },
+      { at, who: 'main', text: 'compacted', kind: 'info' },
+    ])
+    expect(w.breakdowns).toBe(asked + 1)
+  })
+
+test('a session.measure with no tokens while some are held counts', WITH_READER, async ($, on) => {
+  const { w } = await holdTokens($, on)
+  w.tokens = undefined
+  await $.session.measure({ context: { window: 1_000_000, percent: 0 }, rateLimits: [], changed: ['context'] } as never)
+  expect((await readState($)).compactions).toBe(1)
+  expect(await compactedLines($)).toHaveLength(1)
+})
+
+test('a seen compaction counts once', WITH_READER, async ($, on) => {
+  const { clock, w } = await holdTokens($, on)
+  w.tokens = undefined
+  w.compacted = { messages: MESSAGES, tokensBefore: 180_000, tokensAfter: 40_000 }
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES })
+  await clock.advance(1) // its refresh
+  await clock.advance(60_000) // a tick
+  expect((await readState($)).compactions).toBe(1)
+  expect((await readState($)).log?.filter(entry => entry.text.startsWith('compacted')).map(entry => entry.text))
+    .toEqual(['compacted 180k → 40k'])
+})
+
+test('a fresh session counts nothing', WITH_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock) // no tokens from the start
+  await $.session.start(START)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await clock.advance(60_000)
+  expect((await readState($)).compactions ?? 0).toBe(0)
+  expect(await compactedLines($)).toHaveLength(0)
+})
+
+test('a subagent\'s turn.start counts nothing', WITH_READER, async ($, on) => {
+  const { clock, w } = await holdTokens($, on)
+  w.tokens = undefined
+  await $.turn.start({ text: 'x', turnId: 't2', agentId: 'a1' } as never)
+  await clock.advance(1)
+  const state = await readState($)
+  expect(state.compactions ?? 0).toBe(0)
+  expect(state.usage.contextTokens).toBe(100_000)
+})
+
+// A /clear clears the held tokens before its other resets: a tick's reading with none that lands mid-reset finds
+// nothing held. The hold keeps the reset after its write of the log, while the tick's refresh runs.
+test('a tick\'s reading with no tokens in the middle of a /clear counts nothing', WITH_WRITE_HOLDER, async ($, on) => {
+  const { clock, w } = await holdTokens($, on)
+  await clock.advance(59_000) // the second tick, the one that refreshes, is 1 s off
+  w.tokens = undefined
+  await armHold($, { keys: ['log'], ms: 2000 })
+  const asked = w.breakdowns
+  const reset = endSession($)
+  await clock.advance(2000) // the tick's refresh runs while the reset waits
+  await reset
+  expect(w.breakdowns).toBe(asked + 1)
+  expect((await readState($)).compactions ?? 0).toBe(0)
+  expect(await compactedLines($)).toHaveLength(0)
+})
+
+test('tokens on both sides count nothing', WITH_READER, async ($, on) => {
+  const { clock, w } = await holdTokens($, on)
+  w.tokens = 120_000
+  await clock.advance(60_000)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await clock.advance(1)
+  expect((await readState($)).compactions ?? 0).toBe(0)
+  expect(await compactedLines($)).toHaveLength(0)
+})
+
 // A message that the person types over a running turn (`turnId` set) waits in the queue for the next model request of
 // the main loop, and no turn.start comes for it yet, so prompt.submit writes its `you` line, at the time it arrived.
 // The `you` lines of the log, oldest first; and a message typed over the turn `t1`.
@@ -7088,7 +7200,7 @@ test('a count read before a reset, whose write misses after it, adds nothing whe
 // The same, with the retry coming after the count of the reset but before its end: the reset began after the call did,
 // and is still running, so it is the epoch that tells the call, raised at the start of the reset and not at its end.
 // The first hold keeps the write of the count of the call, as above; the second keeps the reset after its last write,
-// the one to `usage`, until the call has gone on.
+// the one to the log, until the call has gone on.
 test('a count whose update runs again after the count of a reset, with the reset still running, adds nothing',
   WITH_WRITE_HOLDER, async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })
@@ -7099,7 +7211,7 @@ test('a count whose update runs again after the count of a reset, with the reset
     await armHold($, { keys: ['logCount'], mode: 'before', ms: 100 })
     const call = $.turn.start({ text: 'one', turnId: 't1' })
     await clock.settle() // its line has landed, and the write of its count waits: the count it read was 0
-    await armHold($, { keys: ['usage'], ms: 200 })
+    await armHold($, { keys: ['log'], ms: 200 })
     const reset = endSession($) // it has written the log and the count, and waits after its last write
     await clock.settle()
     const between = await readState($)

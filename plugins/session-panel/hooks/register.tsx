@@ -343,6 +343,19 @@ async function addLog(
   await update($, logCountAtom, count => (!isResetting && epoch === logEpoch ? count + 1 : count))
 }
 
+// shortcut: a compaction answered before any usage reading is not seen (an auto-compaction inside a turn); read the
+// compaction summaries in messages() if that matters
+// Two races stay. A reading from before a seen compaction, written after its clear, puts the old tokens back for a
+// later reading to count (§8 accepts it). A tick's reading taken after the engine drops the tokens can land before
+// session.compact's own clear: it counts as hidden, and session.compact counts it again.
+// Counts a compaction the mod did not see (another plugin kept session.compact from it): the caller's usage reading
+// had no tokens while the usage atom held some, and its update cleared them (§8). The tick, and a bare `compacted`
+// line: the token numbers are not known.
+async function countHiddenCompaction($: EngineInterface, at: number): Promise<void> {
+  await update($, compactionsAtom, count => count + 1)
+  await addLog($, at, 'main', 'compacted', 'info')
+}
+
 // Whose line it is: `main`, or the type of the subagent that ran; and whether the agent is unknown: an id with no row
 // in the agents atom, whose line says `agent`. The row decides, not the label: a subagent's type may be named `agent`.
 async function whoIs($: EngineInterface, agentId: string | undefined): Promise<{ who: string; isUnknown: boolean }> {
@@ -381,13 +394,22 @@ async function refreshUsage($: EngineInterface): Promise<void> {
   const names = [...new Set(breakdown?.mcpTools.map(tool => stripFormat(tool.serverName)))].filter(
     name => !name.startsWith('ccd_') && !DESKTOP_SERVERS.includes(name),
   )
-  // The window is the breakdown's: a compaction window under the model's shows up only there. Without one, the window
-  // held stands, and the model's is the last resort.
-  await update($, usageAtom, held => ({
-    ...held,
-    ...usageFields(now, breakdown?.rawMaxTokens ?? held.contextWindow ?? now.context.window),
-    skills: breakdown?.skills?.totalSkills,
-  }))
+  // A reading with no tokens while some are held is a compaction the mod did not see (§8); this write clears them. The
+  // update runs again when its write misses, so it sets the flag on every run: only the reading whose write cleared
+  // them counts, and two readings that race count once.
+  let isCompacted = false
+  await update($, usageAtom, held => {
+    isCompacted = now.context.tokens === undefined && held.contextTokens !== undefined
+
+    return {
+      ...held,
+      // The window is the breakdown's: a compaction window under the model's shows up only there. Without one, the
+      // window held stands, and the model's is the last resort.
+      ...usageFields(now, breakdown?.rawMaxTokens ?? held.contextWindow ?? now.context.window),
+      skills: breakdown?.skills?.totalSkills,
+    }
+  })
+  if (isCompacted) await countHiddenCompaction($, await $.clock.now())
   const servers = names.map(name => ({ name }))
   await update($, mcpAtom, () => ({ servers }))
 }
@@ -918,6 +940,9 @@ export const register: Register = (on, options) => {
       logEpoch += 1
       resetsRunning += 1
       try {
+        // The held tokens go first: a reading with none that lands mid-reset finds nothing held, and counts no
+        // compaction of the old conversation in the new one (§8).
+        await update($, usageAtom, held => ({ ...held, contextTokens: undefined, contextPct: undefined }))
         await update($, turnAtom, () => turnAtom.initial)
         await update($, lastTurnAtom, () => lastTurnAtom.initial)
         await update($, agentsAtom, () => agentsAtom.initial)
@@ -929,7 +954,6 @@ export const register: Register = (on, options) => {
         await update($, mainTurnsAtom, () => mainTurnsAtom.initial)
         await update($, logCountAtom, () => logCountAtom.initial)
         await update($, logAtom, () => logAtom.initial)
-        await update($, usageAtom, held => ({ ...held, contextTokens: undefined, contextPct: undefined }))
       } finally {
         resetsRunning -= 1
       }
@@ -959,7 +983,14 @@ export const register: Register = (on, options) => {
   on('session.measure', async ($, e, next) => {
     const measured = await next(e)
     // A measure brings the model's window only: it stands in when none is held, and never replaces the breakdown's.
-    await update($, usageAtom, held => ({ ...held, ...usageFields(e, held.contextWindow ?? e.context.window) }))
+    // No tokens while some are held: a compaction the mod did not see (§8), as in refreshUsage.
+    let isCompacted = false
+    await update($, usageAtom, held => {
+      isCompacted = e.context.tokens === undefined && held.contextTokens !== undefined
+
+      return { ...held, ...usageFields(e, held.contextWindow ?? e.context.window) }
+    })
+    if (isCompacted) await countHiddenCompaction($, await $.clock.now())
     // Another window than the last measure's is another model: the breakdown has the window that counts for it.
     if (e.context.window !== lastModelWindow) {
       if (lastModelWindow !== null) inBackground($, () => refreshUsage($))
@@ -1012,9 +1043,9 @@ export const register: Register = (on, options) => {
       inBackground($, () => requestProject($))
     }
     const now = await $.clock.now()
-    const { cost } = await $.session.usage()
+    const reading = await $.session.usage()
     await update($, turnAtom, () => ({
-      turnId: e.turnId, startedAt: now, costAtStart: cost?.usd ?? null, steps: [], toolIntervals: [], tools: [],
+      turnId: e.turnId, startedAt: now, costAtStart: reading.cost?.usd ?? null, steps: [], toolIntervals: [], tools: [],
       earlier: zeroStationMs(),
     }))
     // A main turn starts the failures of every station over, and opens a main turn.
@@ -1022,6 +1053,21 @@ export const register: Register = (on, options) => {
       STATION_ORDER.map(station => [station, { ...held[station], failedThisTurn: 0 }]),
     ) as StationsState)
     await update($, mainTurnsAtom, held => [...held, { start: now, end: null }].slice(-MAIN_TURNS_MAX))
+    // A main turn's reading with no tokens while some are held: a compaction the mod did not see (§8). This reading
+    // writes the usage only to clear them, in the update that decides. Its line comes before the prompt's, so it shows
+    // under it, and the ring reads — until a fresh reading.
+    let isCompacted = false
+    if (reading.context.tokens === undefined && (await read($, usageAtom)).contextTokens !== undefined) {
+      await update($, usageAtom, held => {
+        isCompacted = held.contextTokens !== undefined
+
+        return isCompacted ? { ...held, contextTokens: undefined, contextPct: undefined } : held
+      })
+    }
+    if (isCompacted) {
+      await countHiddenCompaction($, now)
+      inBackground($, () => refreshUsage($))
+    }
     // A turn the engine started on its own opens with a hyphenated lowercase tag (promptKind, engineTag:
     // `<task-notification>`); its line is the name of the tag. Reminder blocks before the text are skipped, and a text
     // that is only such blocks, or a compaction summary, has no line. Any other prompt is the person's, one that opens
@@ -1337,6 +1383,8 @@ export const register: Register = (on, options) => {
       compacted.tokensAfter !== undefined
     ) {
       await update($, compactionsAtom, count => count + 1)
+      // Its own refresh must find nothing held, or it would count this compaction again (§8).
+      await update($, usageAtom, held => ({ ...held, contextTokens: undefined, contextPct: undefined }))
       const text = `compacted ${fmtTokens(compacted.tokensBefore)} → ${fmtTokens(compacted.tokensAfter)}`
       await addLog($, await $.clock.now(), 'main', text, 'info')
       inBackground($, () => refreshUsage($))
