@@ -2,9 +2,9 @@
 
 ## 1. Status, origin, references
 
-Date: 2026-11-18. Status: settled with the owner; not implemented. This spec writes the decisions down and checks
-them against the code. It adds no decision of its own; where the code forced a choice of detail, the choice is marked
-"detail" and the reason is given.
+Date: 2026-11-18. Status: settled with the owner; implemented in 0.7.1 (2026-11-18). This spec writes the decisions
+down and checks them against the code. It adds no decision of its own; where the code forced a choice of detail, the
+choice is marked "detail" and the reason is given.
 
 Origin:
 
@@ -449,18 +449,22 @@ No `messages()` read.
 - **A fresh session's first turn does not trigger it:** `usageAtom` starts with no `contextTokens` (`:31`) and no
   response has given one. After `/clear` or a resume, `session.end` writes `contextTokens: undefined` (`:919`). Its
   reset clears the held tokens first, so a reading that lands during the reset finds none held and counts nothing.
-  A `refreshUsage` whose read straddles the reset (asked before it, answered after its clear) writes nothing: it
-  keeps `logEpoch` from before its read, and when a reset has run since, or one runs at its write
+  A `refreshUsage` whose read straddles the reset (asked before it, answered after its clear) is guarded only in
+  part: it keeps `logEpoch` from before its read, and when a reset has run since, or one runs at its write
   (`resetsRunning !== 0`), it skips the usage write, the MCP write and the count, as `restorePane` guards its writes.
+  The two readings it does not catch are the third race below.
 - **Still missed, a limit:** a compaction whose next response lands before any reading. In practice that is an
   auto-compaction inside a running turn: the turn's next response brings the tokens back before a reading sees them
   absent. The code carries `// shortcut: a compaction answered before any usage reading is not seen (an
   auto-compaction inside a turn); read the compaction summaries in messages() if that matters`.
-- **Two races, accepted** (named in the code's comment beside the `shortcut:`): a reading taken before a seen
-  compaction and written after that compaction's clear puts the old tokens back, so a later reading can count the
-  same compaction again; the window is the await between a reading and its write. And a tick's reading taken after
-  the engine drops the tokens can land before `session.compact`'s own clear: it counts the compaction as hidden, and
-  `session.compact` then counts it again.
+- **Three races, accepted** (the first two named in the code's comment beside the `shortcut:`): a reading taken
+  before a seen compaction and written after that compaction's clear puts the old tokens back, so a later reading
+  can count the same compaction again; the window is the await between a reading and its write. And a tick's reading
+  taken after the engine drops the tokens can land before `session.compact`'s own clear: it counts the compaction as
+  hidden, and `session.compact` then counts it again. And two readings that straddle a `/clear` or a resume still
+  write the old tokens back: one asked during the reset and answered after it, and one asked between the mod's reset
+  and the engine's end step (`session.end` runs the reset before `next(e)`, and `next(e)` runs the engine's end
+  step). The cost is cosmetic: one tick and one bare `compacted` line at the next reading, with no tokens.
 
 Tests:
 
@@ -640,7 +644,9 @@ The other stale Context passages keep their text, and each gets a one-line note 
   before any reading. Two races can count a seen compaction twice: a reading from before it (a tick's, say: the seen
   compaction asks no refresh of its own), written after its clear, lets a later reading count it again; and a tick's
   reading taken after the engine drops the tokens, landing before `session.compact`'s own clear, counts it as hidden
-  before `session.compact` counts it. A reading that straddles a `/clear` or a resume is guarded: it writes nothing.
+  before `session.compact` counts it. A reading whose epoch changed, or one written while the reset
+  runs, is guarded: it writes nothing. Two other readings that straddle a `/clear` or a resume still write the old
+  tokens back (§8, the third race).
 - **The `Blocked:` heuristic** (§9) depends on the engine's text, for built-in tools only. A call that printed
   `Blocked:` without being blocked still gets its project read; its Log line and station read as a denial.
 - **Narrow panes lose lane length** (§4.5): at 360 px the lane area drops from 152 to 104 px and the axis shows only

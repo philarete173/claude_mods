@@ -386,8 +386,9 @@ const DESKTOP_SERVERS: string[] = ['Claude_Browser', 'scheduled-tasks', 'termina
 // Reads the usage figures with the context breakdown: the skill count and the MCP servers come from it.
 async function refreshUsage($: EngineInterface): Promise<void> {
   // A reading asked before a reset (/clear, resume) is the old conversation's: written after the reset's clear, it
-  // would put the old tokens back for the next reading to count. So nothing is written once a reset has run since,
-  // nor while one runs (a reading asked after its epoch went up may still land on either side of its clear).
+  // would put the old tokens back for the next reading to count. So nothing is written once a reset has run since
+  // (the epoch changed), nor while one runs. Not covered: a reading asked during a reset or between the reset and the
+  // engine's end step, then answered after it, still writes (one cosmetic tick later).
   const epoch = logEpoch
   const now = await $.session.usage({ breakdown: 'summary' })
   const { breakdown } = now.context

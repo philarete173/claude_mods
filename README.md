@@ -33,9 +33,9 @@ and so do the stations' counts after the latest compaction and the compaction co
 
 ## Install
 
-Requires Claude Code 2.1.287 or later (mods support). The mod runs on engines 2.1.288 to 2.1.308 and was checked
-live on Linux with the desktop app (engines 2.1.288, 2.1.299 and 2.1.304) and the CLI 2.1.294. The Project section
-needs git.
+Requires Claude Code 2.1.287 or later (mods support). The mod runs on engines 2.1.288 to 2.1.325 and was checked
+live on Linux with the desktop app (engines 2.1.288, 2.1.299, 2.1.304, 2.1.321 and 2.1.325) and the CLI 2.1.294;
+0.7.1 itself has not been checked live yet. The Project section needs git.
 
 ```bash
 claude plugin marketplace add philarete173/claude_mods

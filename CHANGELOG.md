@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.1 — unreleased
+## 0.7.1 — 2026-11-18
 
 - The core breathes: a halo in the ring's colour swells and fades outside the ring, never inside it, slowly at rest and
   faster while the main agent's turn or any station runs. Under `motion: reduced` it stands still.
@@ -25,8 +25,8 @@
 - Fix: a call the mod saw no chunk of in the model's stream (another plugin's call, for example) never pulsed. It
   pulses at its return; any other call still pulses at its first chunk.
 - Fix: a call the engine blocked before it ran (`Blocked: …`) was drawn as a failure, with a red Shell. It is a denial
-  now, `denied` in the Log. The rule reads the engine's text, of built-in tools only, and the call still asks for a
-  read of the project.
+  now, `denied` in the Log. The rule reads the engine's text, of built-in tools only, and a blocked call of a tool
+  that may write still asks for a read of the project, as any such call does.
 - Fix: a compaction another plugin kept from the mod drew no tick. The engine drops the context's tokens until the
   next response, so the next usage reading (the minute's tick, the next prompt or a measure) that finds them gone
   counts the compaction, with a bare `compacted` line. One inside a running turn whose next response comes first is
