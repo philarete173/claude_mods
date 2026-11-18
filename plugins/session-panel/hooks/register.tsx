@@ -782,6 +782,15 @@ async function countModelStep($: EngineInterface, model: string | null): Promise
   if (model !== null && model !== (await read($, mainModelAtom))) await update($, mainModelAtom, () => model)
 }
 
+// Reads the main model when none is held: after a reopen the core names it before the first response (§11). The value
+// is the engine's text, cleaned as a step's model is. A model a step wrote meanwhile stands (`held ?? model`), and the
+// first main step's model replaces this one (countModelStep). A read that fails, or an empty one, sets nothing.
+async function readMainModel($: EngineInterface): Promise<void> {
+  if ((await read($, mainModelAtom)) !== null) return
+  const model = logText(await $.session.model())
+  if (model !== '') await update($, mainModelAtom, held => held ?? model)
+}
+
 async function readAndCharge($: EngineInterface, agentId: string | undefined): Promise<void> {
   const { cost } = await $.session.usage()
   if (cost === undefined) return
@@ -857,18 +866,20 @@ export const register: Register = (on, options) => {
   const motion: Motion = options.motion === 'reduced' ? 'reduced' : 'full'
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    // A reload in the middle of a call leaves no call in flight behind.
-    await update($, inFlightAtom, () => ({}))
-    // The restore is asked by the first start of this module, and by one that comes after a resume left a restore due
-    // (it covers what the due in-process restore would: the two must not both run). A start after the turn fallback
-    // has asked already: its rows are there.
+    // The restore is asked first, before any await: askRestore's reads must see the pane as this start found it, and a
+    // first turn of `claude --resume <id> "…"` may land at the next await. The start claims the pane here too, so such
+    // a turn takes no restore of its own (the fallback below). A start after the turn fallback has asked already, and
+    // one after a resume covers the due restore (the two must not both run).
     const isDue = !isStarted || isRestoreDue
+    const isFirst = !isStarted
+    isStarted = true
     isRestoreDue = false
     if (isDue) askRestore($, null)
-    if (!isStarted) {
-      isStarted = true
-      await startPane($)
-    }
+    inBackground($, () => readMainModel($))
+    // A reload in the middle of a call leaves no call in flight behind; a restore clears them itself. The start has
+    // claimed the pane, so a write that fails must not keep it from starting: no turn fallback would start it now.
+    await update($, inFlightAtom, () => ({})).catch(() => undefined)
+    if (isFirst) await startPane($)
 
     return started
   })
@@ -983,6 +994,7 @@ export const register: Register = (on, options) => {
       isStarted = true
       isRestoreDue = false
       askRestore($, e.text)
+      inBackground($, () => readMainModel($))
       inBackground($, () => startPane($))
     }
     // The first main turn after a resume restores the other conversation, less its own rows (cutAtTurn); the read is

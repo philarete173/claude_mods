@@ -580,6 +580,9 @@ type World = {
   messages: unknown // what $.session.messages() answers: the rows of the main conversation
   messagesFail: boolean // $.session.messages() rejects
   messageReads: number // how many $.session.messages() calls were made
+  model: string | null // what $.session.model() answers; null: it rejects
+  modelLag: number // how long $.session.model() takes, in mock ms
+  modelReads: number // how many $.session.model() calls were made
   compacted: Record<string, unknown>
   spawns: number
   breakdowns: number // how many usage() calls asked for the context breakdown
@@ -673,6 +676,9 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     messages: [],
     messagesFail: false,
     messageReads: 0,
+    model: null,
+    modelLag: 0,
+    modelReads: 0,
     compacted: { messages: MESSAGES, tokensBefore: 180_000, tokensAfter: 40_000 },
     spawns: 0,
     breakdowns: 0,
@@ -857,6 +863,13 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     if (w.messagesFail) throw new Error('the messages cannot be read')
 
     return { value: w.messages as never }
+  })
+  on('session.model', async () => {
+    w.modelReads += 1
+    if (w.modelLag > 0) await clock.sleep(w.modelLag)
+    if (w.model === null) throw new Error('the model is not available')
+
+    return { value: w.model }
   })
   on('ui.open', (_$, e) => {
     w.opened.push(e)
@@ -7458,6 +7471,128 @@ test('a restore adds the counts and the compactions, and empties the calls in fl
     expect(restored.compactions).toBe(1)
     expect(state.inFlight).toEqual({})
   })
+
+// §6: session.start asks the restore before its first write, so a first turn that lands while that write is held (as
+// `claude --resume <id> "…"` may) finds the start's claim, and the restore's reads find the pane as the start found it.
+test('a session.start asks the restore before its first write, so a turn in between leaves the pane empty for it',
+  WITH_WRITE_HOLDER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    w.messages = ROWS
+    await armHold($, { keys: ['inFlight'], ms: 100, mode: 'before' })
+    const starting = $.session.start(START)
+    await clock.settle()
+    expect(w.messageReads).toBe(1) // 0.7.0: 0, the read waits behind the held write
+
+    await $.turn.start({ text: 'go', turnId: 't0' }) // it writes the `you go` line meanwhile
+    await clock.advance(200)
+    await starting
+    await clock.advance(10)
+
+    const restored = restoreFromMessages(ROWS, new Set(), ROOT)
+    const state = await readState($)
+    expect([state.agents, state.tasks]).toEqual([restored.agents, restored.tasks])
+    expect(state.log.map(line => line.text)).toEqual(['go', ...restored.log.map(line => line.text)]) // each once
+    expect(w.messageReads).toBe(1)
+  })
+
+// The start has claimed the pane before its write of the calls in flight, so a write that fails must not keep it from
+// starting: no turn fallback would start it then.
+test('a refused write of the calls in flight still starts the pane', WITH_WRITE_HOLDER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await armHold($, { keys: ['inFlight'], mode: 'refuse' })
+
+  await $.session.start(START)
+  await clock.advance(10)
+
+  expect(w.registered.map(e => (e as { name: string }).name)).toEqual(['session-panel'])
+  expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session' }])
+})
+
+// §11: after a reopen the core names the main model before the first response: session.start and the turn fallback
+// read `$.session.model()` when none is held.
+test('a reopen reads the main model for the core', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  w.model = 'claude-opus-5-5'
+
+  await $.session.start(START)
+  await clock.advance(10)
+
+  expect((await readState($)).mainModel).toBe('claude-opus-5-5')
+  const ui = await mountPane($)
+  const alts = (await ui.findAll({ type: 'Svg' })).map(el => String(el.props.alt))
+  const band = alts.find(alt => alt.startsWith('Context '))
+  expect(band?.includes('opus 5.5'), String(band)).toBe(true)
+})
+
+test('a model a step has written stands', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  w.model = 'claude-opus-5-5'
+  w.modelLag = 3000 // longer than a step
+
+  await $.session.start(START)
+  await startTurn($)
+  await runStep($, clock, { turnId: 't0', index: 0 }) // its model is written at its stop, inside the lag
+  await clock.advance(3500)
+
+  expect(w.modelReads).toBe(1)
+  expect((await readState($)).mainModel).toBe('claude-sonnet-5') // the read's write found it held
+  await $.session.start(START) // a model is held: no read
+  await clock.advance(10)
+  expect(w.modelReads).toBe(1)
+})
+
+test('a model read that fails sets nothing', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+
+  await $.session.start(START)
+  await clock.advance(10)
+
+  expect(w.modelReads).toBe(1)
+  expect((await readState($)).mainModel ?? null).toBeNull()
+  expect(w.opened).toEqual([{ id: 'session-panel', title: 'Session' }])
+})
+
+test("the first main step's model replaces the read one", SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  w.model = 'claude-opus-5-5'
+  await $.session.start(START)
+  await clock.advance(10)
+  expect((await readState($)).mainModel).toBe('claude-opus-5-5')
+
+  await startTurn($)
+  await runStep($, clock, { turnId: 't0', index: 0 })
+  await clock.advance(10)
+
+  expect((await readState($)).mainModel).toBe('claude-sonnet-5')
+})
+
+test('a control character in the read model is removed', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  w.model = 'claude-opus-5-5\u{1}'
+
+  await $.session.start(START)
+  await clock.advance(10)
+
+  expect((await readState($)).mainModel).toBe('claude-opus-5-5')
+})
+
+test('the turn fallback reads the model too', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  w.model = 'claude-opus-5-5'
+
+  await $.turn.start({ text: 'go', turnId: 't0' })
+  await clock.advance(10)
+
+  expect((await readState($)).mainModel).toBe('claude-opus-5-5')
+})
 
 test('a session that starts with something in the pane restores nothing', SLOW_READER, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
