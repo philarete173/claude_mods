@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.7.1 — unreleased
+
+- The core breathes: a halo in the ring's colour swells and fades outside the ring, never inside it, slowly at rest and
+  faster while the main agent's turn or any station runs. Under `motion: reduced` it stands still.
+- A pulse is a comet, a dot with a tail that turns along its path, in place of the three dots. On arrival the circle
+  still flashes, and a ripple spreads from it. A running station has a steady halo and a ring that beats outward from
+  its circle, in place of the breathing glow.
+- Skills and You take the owner's palette A: butter and lilac on the dark theme, deep olive-gold and plum on the light
+  one. They differ from their neighbours by lightness now, and the weak pairs of 0.7.0 (Skills with MCP and Model,
+  You with Agents) are apart.
+- Activity's label column is about 45 % of the pane, up to 64 cells. The tags show from 54 columns (a pane of about
+  464 px), start on one x and are never cut. Descriptions whose end cuts would read the same are cut in the middle,
+  so that the lanes tell apart (`Band check…sleep A`).
+- A subagent resumed with SendMessage keeps its earlier runs: its lane draws a bar for each run with the gaps
+  between, and the current run starts at the resume. A row keeps 8 earlier runs; a ninth merges the two oldest.
+- The Turn stats legend names each station the turn used, with its swatch and its share of the bar, then the steps
+  and the time to first token, wrapped over as many rows as it needs. The narrow-pane rules that left items out are
+  gone. The `Model` and `Tools` legend is left only for a turn of 0.6.1 kept over a hot reload.
+- Fix: `claude --resume <id> "…"` restored nothing when its first turn came before the restore's reads. The restore is
+  asked first at `session.start`, before any wait.
+- Fix: after a reopen the core named no model until the first response. The main model is read from the engine at the
+  start, and the first response's model replaces it.
+- Fix: a call the mod saw no chunk of in the model's stream (another plugin's call, for example) never pulsed. It
+  pulses at its return; any other call still pulses at its first chunk.
+- Fix: a call the engine blocked before it ran (`Blocked: …`) was drawn as a failure, with a red Shell. It is a denial
+  now, `denied` in the Log. The rule reads the engine's text.
+- Fix: a compaction another plugin kept from the mod drew no tick. The engine drops the context's tokens until the
+  next response, so the next usage reading (the minute's tick, the next prompt or a measure) that finds them gone
+  counts the compaction, with a bare `compacted` line. One inside a running turn whose next response comes first is
+  still missed.
+- Docs: the README has 0.7.1's drawings and limits. The 0.7.0 spec carries 0.7.1's rules in place, and the visual
+  spec's old Context meter lines are gone or marked as replaced.
+
 ## 0.7.0 — 2026-11-17
 
 - The Session band takes the place of the Context label row and the meter row. The context ring is its core, with the

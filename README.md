@@ -16,7 +16,8 @@ is a plugin marketplace, `philarete-mods`, that holds this one plugin.
 - **Project**: the project folder, its git branch, and the working tree's changes against HEAD.
 - **Usage**: the plan limits (5-hour, Weekly, Spend) as meters with a countdown to each reset.
 - **Turn stats**: the main agent's turn as a ribbon of model and tool time in the stations' hues, live while a turn
-  runs, with a legend; the table (speed, elapsed, model and tool time, steps, tokens and cost) behind a `details` fold.
+  runs, with a legend that names each station with its own swatch and share; the table (speed, elapsed, model and
+  tool time, steps, tokens and cost) behind a `details` fold.
 - **Activity**: lanes for the main agent, each subagent and each background task (Bash commands, Monitors and local
   Workflows) on one time axis, 8 at most and then `+N more`, with the status by shape and the cost or the time.
 - **MCP**: the servers that have tools in the context, by name, with their count.

@@ -986,6 +986,9 @@ function logParts(d: Draw, above: number): RenderElement[] {
 
 ### 6.11 Empty and partial states
 
+> The "No context reading" row: replaced by the 0.7.0 spec (2026-11-16-session-panel-visualizations-design.md), §4.6
+> "No context reading".
+
 | State | Drawn |
 |---|---|
 | No context reading | empty ring + `Context` + dim `—` at the right; no meter row (§6.2) |
@@ -1166,6 +1169,8 @@ The meter keeps `meterSvg(pct, widthPx)` exactly as it is, with its Desktop Stat
 
 ## 8. The Context ring
 
+> The 14 × 14 ring of this section is replaced by the band's core, 0.7.0 spec §4.1.
+
 The ring is 14 × 14, centred at (7, 7), with r = 5.5, stroke 2 and circumference C = 2πr = 34.5575.
 
 - **Track:** always drawn, `#808080` at opacity 0.3, the same as the meter track.
@@ -1202,6 +1207,8 @@ Example, 88.2 %:
 Butt caps keep the arc honest: round caps would add a stroke-width to its visible length.
 
 ## 9. Truncation rules
+
+> The "Context label row" and "Context meter row" rows: replaced by the band, 0.7.0 spec §4 and §2.1, row 2.
 
 | Row | Gives way first | Then | Never cut |
 |---|---|---|---|
@@ -1256,16 +1263,14 @@ Accessibility:
   - The chevron Buttons stay in the Tab order of the focused pane.
   - Each is a small target. Nothing else in a header is pressable, so the 24 px spacing exception of WCAG 2.5.8 applies.
 - **Alt text.**
-  - Meters keep their alt (`Context 88.2%`, `5-hour 3%`).
+  - Meters keep their alt (`5-hour 3%`).
   - Status icons say their status.
   - Decorative icons carry the label of their row, and rules say `rule`: the desktop does not draw an Svg whose `alt` is empty.
 
 Checks on the first live render, before the tests are frozen:
 
 1. **Cell size.**
-   - At the default width, the right end of the Context bar should sit about 16–32 px left of the `8` of `88.2%`, and no row should cross the pane's right edge.
-   - If the bar's right end is cut off or touches the percent, `CELL_PX` is too big; if the gap is over 45 px, it is too small.
-   - Either way, set `CELL_PX` to the body's px width ÷ `bodyColumns`.
+   - Set `CELL_PX` to the body's px width ÷ `bodyColumns`.
 2. **Rule spacing.** The rule is a Box one text line high, with the 1 px line centred in it (§5.1). Between the last row
    of a block and the next header there should be about 19 px of space, split by the 1 px line, and the Log's last line
    should be whole at the bottom of the pane, not cut by the rules above it (the 0.3.0 check saw about 2 px lost for

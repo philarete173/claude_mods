@@ -442,14 +442,17 @@ No `messages()` read.
 - **The seen compaction:** `session.compact` (`:1307-1321`) clears `contextTokens` and `contextPct` itself, in the
   step that counts it (`:1314`) and before its `refreshUsage` (`:1317`), so that refresh finds nothing held.
 - **A fresh session's first turn does not trigger it:** `usageAtom` starts with no `contextTokens` (`:31`) and no
-  response has given one. After `/clear` or a resume, `session.end` writes `contextTokens: undefined` (`:919`).
+  response has given one. After `/clear` or a resume, `session.end` writes `contextTokens: undefined` (`:919`). Its
+  reset clears the held tokens first, so a reading that lands during the reset finds none held and counts nothing.
 - **Still missed, a limit:** a compaction whose next response lands before any reading. In practice that is an
   auto-compaction inside a running turn: the turn's next response brings the tokens back before a reading sees them
   absent. The code carries `// shortcut: a compaction answered before any usage reading is not seen (an
   auto-compaction inside a turn); read the compaction summaries in messages() if that matters`.
-- **A race, accepted:** a reading taken before a seen compaction and written after that compaction's clear puts the
-  old tokens back, so a later reading can count the same compaction again; the window is the await between a reading
-  and its write.
+- **Two races, accepted** (named in the code's comment beside the `shortcut:`): a reading taken before a seen
+  compaction and written after that compaction's clear puts the old tokens back, so a later reading can count the
+  same compaction again; the window is the await between a reading and its write. And a tick's reading taken after
+  the engine drops the tokens can land before `session.compact`'s own clear: it counts the compaction as hidden, and
+  `session.compact` then counts it again.
 
 Tests:
 
@@ -600,6 +603,8 @@ The other stale Context passages keep their text, and each gets a one-line note 
 7. **The legend by station** (§17) at the owner's widths (≈ 300, 360, 490, 836 and ≈ 2000 px; 44 and 80 columns), in
    both themes: the swatches in their hues, the rows ending short of the edge, no item clipped by its row on the
    desktop (capitals are wider than a cell). While a turn runs: how often a row is added, and whether that is calm.
+8. **`claude --resume <id> "…"`** (§6): the restore runs, and the pane shows the old session's rows. Only the live
+   engine can prove it: the restore relies on its atom reads being issued before the first await.
 
 ## 15. Risks
 
@@ -609,8 +614,9 @@ The other stale Context passages keep their text, and each gets a one-line note 
   halo, 8 ripples and 8 beat rings at most, and the labels add the middle cut over ≤ 8 lanes. Both are small, but
   the budget tests must pass at the caps.
 - **The missed-compaction check** (§8) still misses a compaction inside a running turn, whose next response lands
-  before any reading. A reading from before a seen compaction, written after its clear, can let a later reading count
-  that compaction again; the window is the await between a reading and its write.
+  before any reading. Two races can count a seen compaction twice: a reading from before it, written after its clear,
+  lets a later reading count it again; and a tick's reading taken after the engine drops the tokens, landing before
+  `session.compact`'s own clear, counts it as hidden before `session.compact` counts it.
 - **The `Blocked:` heuristic** (§9) depends on the engine's text.
 - **Narrow panes lose lane length** (§4.5): at 360 px the lane area drops from 152 to 104 px and the axis shows only
   `now`.

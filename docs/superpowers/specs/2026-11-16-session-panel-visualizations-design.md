@@ -6,6 +6,9 @@ Date: 2026-11-16. Status: approved by the owner, round by round (rulings R1–R1
 decisions T1–T6). Implemented in 0.7.0. This spec consolidates the design record; it adds no decision of its own.
 Whatever the record leaves open is in §15.
 
+Updated by 0.7.1: `docs/superpowers/specs/2026-11-18-session-panel-0.7.1-design.md`. The sections it changes carry
+its rules in place, each with a pointer ("0.7.1 §") into it.
+
 The record, in rising precedence: the first visual spec, the r3 and r4 addenda, the rulings (a later R over an earlier
 one), the technical decisions. The rulings and the technical decisions live in this spec as R1–R19 and T1–T6.
 Round 6 settled the first draft's open questions (R16 a–j, folded into their sections) and left three open (R17,
@@ -86,16 +89,18 @@ the worked example (§2.3), with Log at its minimum of 8 lines and `details` clo
 | Split line | 1 | 1 | 1 | 1 | 1 |
 | Project | 4 | 4 | 4 | 4 | 4 |
 | Usage | 4 | 4 | 4 | 4 | 4 |
-| Turn stats | 11 | 5 | 5 | 5 | 5 |
+| Turn stats | 11 | 8 | 7 | 5 | 7 |
 | Subagents + Tasks / Activity | 7 + 5 | 12 | 12 | 12 | 12 |
 | MCP | 3 | 3 | 3 | 3 | 3 |
 | Context sources | 4 | 4 | 4 | 4 | 4 |
 | Log | 11 | 11 | 11 | 11 | 11 |
-| **Total** | **53** | **50** | **50** | **49** | **48** |
+| **Total** | **53** | **53** | **52** | **49** | **50** |
 
 - The band is 5 rows while each side has two rows of stations (body below 464 px), else 4 (§4.1). In the terminal it
   is the core line plus 3 grid rows at 40–42 columns, 2 at 43–118, 1 from 119 (§4.10).
-- Turn stats: rule, header, bar row, legend row, details row. Open `details` adds today's 9 label/value rows.
+- Turn stats: rule, header, bar row, the legend's rows, details row (0.7.1 §17.8). The legend wraps by whole items:
+  in the example it is 4 rows at 300 px, 3 at 360 px, 1 at 900 px and 3 in a 44-column terminal (§5.4, §5.8). Open
+  `details` adds today's 9 label/value rows.
 - Activity: rule, header, up to 8 lanes, the axis row, `+N more`. With no subagents and no tasks it is hidden.
 
 ### 2.3 The worked example (R1 as changed by R9)
@@ -191,8 +196,8 @@ and the context meter and are not station hues.
 | Web | `#93aac4` | `#4f6b8a` | slate | 6.4 / 5.3 |
 | MCP | `#a3c47a` | `#5b822f` | sage | 7.6 / 4.2 |
 | Agents | `#e58fae` | `#b44a74` | rose | 6.3 / 4.8 |
-| Skills | `#d9c95a` | `#8c7a00` | lemon | 9.1 / 4.1 |
-| You | `#d48ae0` | `#9a48b0` | orchid | 6.3 / 5.2 |
+| Skills | `#f0e07f` | `#695700` | butter / deep olive-gold | 11.3 / 6.8 |
+| You | `#eeb6fb` | `#752f84` | lilac / plum | 9.2 / 8.1 |
 
 - All are at least 3:1 (WCAG 1.4.11 for graphics). Colour is never the only cue: each station has its icon and label,
   each segment and lane has an alt, each status has a shape.
@@ -202,6 +207,9 @@ and the context meter and are not station hues.
 - Web is slate, not sky: sky sat ≈ 13° from the context blue, and Files and Web segments often sit side by side.
   Slate keeps a blue hue at about a third of the blue's chroma, so it never reads as "context".
 - The weakest pairs are listed in §15.
+- Skills and You are 0.7.1's palette A (0.7.1 §5); they were lemon `#d9c95a` / `#8c7a00` and orchid `#d48ae0` /
+  `#9a48b0`. The change is in lightness, not hue, so the hue order above stands; it closes §15.1 and §15.4. The
+  minimum contrast does not change.
 
 ### 3.4 Station order
 
@@ -287,12 +295,16 @@ slack, so an over-estimate of `W` never clips the outer label.
 
 | Part | Geometry | Style |
 |---|---|---|
+| Halo (0.7.1 §2) | first; an annulus outside the ring, r 26 out to 26 → 32 → 26 | `meterColor`, breathing (§7) |
 | Track | circle r 24 | stroke `#808080` @ 0.3, width 4 |
 | Arc | same circle, from 12 o'clock clockwise, `pathLength` = percent | `meterColor`, width 4, butt caps |
 | Compaction ticks | §4.5 | `ash`, width 1.5, round caps |
 | Percent | `56%`, centred on `Xc`, baseline `cy0 + 4` | 15px/600 `bone`, tabular |
 | Model | `opus 5.5`, centred, baseline `cy0 + 14` | 9px `ash`; a name over 8 characters drops its version (`sonnet`) |
 | Tokens | `112k / 200k`, centred, baseline `cy0 + 39` | 10px `ash`, tabular |
+
+The model is the first main step's. After a reopen, with none held, it is read from `$.session.model()` at the start
+and drawn until the first step's model replaces it (0.7.1 §11).
 
 The ring's outer edge is at `Xc ± 26`. Two rows: the ticks' top is at 16.5 and the tokens' descender at ≈ 88.7,
 inside 95. One row: 2 … 74.
@@ -302,17 +314,19 @@ inside 95. One row: 2 … 74.
 | Part | Geometry |
 |---|---|
 | Circle | r 11; the 14 px icon centred in it |
-| Glow | r 14 |
+| Halo, running (0.7.1 §3.4) | r 14, steady |
+| Beat ring, running (0.7.1 §3.4) | r 11 → 21, under the circle, so only its outside shows |
 | `×N` badge | r 6 at `(cx+8, cy−8)` (top at `cy−14`); the same corner on both sides, no mirroring |
 | Failure disc | r 5.5 at `(cx−8, cy−8)` |
 | Text, two rows per side | one line, baseline `cy + 24`: label `s` px/500, count `(s+1)` px/600, `dx 3`, centred |
 | Text, one row | stacked: label baseline `cy + 24`, count baseline `cy + 38` |
 
-Z-order: core → trunk/fork/rails → pulses → glows → circles → icons → badges and discs → text.
-A pulse passes behind the stations on its way.
+Z-order: core (its halo first) → trunk/fork/rails → pulses and ripples → each station's halo → beat ring → circle →
+icon → badges and discs → text (0.7.1 §2.2, §3.2, §3.4). A pulse and a ripple pass behind the stations.
 
 **Rows clear each other.** With rows 43 px apart, row 1's text descends to `25.5 + 24 + 2.2 = 51.7`; row 2's badge
-top is `68.5 − 14 = 54.5`, so 2.8 px stay clear. Row 2's glow starts at 54.5 and its text descends to 94.7 (< 95).
+top is `68.5 − 14 = 54.5`, so 2.8 px stay clear. Row 2's halo starts at 54.5 and its text descends to 94.7 (< 95).
+The core's halo and the beat rings clear the rest by 0.7.1 §2.3 and §3.4.
 
 ### 4.2 The label rule
 
@@ -428,7 +442,8 @@ reach the edges, and the circles and text keep their size; only the gaps grow (R
 
 | Part | Idle | Running | Failed this turn |
 |---|---|---|---|
-| Glow, r 14 | none | station hue, breathing (§7) | — (kept if also running) |
+| Halo, r 14 | none | station hue at 0.16, steady (0.7.1 §3.4) | — (kept if also running) |
+| Beat ring, r 11 → 21 | none | station hue, stroke 1.5, opacity 0.9 → 0, every 1.4 s (§7) | — (kept if also running) |
 | Circle, r 11 | fill `raised`, stroke `line` 1 | stroke station hue 1.5 | stroke `fail` 1.5 (wins over the hue) |
 | Icon | station hue | station hue | station hue |
 | Label | `ash` | `bone` | `bone` |
@@ -437,21 +452,22 @@ reach the edges, and the circles and text keep their size; only the gaps grow (R
 | Failure disc | — | — | fill `fail`; this turn's failures, `1`, 8px/700 in `raised`; `9+` from 10 |
 
 - **Count 0:** the icon at opacity 0.45, label and count `ash`. Before any call every station reads 0, dimmed.
-- **Idle** (no call running): no glows, no badges; Model stops glowing between turns.
+- **Idle** (no call running): no halos, no beat rings, no badges; Model stops beating between turns.
 - **Failure lifetime:** a failure mark stays until main's next turn starts, so it is still there while idle after the
   turn that failed.
 - **No context reading:** the track only, the centre `—` in `ash`, the tokens line `—`; the ticks do not change.
 - **≥ 80 % / ≥ 95 % context:** the arc turns `AMBER` / `RED` (the meter rule). The percent stays `bone`: the arc's
   colour carries the threshold, and the alt says the value.
 - What counts as running and as a failure is in §8.2.
-- In the example: Model has a glow and `×3`; Shell a glow, a `fail` stroke and a `1` disc; Agents a glow and `×2`;
-  the other five are idle.
+- In the example: Model has a halo, a beat ring and `×3`; Shell a halo, a beat ring, a `fail` stroke and a `1` disc;
+  Agents a halo, a beat ring and `×2`; the other five are idle.
 
 ### 4.7 Compaction ticks
 
 Radial lines from r 27.5 to r 31 around the core, the first at 12 o'clock, each next 9° clockwise; at most 5. One per
-main `session.compact` the mod sees (§8.5). The alt carries the count. When another plugin keeps the event from the
-mod, no tick is drawn (§10).
+main `session.compact` the mod sees, and one per compaction it finds at a usage reading (§8.5, 0.7.1 §8). The alt
+carries the count. When another plugin keeps the event from the mod, the next usage reading counts the compaction; one
+inside a running turn whose next response comes first is missed (§10).
 
 ### 4.8 Pulses
 
@@ -459,19 +475,22 @@ A pulse runs from the core to a station when the station gets a call (a model st
 
 - **One `animateMotion` per pulse** along trunk → (rounded junction) → fork → branch → rail. It ends at the
   circle's edge (`cx ∓ 11`). With one row per side the path is the straight rail from the ring's edge.
-- The T junction is rounded with r 6 in the motion path only. A dot cuts that corner by ≤ 1.8 px, which is invisible
-  in the dot cluster.
-- Three dots in the station's hue: r 1.75 / 1.25 / 1, opacity 1 / 0.6 / 0.35. The trailing two ride the same path,
-  `begin` +40 ms and +80 ms.
+- The T junction is rounded with r 6 in the motion path only. The comet cuts that corner by ≤ 1.8 px, which does not
+  show.
+- **The comet** (0.7.1 §3.1): a circle r 3.5 in the station's hue and a tail, a wedge 14 px long and 5.6 px wide at
+  the circle, filled with a gradient `pulse-{station}` from opacity 0 at its tip to 0.7. `rotate="auto"` turns it
+  along the path. It is drawn while its age is below its travel duration; after that the pulse group is empty.
 - Timing: `keyPoints="0;1" keyTimes="0;1" calcMode="spline" keySplines=".2 .6 .35 1"`.
 - **Duration rule:** `dur = clamp(0.6 × √(L / 240), 0.6, 1.4)` s, where `L` is the path's length in px. Short paths
   keep 600 ms; longer ones slow down gently. `L` for a two-row path is
   `4 + 9.42 + (|cy − cy0| − 12) + 9.42 + the branch-and-rail run`. Long paths fly longer (R18): at 900 px the
   outer paths take 0.72 s; at ≈ 3400 px they run 1441.5 px and take the 1.4 s cap.
-- The fade and the arrival flash follow at `begin + dur` (§7).
-- **Lifetime** (R16 g): a pulse is drawn while its age is below its travel duration + 150 ms of fade + 300 ms of
-  flash, so the whole one-shot sequence is covered, each part with its own phase offset.
-- At most one pulse group per station, so the element count is fixed.
+- The fade, the arrival flash and the ripple follow at `begin + dur` (§7).
+- **The ripple** (0.7.1 §3.2): a circle at the station, r 11 → 19, stroke 1.5 in its hue, opacity 0.7 → 0 over
+  450 ms, linear, static opacity 0. It goes into the pulses layer, so the station's opaque circle hides its inside.
+- **Lifetime** (R16 g, 0.7.1 §3.3): a pulse's parts are drawn while its age is below its travel duration + 450 ms,
+  the ripple's time, which outlasts the 150 ms fade and the 300 ms flash; each part has its own phase offset.
+- At most one pulse group and one ripple per station, so the element count is fixed.
 
 ### 4.9 Alt text
 
@@ -559,10 +578,10 @@ Every terminal colour is raw hex from the dark set (§9.6).
 
 ### 5.1 Block
 
-Five rows: rule · header · bar row · legend row · details row.
+The rows of 0.7.1 §17.8: rule · header · bar row · the legend's rows · details row; 5 when the legend takes one row.
 
 - **Header** unchanged: the bar-chart icon, bold `Turn stats`, the chevron, and the dim response rate as today.
-  Folding the section hides the three rows below.
+  Folding the section hides the rows below.
 - **Bar row** (one row, `Box height={1} alignItems="center"`): `[Svg bar area, FLEX][gap 1][elapsed, FIXED 7 cells,
   right-aligned Text, primary]`.
 - Bar area = `min(W − 64, 4096)` px: **264 px at 360**. Svg height 16 px.
@@ -620,14 +639,21 @@ Five rows: rule · header · bar row · legend row · details row.
 - **Growth between redraws:** the live segment's `width` and the cap's `x` are SMIL-animated linearly at
   `areaPx / ceilingSeconds` px/s up to the ceiling (`dur` = ceiling − elapsed, `fill="freeze"`), so the bar grows
   without redraws. The elapsed Text updates on redraws only.
-- **Alt:** `Turn 2m 14s: model 58%, tools 42%, 6 steps, 1 failed call`.
+- **Alt** (0.7.1 §17.7): the stations as the legend lists them, in lower case:
+  `Turn 2m 14s: model 58%, files <1%, shell 23%, agents 17%, mcp 2%, you <1%, 6 steps, 1 failed call`.
 - **`<title>` per segment** (only with §11.3's interactive mode): the labels of §2.3, e.g.
   `Bash tsc --noEmit · Shell · 31s · failed`. Not drawn in 0.7.0 (§11.3, ruling C-no).
-- **Legend row** (one row): `[swatch][gap 1]` + Texts: dim `Model` primary `58%` · dim `Tools` primary `42%` ·
-  primary `6 steps` · dim `TTFT` primary `1.2s`. Separators ` · ` dim. The swatch is an Svg 8 × 8 rect rx 1.5 in the
-  Model hue, in a 1-cell slot, alt `Model`.
-- **Narrow pane:** below 36 cells the `TTFT` item is left out, below 30 cells `steps` too: whole items, never a cut
-  one.
+- **Legend rows** (0.7.1 §17.1-§17.3, §17.5): Model first, then each tool station with time in the shown turn, in
+  station order, each as `[swatch][gap 1]` + dim label + primary ` NN%` (`<1%` for a share above 0 that rounds to
+  0); then primary `6 steps` and dim `TTFT` primary `1.2s`. Separators ` · ` dim. A swatch is an Svg 8 × 8 rect rx 1.5
+  in its station's hue, one fixed source per station, in a FIXED 2-cell slot (its cell and the gap), alt the station's
+  label. The shares are of the sum of the station times, the time the bar draws in each hue (0.7.1 §17.2). Whole items
+  wrap over rows, one Box row each; an item wider than a row is cut with `…`. Every item shows: the narrow rules are
+  gone. In the example, at 360 px: `■ Model 58% · ■ Files <1% · ■ Shell 23%`, `■ Agents 17% · ■ MCP 2% · ■ You <1%`,
+  `6 steps · TTFT 1.2s`.
+- **The fallback** (0.7.1 §17.6): a last turn with no ribbon (one of 0.6.1, kept over a hot reload) draws `Model`
+  (with the Model swatch) and `Tools`, by the shares of `modelMs + toolMs`, then the steps and TTFT, and the alt
+  `Turn 2m 14s: model 58%, tools 42%, 6 steps, 1 failed call`.
 
 **Worked geometry at 360 px** (bar area 264 px, ceiling 3 m = 180 s → 1.467 px/s; elapsed 134 s; N = 13, so
 nothing merges):
@@ -653,7 +679,7 @@ nothing merges):
 |---|---|---|---|---|---|
 | Bar area `min(W − 64, 4096)` | 204 | 264 | 354 | 804 | 3304 |
 | N | 10 | 13 | 17 | 40 | 60 |
-| Legend | no TTFT | full | full | full | full |
+| Legend rows (the example, 0.7.1 §17.5) | 4 | 3 | 3 | 1 | 1 |
 
 - The scale, segments, minimum widths and rest-of-scale hairline do not change with the width; only the area grows.
 - Above a 4160 px body (a 32:9 monitor) the bar ends at 4096 px and a gap opens before the elapsed time, as the
@@ -676,7 +702,7 @@ nothing merges):
 
 ### 5.8 Terminal
 
-Three rows: the bar, the legend, the details Button.
+The bar, the legend's rows, the details Button.
 
 - **Row 1:** the bar is `cols − 8` cells, the ceiling spans them; filled cells = round(elapsed / ceiling × bar); each
   segment gets at least 1 cell, by largest remainder; `·` dim for the rest of the scale; a space; the elapsed time
@@ -684,9 +710,9 @@ Three rows: the bar, the legend, the details Button.
 - Every cell is in its segment's hue. No separators: model and tool segments alternate, so colour changes mark the
   steps. No hot cell: the dotted rest of the scale already says the turn runs. A failed tool segment keeps its
   station hue, and its **last cell is `✗`** in the error colour (the band shows a failure the same way).
-- **Row 2:** `Model` in the Model hue, `Tools` and `TTFT` dim, values primary, ` · ` dim. `TTFT` drops below 44
-  columns, `steps` below 34.
-- **Row 3:** the dim `▸ details` Button.
+- **The legend's rows** (0.7.1 §17.4-§17.5): each station's label in its dark hue, `TTFT` dim, values primary, ` · `
+  dim; no glyph. Whole items wrap within `cols`, as on the desktop; nothing is left out.
+- **The last row:** the dim `▸ details` Button.
 - **Finished turn:** the bar fills all `cols − 8` cells, no `·`.
 - **No waiting mark** (R16 f): model segments are solid `█` in the terminal too; there is no `▒`.
 
@@ -694,7 +720,9 @@ Three rows: the bar, the legend, the details Button.
 
 ```text
 ██████████✗████████████████·········  2m 14s
-Model 58% · Tools 42% · 6 steps · TTFT 1.2s
+Model 58% · Files <1% · Shell 23%
+Agents 17% · MCP 2% · You <1% · 6 steps
+TTFT 1.2s
 ▸ details
 ```
 
@@ -716,7 +744,7 @@ Model 58% · Tools 42% · 6 steps · TTFT 1.2s
 | 36 | 1 | space | |
 | 37–43 | 7 | ` 2m 14s` | primary, right-aligned |
 
-Row 2 is 43 cells. Widths: the bar is 36 cells at 44 columns, 112 at 120, 192 at 200.
+The legend's rows are 33, 39 and 9 cells. Widths: the bar is 36 cells at 44 columns, 112 at 120, 192 at 200.
 
 ## 6. Activity
 
@@ -728,7 +756,8 @@ Rule · header · up to 8 lanes · axis row · `+N more`: **12 rows** in the exa
   subagents and tasks, or the total alone when nothing runs. The main lane is not counted. The fold key is
   `activity`; the old `agents` and `tasks` keys are ignored.
 - **Lane order:** `main` first; then the running lanes, the older start first; then the ended lanes, the newer end
-  first. At most 8 lanes; the rest are counted in `+N more` (dim, no indent).
+  first. A resumed subagent's start is its first run's, its end the last span's (0.7.1 §10.2). At most 8 lanes; the
+  rest are counted in `+N more` (dim, no indent).
 - **Unknown times** (R16 e): among the running lanes, those with an unknown start sort after those with a known
   start; among the ended lanes, those with an unknown end sort last.
 - **Hidden:** with no subagents and no tasks the block is left out (a lone main lane would repeat the ribbon).
@@ -752,7 +781,10 @@ Rule · header · up to 8 lanes · axis row · `+N more`: **12 rows** in the exa
 ### 6.2 Lane rows and status shapes (desktop)
 
 A lane row, one row, `alignItems="center"`:
-`[label, FIXED L cells, Text][gap 1][bar area, Svg × 19][gap 1][value, FIXED 8 cells, right-aligned Text]`.
+`[label, FIXED L cells][gap 1][bar area, Svg × 19][gap 1][value, FIXED 8 cells, right-aligned Text]`.
+
+- **Label cell** (0.7.1 §4.4): with a tag, a FIXED Box of `descW` cells (overflow hidden) holding the description,
+  then the dim tag after a no-break space; below 24 cells, or with no tag, the description alone (§6.4).
 
 - **Axis part:** x 0 → A, `A = area − 12`; `x = A − secondsAgo × A / span`.
 - **Gutter:** the last 12 px, for the end marks of lanes that end at or near now and of unknown spans.
@@ -768,28 +800,31 @@ A lane row, one row, `alignItems="center"`:
 | done, failed or stopped, unknown start (restored) | the dashed line | its `✓`, `✗` or `■`, centred at x A + 6 |
 | running, unknown start (restored) | the dashed line | the live cap |
 | started before the axis | left end square, an 8 px fade-in at the left edge (`linearGradient` 0 → the hue) | — |
+| a resumed subagent's earlier runs (0.7.1 §10) | a 3 px bar each, the time between runs a gap | — |
 
 The dashed line is 2 px, from 0 to A at y 9.5, in full hue, `stroke-dasharray="3 3"`. Any lane but `main` with no
 known start draws it (`spansOf` and `drawLane` in `hooks/lanes.ts`). A restored lane whose end was seen live keeps
 that end: it sorts by it (§6.1) and draws its status mark at A + 6; a lane with neither time sorts as an unknown one.
+A resumed subagent's spans are its closed runs (`runs`, §8.4), then its current one; the current run draws as its
+status shows, and the status mark follows the last span. A run with no known start draws nothing.
 Status marks keep the pane's status colours: `✓` success green, `✗` red, `■` and `○` neutral.
 
 **Svg alt:** `<description> (@type), <status>, <value>` at every width (R16 d, §6.4); for example
 `Review the diff (@code-reviewer), running, $0.310`.
 
-**Worked geometry at 360 px** (L 12 cells, area 152 px, A = 140, span 720 s, 0.1944 px/s):
+**Worked geometry at 360 px** (0.7.1 §4.5: L 18 cells, area 104 px, A = 92, span 720 s, 0.1278 px/s):
 
 | Lane | Bar x (from → to) | Bar | End mark centre |
 |---|---|---|---|
-| main | 0 → 36.9 (fade-in), 66.1 → 97.2 | 3 px | — |
-| | 113.9 → 140 | 6 px, cap | — |
-| Review the diff | 70 → 140 | 6 px, cap | — |
-| npm test | 97.2 → 140 | 6 px, cap | — |
-| Plan critique | 0 → 140, dashed | 2 px, cap | — |
-| Map the mask | 126.6 → 131.1 | 3 px | ✓ 137.1 |
-| Repro check | 93.3 → 105 | 3 px | ✗ 111 |
-| Engine facts | 0 → 93.3 | 3 px | ✓ 99.3 |
-| dev server | 23.3 → 70 | 3 px | ■ 76 |
+| main | 0 → 24.3 (fade-in), 43.4 → 63.9 | 3 px | — |
+| | 74.9 → 92 | 6 px, cap | — |
+| Review the diff | 46 → 92 | 6 px, cap | — |
+| npm test | 63.9 → 92 | 6 px, cap | — |
+| Plan critique | 0 → 92, dashed | 2 px, cap | — |
+| Map the mask | 83.2 → 86.1 | 3 px | ✓ 92.1 |
+| Repro check | 61.3 → 69 | 3 px | ✗ 75 |
+| Engine facts | 0 → 61.3 | 3 px | ✓ 67.3 |
+| dev server | 15.3 → 46 | 3 px | ■ 52 |
 
 ### 6.3 The axis
 
@@ -812,18 +847,26 @@ Status marks keep the pane's status colours: `✓` success green, `✗` red, `�
 - **The type tag (R15):** a lane's `@type` tag (`@code-reviewer`, `@shell`) is drawn dim after its label when the
   label column is at least 24 cells wide. A subagent's tag is `@` + its type as the Log shows it (`shortType`: the
   plugin prefix dropped, cut at 14 characters with `…`, so `@general-purpo…`); a task's tag is its kind, `@shell`,
-  `@monitor` or `@workflow` (`TaskKind`). That holds from a pane of about 670 px (body 80 cells) and from a terminal
-  of 80 columns. Below that, the tag is not drawn.
-- **When label and tag do not fit** the column (R16 d): the description gives way first, cut with `…`, down to
-  6 cells; then the tag is cut with `…`.
+  `@monitor` or `@workflow` (`TaskKind`). That holds from 54 columns (a body of 432 px, a pane of ≈ 464 px; 0.7.1
+  §4.2). Below that, the tag is not drawn.
+- **Two sub-columns** (0.7.1 §4.2): from 24 cells the column is a description sub-column of `descW = L − 1 − tagW`
+  cells, a gap cell and a tag sub-column, `tagW` the most cells of the shown lanes' tags (main's counts 0). Every tag
+  starts at cell `descW + 1` and is never cut.
+- **Description cuts** (0.7.1 §4.3): a description is cut at the end to `descW` cells with `…`. Where two or more of
+  the shown descriptions wider than `descW` have the same end cut, each is cut in the middle instead: a head of at
+  least 4 code points, `…`, and a tail long enough to tell them apart (a third of the room at least, moved back to its
+  word's start when that costs at most 3). The head drops its trailing spaces, or keeps them all when dropping them
+  would leave it under 4 code points: `Fix the X12` and `Fix the Y12` at 8 cells give `Fix …X12` and `Fix …Y12`. A
+  description that fits is never cut; descriptions that read the same in whole stay the same.
 - **The alt always carries the tag** (R16 d): `<description> (@type), <status>, <value>`.
 - **`+N more`:** lanes past 8, dim, at column 0.
 - **Hidden** when there are no subagents and no tasks (§6.1).
 
 ### 6.5 Terminal
 
-Row = `label(L, left, cut with …) space bar space value(8, right)`. The bar is `cols − L − 10` cells: the axis is
-`bar − 1` cells, the last cell is the gutter. In the example the axis is 20 cells at 44 columns, 36 s a cell.
+Row = `label(L) space bar space value(8, right)`; the label is the description (padded to `descW` when a tag
+follows), a space and the dim tag (0.7.1 §4.4). The bar is `cols − L − 10` cells: the axis is `bar − 1` cells, the
+last cell is the gutter. In the example the axis is 14 cells at 44 columns, 51 s a cell (0.7.1 §4.5).
 
 | Char | Meaning | Colour |
 |---|---|---|
@@ -840,50 +883,54 @@ Label colour: running lanes and `main` primary, the rest dim.
 
 ```text
 Activity ▾                               3/8
-main          ─────    ─────  ━━━━◐        —
-Review the d…           ━━━━━━━━━━◐   $0.310
-npm test                    ━━━━━━◐   3m 40s
-Plan critique ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄◐  $0.410+
-Map the mask                    ─✓    $0.120
-Repro check                ──✗        $0.050
-Engine facts  ─────────────✓          $0.880
-dev server       ───────■             4m 00s
-                11:55    12:00  now
+main                ────   ─── ━━━◐        —
+Review the diff            ━━━━━━━◐   $0.310
+npm test                      ━━━━◐   3m 40s
+Plan critique       ┄┄┄┄┄┄┄┄┄┄┄┄┄┄◐  $0.410+
+Map the mask                     ─✓   $0.120
+Repro check                  ──✗      $0.050
+Engine facts        ─────────✓        $0.880
+dev server            ─────■          4m 00s
+                                now
 +1 more
 ```
 
-Bar strings, 21 cells each (`␣` = space):
+Bar strings, 15 cells each (`␣` = space; 0.7.1 §4.5):
 
 | Lane | Bar |
 |---|---|
-| main | `─────␣␣␣␣─────␣␣━━━━◐` (5, 4, 5, 2, 4, 1) |
-| Review the d… | 10 `␣`, 10 `━`, `◐` |
-| npm test | 14 `␣`, 6 `━`, `◐` |
-| Plan critique | 20 `┄`, `◐` |
-| Map the mask | 18 `␣`, `─`, `✓`, `␣` |
-| Repro check | 13 `␣`, 2 `─`, `✗`, 5 `␣` |
-| Engine facts | 13 `─`, `✓`, 7 `␣` |
-| dev server | 3 `␣`, 7 `─`, `■`, 10 `␣` |
-| axis | `␣␣11:55␣␣␣␣12:00␣␣now` (2, 5, 4, 5, 2, 3) |
+| main | `────␣␣␣───␣━━━◐` (4, 3, 3, 1, 3, 1) |
+| Review the diff | 7 `␣`, 7 `━`, `◐` |
+| npm test | 10 `␣`, 4 `━`, `◐` |
+| Plan critique | 14 `┄`, `◐` |
+| Map the mask | 13 `␣`, `─`, `✓` |
+| Repro check | 9 `␣`, 2 `─`, `✗`, 3 `␣` |
+| Engine facts | 9 `─`, `✓`, 5 `␣` |
+| dev server | 2 `␣`, 5 `─`, `■`, 7 `␣` |
+| axis | 12 `␣`, `now` |
 
 Values (8, right): `       —`, `  $0.310`, `  3m 40s`, ` $0.410+`, `  $0.120`, `  $0.050`, `  $0.880`, `  4m 00s`.
 
 ### 6.6 Widths
 
-| | Rule | 300 px | 360 px | 450 px | 900 px | ≈ 3400 px |
-|---|---|---|---|---|---|---|
-| Lane label `L` | `clamp(floor(cols × 0.3), 9, 32)` cells | 9 | 12 | 15 | 32 | 32 |
-| Lane bar area | `min(W − (L + 10) × 8, 4096)` px; `A` = area − 12 | 116 | 152 | 218 | 532 | 3032 |
-| Axis tick step (example span) | §6.3 | 10 m | 5 m | 5 m | 2 m | 1 m |
-| Type tag | `L ≥ 24` | no | no | no | yes | yes |
+`L = clamp(floor(cols × 0.45), 9, 64)` cells (`laneLabelCells`; 0.7.1 §4.1). Body px = cols × 8. Lane area =
+`min(body − (L + 10) × 8, 4096)` px, `A` = area − 12. Terminal bar = `cols − L − 10` cells, the axis `bar − 1`. The
+axis labels are the example's (span 12 min, §6.3). The widths of 0.7.1 §4.5:
 
-| | Rule | 40 | 44 | 60 | 80 | 120 | 200 |
+| cols | body | L | label column | area / A, px | bar / axis, cells | desktop axis labels | 0.7.0: L, area, bar |
 |---|---|---|---|---|---|---|---|
-| Lane label `L` | `clamp(floor(cols × 0.3), 9, 32)` | 12 | 13 | 18 | 24 | 32 | 32 |
-| Lane bar | `cols − L − 10` cells | 18 | 21 | 32 | 46 | 78 | 158 |
-| Axis tick step | least `s` with `s × axisCells / spanMin ≥ 8` cells | 10 m | 5 m | 5 m | 5 m | 2 m | 1 m |
-| Type tag | `L ≥ 24` | no | no | no | yes | yes | yes |
+| 33 (300 px pane) | 264 | 14 | descriptions | 72 / 60 | — | none | 9, 112, — |
+| 40 | 320 | 18 | descriptions | 96 / 84 | 12 / 11 | none | 12, 144, 18 |
+| 41 | 328 | 18 | descriptions | 104 / 92 | 13 / 12 | none | 12, 152, 19 |
+| 44 | 352 | 19 | descriptions | 120 / 108 | 15 / 14 | `12:00` | 13, 168, 21 |
+| 52 | 416 | 23 | descriptions | 152 / 140 | 19 / 18 | `11:55`, `12:00` | 15, 216, 27 |
+| 54 | 432 | 24 | 8 + 1 + 15 | 160 / 148 | 20 / 19 | `11:55`, `12:00` | 16, 224, 28 |
+| 108 | 864 | 48 | 32 + 1 + 15 | 400 / 388 | 50 / 49 | every 2 m, 11:54 … 12:02 | 32, 528, 66 |
+| 200 | 1600 | 64 | 48 + 1 + 15 | 1008 / 996 | 126 / 125 | every 1 m, 11:53 … 12:03 | 32, 1264, 158 |
 
+- The label column's split assumes a 15-cell tag; with shorter tags `descW` is wider by the difference.
+- The "0.7.0: L, area, bar" column is recomputed on this table's basis (body = cols × 8), so at 33 columns it reads
+  112 where the old 300 px table, measured from the pane's W of 268 px, read 116.
 - Lane bars stay 6 px (running), 3 px (finished) and 2 px (dashed) at every width; only their lengths scale. The
   12 px gutter is fixed.
 - Above a 4160 px body the lanes get a gap before their right-hand values, as the meters do.
@@ -896,31 +943,34 @@ All SMIL, inside the Svgs; nothing animates in the terminal.
 |---|---|---|---|---|---|
 | Live end cap (ribbon, lanes) | `opacity` | 1 → 0.3 → 1 | 1.6 s | spline `.45 0 .55 1` | indefinite |
 | Ribbon live segment growth | `width`, cap `x` | linear to the ceiling | ceiling − elapsed | linear | once, freeze |
-| Glow | `opacity` | 0.12 → 0.24 → 0.12, both themes (R16 h) | 2.4 s | as the cap | indefinite |
-| Pulse (new call) | 3 dots, motion | core → station edge | 0.6–1.4 s (§4.8) | spline `.2 .6 .35 1` | once |
-| Pulse fade | dots `opacity` | 1 → 0 | 150 ms after arrival | linear | once |
+| Core halo (0.7.1 §2.1) | `r`, `stroke-width`, `opacity` | 0.7.1 §2.2 | 4.8 s; busy 1.6 s | as the cap | indefinite |
+| Beat ring (0.7.1 §3.4) | `r`, `opacity` | 11 → 21, 0.9 → 0 | 1.4 s | linear | indefinite |
+| Pulse (new call) | the comet, motion | core → station edge | 0.6–1.4 s (§4.8) | spline `.2 .6 .35 1` | once |
+| Pulse fade | the comet's `opacity` | 1 → 0 | 150 ms after arrival | linear | once |
 | Arrival flash | station `stroke-width` | 1.25 → 2.25 → 1.25 | 300 ms after arrival | ease-out | once |
+| Ripple (0.7.1 §3.2) | `r`, `opacity` | 11 → 19, 0.7 → 0 | 450 ms after arrival | linear | once |
 
 - **Phase-locking.** Every redraw makes a new Svg, so the animations are phase-locked to continue where they were:
-  - a pulse's `begin` is −age (age = now − the station's `lastCallAt`); the pulse, its fade and its flash are drawn
-    while the age is below the travel duration + 150 ms + 300 ms (R16 g), each part with its own phase offset;
+  - a pulse's `begin` is −age (age = now − the station's `lastCallAt`); its parts are drawn while the age is below
+    the travel duration + 450 ms (R16 g, 0.7.1 §3.3), each part with its own phase offset;
   - a loop's `begin` is −(now mod period);
-  - each element's static attributes are its resting state: a pulse dot at opacity 0, a station circle at its own
-    stroke width;
+  - each element's static attributes are its resting state: the comet and the ripple at opacity 0, a station circle
+    at its own stroke width, the core's halo at r 26, width 0, opacity .05;
   - a one-shot part whose own interval is already over when the image is made is dropped by the engine, its
     `fill="freeze"` end state included (§11.3), so it changes nothing. The arrival flash ends at the resting stroke
     width, so a flash that is over leaves the station as it was;
-  - a pulse dot needs more: its `<set>` of opacity has no end, so it still shows the dot once its `animateMotion` (and
-    its fade) are dropped, and the dot would sit at the band's origin. So `pulseSvg` leaves out a dot whose travel is
-    over (age − its lag ≥ the travel time);
+  - the comet needs more: its `<set>` of opacity has no end, so it still shows the comet once its `animateMotion`
+    (and its fade) are dropped, and the comet would sit at the band's origin. So `pulseSvg` leaves out the comet
+    whose travel is over (age ≥ the travel time), and draws the group empty while the ripple lasts;
   - a growth whose start state is computed from now (the ribbon's live part and its cap, from their width at now to
     the ceiling, `dur` = what is left) starts when the image is created, with no `begin`: a redraw computes it again.
 - In the pane, pulses fire on real calls. Badges and failure marks appear without animation.
 - Redraws come from state writes (at most 10 a second, the engine's cap) and the existing 30 s tick
   (`hooks/register.tsx:42`, `:762`). No new timers.
-- **`motion: reduced`** (§9.5) turns off the pulses and the glows' breathing and makes the caps static: no animation
-  at all is drawn (§12). The glow stays at its resting mid opacity, the caps at 1.
-- The glow has one opacity range for both themes: SMIL values cannot follow the media query (R16 h, §9.3).
+- **`motion: reduced`** (§9.5; 0.7.1 §2.1, §3.5) draws no comet, ripple, flash, beat ring or core breath and makes
+  the caps static: no animation at all is drawn (§12). A running station keeps its steady halo (0.16) and the core
+  its steady halo (r 27.5, width 3, opacity 0.08 at rest and 0.16 busy); the caps stay at 1.
+- The halos have one opacity range for both themes: SMIL values cannot follow the media query (R16 h, §9.3).
 - Image-mode SMIL moves on the desktop (§11.3, ruling A).
 
 ## 8. Data and state (T1)
@@ -957,10 +1007,14 @@ unknown tool goes to Shell.
   only main's are kept, `hooks/register.tsx:978-980`). Every other station counts its tool calls, main's and
   subagents'.
 - **`failedThisTurn`:** counted since main's current `turn.start`, and reset there. A failure is a call whose Log line
-  is an error with a ✗ mark: `ran.isError === true`, `ran.deny === undefined`, not abandoned, and not by an agent with
-  no row (`hooks/register.tsx:1023-1030`). A denied call is not a failure.
-- **`lastCallAt`:** the `t0` of the station's latest call, or the start of its latest model step for Model. A pulse's
-  age is `now − lastCallAt`.
+  is an error with a ✗ mark: `ran.isError === true`, not denied, not abandoned, and not by an agent with no row
+  (`hooks/register.tsx:1023-1030`). A denied call is not a failure, and neither is a call the engine blocked before it
+  ran: an error whose `text`, or whose `result` string, starts `Blocked:` counts as a denial everywhere the hook reads
+  `ran.deny` (`isDenied`; its Log outcome is `denied`). As any error, it starts no task and hands nothing back
+  (0.7.1 §9).
+- **`lastCallAt`** (0.7.1 §7): the time the mod saw the call's first chunk in the model's stream, or the first chunk
+  of a model step for Model. A call that reaches `tool.call` with no in-flight entry (no `tool_use_id`, or one no
+  chunk named) sets it to its return time, `t1`, in the write that counts it. A pulse's age is `now − lastCallAt`.
 - **Running:**
   - Model: the agents now in a model step, that is, running agents (main while its turn runs, plus subagents with a
     running row) that have no call in flight. This needs an in-flight count per agent id.
@@ -987,6 +1041,10 @@ unknown tool goes to Shell.
 ### 8.4 Activity
 
 - Agents and tasks stay as they are: `startedAt | null`, `endedAt | null`, status (`types/index.d.ts:45-75`).
+- An agent row gains `runs?: { start: number | null; end: number }[]` (0.7.1 §10.1): its closed earlier runs, oldest
+  first, 8 at most. A revive of an ended row pushes `{ start: startedAt, end: endedAt }` and starts the current run at
+  the resume time; a ninth run merges the two oldest. A row whose end is unknown pushes nothing and keeps its start; a
+  row whose start is unknown pushes no run, and its current run starts at the resume time.
 - New: `mainTurns`, the latest 6 main turns as `{start, end | null}`, written at main's `turn.start` and
   `turn.complete`.
 
@@ -994,6 +1052,16 @@ unknown tool goes to Shell.
 
 A new counter, plus one for each main `session.compact` (`hooks/register.tsx:1168-1181`). This is best effort:
 another plugin can keep the event from the mod, as cc-plugin-sec-default does.
+
+**A compaction the mod did not see** (0.7.1 §8). The engine drops `context.tokens` after a compaction, until the next
+response. A usage reading with no tokens while `usageAtom` holds some is a compaction the mod did not see. Every
+reading checks it: `refreshUsage` (the 60 s tick, the pane's start, a model change, a seen compaction's refresh),
+`session.measure`, and main `turn.start`'s light `$.session.usage()` read. The decision and the clearing of the held
+tokens are one `update` of `usageAtom`, so of two readings that race, only the one whose update cleared them counts:
+the tick, and a Log line `compacted` with no token numbers (who `main`, kind `info`). At `turn.start` the line is at
+the turn's time, under the prompt's, and a refresh follows. A seen `session.compact` clears the held tokens itself
+before its refresh; `/clear` and a resume clear them first in their reset, so a reading that lands during the reset
+counts nothing.
 
 ### 8.6 Restore after a reopen
 
@@ -1018,7 +1086,8 @@ New atoms are declared in `types/index.d.ts` (`PluginState`), as today.
 - The band is one `Svg`, A2 geometry: 5 rows with two rows per side, 4 rows with one (§4).
 - The ribbon is one `Svg` for the bar, plus Text for the elapsed time, the legend and the details table (§5).
 - Activity is one row per lane, `[Text label][Svg bar][Text value]`, plus an axis `Svg` (§6).
-- At most 12 Svgs: the band, the ribbon, the legend swatch, 8 lanes and the axis (R16 c, over T2's 11).
+- At most 19 Svgs: the band, the ribbon, up to 8 legend swatches, 8 lanes and the axis (R16 c, over T2's 11; 0.7.1
+  §17.9). The fallback legend draws one swatch.
 
 ### 9.2 Image mode
 
@@ -1040,7 +1109,7 @@ SMIL only, no new timers, phase-locked as §7 says (as lot-map's `draw.ts:66-70`
 
 The plugin's first `userConfig` option: `motion: full | reduced`, default `full`. It is read from
 `register(on, options)`, as lot-map does (lot-map `plugin.json:132-141`, `setup.ts:95`). `reduced` turns off the
-pulses and the glows' breathing and makes the caps static.
+pulses, the ripples, the beat rings and the core's breath and makes the caps static (§7, 0.7.1 §3.5).
 
 ### 9.6 Terminal
 
@@ -1052,12 +1121,13 @@ pulses and the glows' breathing and makes the caps static.
 
 ### 9.7 Budgets
 
-- The draws are pure string builders with fixed element counts: the band ≤ 82 (core 5 + ≤ 5 ticks; 8 stations ×
-  (≤ 7 parts + 1 pulse group); ≤ 8 lines of trunks, forks and rails; `BAND_PARTS_MAX`), the ribbon ≤ ~131 at the
-  widest, the lanes ≤ 9 × 6. A station's 7 parts are its glow, circle, icon, `×N` badge, failure disc, label and count;
-  the icon, the badge (its circle and text), the disc (its circle and text) and a pulse group (its three dots) count
-  one each, and the inline label and count of two rows a side are one `text`, so that layout has 6. The `<style>` and
-  the animation elements are not counted.
+- The draws are pure string builders with fixed element counts: the band ≤ 99 (core 6, the halo included, + ≤ 5
+  ticks; 8 stations × (≤ 8 parts + 1 pulse group + 1 ripple); ≤ 8 lines of trunks, forks and rails; `BAND_PARTS_MAX`,
+  0.7.1 §3.6), the ribbon ≤ ~131 at the widest, the lanes ≤ 9 × 6. A station's 8 parts are its halo, beat ring,
+  circle, icon, `×N` badge, failure disc, label and count; the icon, the badge (its circle and text), the disc (its
+  circle and text) and a pulse group (its comet and gradient) count one each, the ripple one, and the inline label
+  and count of two rows a side are one `text`, so that layout has 7. The `<style>` and the animation elements are not
+  counted.
 - A redraw at the caps takes ≤ 2 ms in tests.
 - Every Svg is ≤ 4096 px wide (`SVG_MAX_PX`, `hooks/view.tsx:88`) and its source is < 131072 characters.
 
@@ -1075,6 +1145,8 @@ pulses and the glows' breathing and makes the caps static.
   - Order: main first, then the running lanes with the older start first, then the ended lanes with the newer end
     first. At most 8 lanes, then `+N more`.
   - The axis runs from the oldest shown non-main start to now, and spans at least 2 minutes.
+  - A resumed subagent's lane draws a bar for each closed run, with the gaps between, then its current run; it sorts
+    by its first run's start while it runs and by its last span's end once ended (0.7.1 §10).
   - With no subagents and no tasks, the block is hidden.
   - The type tag follows R15.
 - **Edge cases:**
@@ -1085,7 +1157,14 @@ pulses and the glows' breathing and makes the caps static.
   - lanes past 8 go into `+N more`;
   - steps past N merge;
   - a mod reload in the middle of a call clamps and resets the in-flight counts;
-  - when another plugin keeps `session.compact` from the mod, no tick is drawn. This is documented.
+  - when another plugin keeps `session.compact` from the mod, the next usage reading that finds the tokens gone counts
+    it: the tick and a bare `compacted` line (§8.5). Still missed, a limit: a compaction whose next response lands
+    before any reading, in practice an auto-compaction inside a running turn; the code carries it as a `shortcut:`.
+    Two races are accepted: a reading taken before a seen compaction and written after its clear puts the old tokens
+    back, so a later reading can count that compaction again; and a tick's reading taken after the engine drops the
+    tokens can land before `session.compact`'s own clear, so the two count it twice. This is documented;
+  - a call the engine blocked (its error starts `Blocked:`) is a denial, not a failure (§8.2). The rule reads the
+    engine's text: a heuristic, carried as a `shortcut:` until the engine gives a field for it.
 
 ## 11. Engine facts, risks and the first task (T4)
 
@@ -1225,7 +1304,8 @@ columns, Today | A2 in the stretched layout, each with its terminal pane under i
 R17 leaves these for the live check:
 
 1. **Weak light-theme hue pairs.** Skills/MCP (olive-gold against olive-green) and Model/Skills in the light theme.
-   The fallback on record is a greener MCP (`#3f8a3a`), at the cost of moving closer to the success green.
+   The fallback on record is a greener MCP (`#3f8a3a`), at the cost of moving closer to the success green. Closed by
+   0.7.1 §5: Skills moved to a light tier in the dark set and a deep one in the light set.
 2. **Estimated label widths.** The label rule (§4.2) uses per-character estimates. The live pane may need them tuned;
    the 2 px slot margin is the buffer.
 3. **Fine-tuning the 464 px breakpoint.** One row per side starts at `W ≥ 464` (the one-row pitch reaching 48).
@@ -1234,4 +1314,4 @@ R17 leaves these for the live check:
 Not covered by R16 or R17:
 
 4. **You/Agents.** r3 also names You/Agents, in both themes, among the weakest pairs; R17 lists only the light-theme
-   pairs above.
+   pairs above. Closed by 0.7.1 §5: You moved to a lighter tier in the dark set and a deeper one in the light set.
