@@ -3,7 +3,7 @@ import { BAND_PARTS_MAX, bandLayout, bandParts, bandTerminal, drawBand } from '.
 import type { BandInput, Rect } from './band'
 import { STATION_HUES, STATION_ORDER } from './stations'
 import type { StationId, StationTally } from './stations'
-import { loopBegin, SVG_MAX_PX, SVG_SOURCE_MAX } from './svg'
+import { beginAt, loopBegin, SVG_MAX_PX, SVG_SOURCE_MAX } from './svg'
 
 const NOW = 1_000_000_000
 const FULL = { motion: 'full' as const }
@@ -141,16 +141,76 @@ test('a pulse is drawn while its age is below its lifetime, with begin −age', 
   expect(modelAt(1050)).not.toContain('data-part="pulse"')
   expect(modelAt(5000)).not.toContain('data-part="pulse"')
   expect(drawBand(EXAMPLE, 328, FULL).svg).not.toContain('<animateMotion')
-  expect(shell).toContain(`dur="2.4s" begin="${loopBegin(NOW, 2400)}"`)
+  expect(shell).toContain(`dur="1.4s" begin="${loopBegin(NOW, 1400)}"`)
   expect(shell).not.toContain('begin="0s"')
 })
 
-test('a pulse past its travel draws its group with no dot', () => {
-  // Shell at 328 travels 600 ms; at 700 ms it is still inside its lifetime of 1050 ms.
-  const svg = drawBand(withStation(EXAMPLE, 'shell', tally(4, 1, NOW - 700)), 328, FULL).svg
-  const group = /<g data-part="pulse"[^>]*>(.*?)<\/g>/.exec(svg)
-  expect(group).not.toBeNull()
-  expect(group?.[1] ?? '<circle').not.toContain('<circle')
+// Shell at 328 travels 600 ms from the ring's edge to its circle at (93, 68.5); its dark hue is #a48cf0.
+const SHELL_AT = (age: number): string => drawBand(withStation(EXAMPLE, 'shell', tally(4, 1, NOW - age)), 328, FULL).svg
+
+test('a due pulse is one comet with a tail', () => {
+  expect(SHELL_AT(100)).toContain(
+    '<g data-part="pulse" fill="#a48cf0"><linearGradient id="pulse-shell" x1="0" y1="0" x2="1" y2="0">' +
+      '<stop offset="0" stop-color="#a48cf0" stop-opacity="0"/><stop offset="1" stop-color="#a48cf0"' +
+      ' stop-opacity="0.7"/></linearGradient><g opacity="0"><set attributeName="opacity" to="1" begin="-0.100s"/>' +
+      '<animateMotion path="M138 47.5H134Q128 47.5 128 53.5V62.5Q128 68.5 122 68.5H104" begin="-0.100s" dur="0.6s"' +
+      ' keyPoints="0;1" keyTimes="0;1" calcMode="spline" keySplines=".2 .6 .35 1" rotate="auto" fill="freeze"/>' +
+      `<animate attributeName="opacity" from="1" to="0" dur="0.15s" begin="${beginAt(100 - 600)}" fill="freeze"/>` +
+      '<path d="M0 -2.8L-14 0L0 2.8Z" fill="url(#pulse-shell)"/><circle r="3.5"/></g></g>',
+  )
+  // One gradient per station, each id unique in the Svg.
+  const ids = [...drawBand(CAPS, 328, FULL).svg.matchAll(/ id="(pulse-[^"]*)"/g)].map(([, id]) => id)
+  expect(ids).toEqual(STATION_ORDER.map((id) => `pulse-${id}`))
+})
+
+test('a pulse past its travel draws its group empty', () => {
+  // At 700 ms Shell is past its travel and still inside its lifetime of 1050 ms.
+  const svg = SHELL_AT(700)
+  expect(svg).toContain('<g data-part="pulse" fill="#a48cf0"></g>')
+  expect(svg).not.toContain('r="3.5"')
+  expect(svg).not.toContain('linearGradient')
+})
+
+test('a ripple spreads at the arrival', () => {
+  const ripple = '<circle data-part="ripple" cx="93" cy="68.5" r="11" fill="none" stroke="#a48cf0" stroke-width="1.5"' +
+    ' opacity="0"><animate attributeName="r" values="11;19" dur="0.45s" begin="-0.100s" fill="freeze"/>' +
+    '<animate attributeName="opacity" values="0.7;0" dur="0.45s" begin="-0.100s" fill="freeze"/></circle>'
+  const svg = SHELL_AT(700)
+  expect(svg).toContain(ripple)
+  // In the pulses layer, under every station.
+  expect(svg.indexOf(ripple)).toBeLessThan(svg.indexOf('data-part="station"'))
+  expect(SHELL_AT(1049)).toContain('data-part="ripple"')
+  expect(SHELL_AT(1050)).not.toContain('data-part="ripple"')
+})
+
+test('the arrival flash keeps 0.7.0\'s values and timing', () => {
+  const circle = '<circle cx="93" cy="68.5" r="11" fill="#2e2d2b" stroke="#e5484d" stroke-width="1.5"'
+  expect(SHELL_AT(700)).toContain(
+    `${circle}><animate attributeName="stroke-width" values="1.25;2.25;1.25" keyTimes="0;0.5;1" calcMode="spline"` +
+      ' keySplines=".2 .6 .35 1;.2 .6 .35 1" dur="0.3s" begin="-0.100s"/></circle>',
+  )
+  expect(SHELL_AT(1050)).toContain(`${circle}/>`)
+  expect(SHELL_AT(1050)).not.toContain('values="1.25;2.25;1.25"')
+})
+
+test('a running station has a steady halo and a beat ring, and no glow', () => {
+  const svg = drawBand(EXAMPLE, 328, FULL).svg
+  const beat = (hue: string, cy: number): string =>
+    `<circle cx="93" cy="${cy}" r="14" fill="${hue}" opacity="0.16"/><circle cx="93" cy="${cy}" r="11" fill="none"` +
+    ` stroke="${hue}" stroke-width="1.5" opacity="0"><animate attributeName="r" values="11;21" dur="1.4s"` +
+    ` begin="${loopBegin(NOW, 1400)}" repeatCount="indefinite"/><animate attributeName="opacity" values="0.9;0"` +
+    ` dur="1.4s" begin="${loopBegin(NOW, 1400)}" repeatCount="indefinite"/></circle>`
+  // The station groups in station order: Model, Files, Shell, …
+  const [model = '', files = '', shell = ''] = svg.split('<g data-part="station">').slice(1)
+  expect(model.startsWith(`${beat('#e1ac6e', 25.5)}<circle cx="93" cy="25.5" r="11" fill="#2e2d2b"`)).toBe(true)
+  expect(files).not.toContain('r="14"')
+  expect(files).not.toContain('values="11;21"')
+  // Shell runs and failed: both, in its hue, and the circle's stroke stays the failure's.
+  expect(shell.startsWith(`${beat('#a48cf0', 68.5)}<circle cx="93" cy="68.5" r="11" fill="#2e2d2b"` +
+    ' stroke="#e5484d"')).toBe(true)
+  for (const input of [EXAMPLE, CAPS, EMPTY, REST, NO_PULSE]) {
+    for (const w of WIDTHS) expect(drawBand(input, w, FULL).svg).not.toContain('0.12;0.24;0.12')
+  }
 })
 
 test('every animateMotion drawn still runs at the image\'s time 0', () => {
@@ -172,8 +232,16 @@ test('motion reduced draws no animation', () => {
   const due = withStation(EXAMPLE, 'model', tally(31, 0, NOW - 10))
   const { svg } = drawBand(due, 328, { motion: 'reduced' })
   expect(svg).not.toContain('<animate')
+  expect(svg).not.toContain('<animateMotion')
   expect(svg).not.toContain('<set')
-  expect(svg).toContain('<circle cx="93" cy="25.5" r="14" fill="#e1ac6e" opacity="0.18"/>')
+  expect(svg).toContain('<circle cx="93" cy="25.5" r="14" fill="#e1ac6e" opacity="0.16"/>')
+  expect(svg).not.toContain('values="11;21"')
+  expect(svg).not.toContain('data-part="ripple"')
+  expect(svg).not.toContain('r="3.5"')
+  // The core's steady halo: busy, as Model runs.
+  expect(svg).toContain(
+    '<circle cx="164" cy="47.5" r="27.5" fill="none" stroke="#2f7de1" stroke-width="3" opacity="0.16"/>',
+  )
 })
 
 test('the parts are bounded for every input and the source is under the cap', () => {
@@ -186,10 +254,10 @@ test('the parts are bounded for every input and the source is under the cap', ()
       expect(band.heightPx >= 1 && band.heightPx <= SVG_MAX_PX).toBe(true)
     }
   }
-  // CAPS at 268, two rows with no labels: core 6, ticks 5, 8 lines, and per station a glow, a circle, an icon, a
-  // badge, a disc, a count and a pulse.
-  expect(bandParts(drawBand(CAPS, 268, FULL).svg)).toBe(75)
-  expect(BAND_PARTS_MAX).toBe(83)
+  // CAPS at 268, two rows with no labels: core 6, ticks 5, 8 lines, and per station a halo, a beat ring, a circle, an
+  // icon, a badge, a disc, a count, a pulse group and a ripple.
+  expect(bandParts(drawBand(CAPS, 268, FULL).svg)).toBe(91)
+  expect(BAND_PARTS_MAX).toBe(99)
 })
 
 // The core group holds no nested `<g>`.

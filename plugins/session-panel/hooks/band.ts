@@ -28,7 +28,7 @@ export type BandLayout = {
   pitch: number; textPx: 10 | 9 | null; isStacked: boolean; core: Rect; stations: BandStation[]
 }
 
-export const BAND_PARTS_MAX = 83 // core 6 (the halo added) + ticks 5 + 8 stations × (7 parts + 1 pulse group) + 8 lines
+export const BAND_PARTS_MAX = 99 // core 6 + ticks 5 + 8 stations × (8 parts + 1 pulse group + 1 ripple) + 8 lines
 
 const SIDES = [[LEFT_STATIONS, -1], [RIGHT_STATIONS, 1]] as const
 const ROWS_Y = [25.5, 68.5] as const // the two station rows of the two-row band
@@ -40,11 +40,10 @@ const EASE = '.45 0 .55 1'
 const HALO_REST_MS = 4800 // the core's halo breathes this slowly at rest
 const HALO_BUSY_MS = 1600 // and this fast while main's turn or any station runs
 const EASE_OUT = '.2 .6 .35 1'
-const GLOW_MS = 2400
 const FADE_MS = 150
 const FLASH_MS = 300
-// The three dots of a pulse: r, opacity and how far behind the lead it rides.
-const DOTS = [[1.75, 1, 0], [1.25, 0.6, 40], [1, 0.35, 80]] as const
+const RIPPLE_MS = 450 // the arrival ripple; a pulse's parts are drawn while age < dur + RIPPLE_MS
+const BEAT_MS = 1400 // a running station's beat ring
 const TABULAR = ' style="font-variant-numeric:tabular-nums"'
 const SKIPPED_TAGS = new Set(['animate', 'animateMotion', 'set', 'title', 'style', 'tspan'])
 const SHORT_LABELS: Record<StationId, string> = {
@@ -220,17 +219,29 @@ function pulseRoute(l: BandLayout, s: BandStation): { path: string; durMs: numbe
   return { path, durMs: Math.round(dur * 100) * 10 }
 }
 
-// Three dots ride the path, the trailing two 40 and 80 ms behind; each shows at its start and fades on arrival.
-function pulseSvg(path: string, durMs: number, age: number, hue: string): string {
-  // A dot whose travel is over is left out: an image drops a motion that ended before its time 0, freeze and all,
-  // and the dot would sit at the origin.
-  const dots = DOTS.filter(([, , lag]) => age - lag < durMs).map(([r, opacity, lag]) =>
-    `<circle r="${r}" opacity="0"><set attributeName="opacity" to="${opacity}" begin="${beginAt(age - lag)}"/>` +
-    `<animateMotion path="${path}" begin="${beginAt(age - lag)}" dur="${durMs / 1000}s" keyPoints="0;1"` +
-    ` keyTimes="0;1" calcMode="spline" keySplines="${EASE_OUT}" fill="freeze"/>` +
-    `<animate attributeName="opacity" from="${opacity}" to="0" dur="${FADE_MS / 1000}s"` +
-    ` begin="${beginAt(age - lag - durMs)}" fill="freeze"/></circle>`)
-  return `<g data-part="pulse" fill="${hue}">${dots.join('')}</g>`
+// One comet rides the path (§3.1): a dot with a tail that fades to its tip, turned along the path; it shows at its
+// start and fades on arrival.
+function pulseSvg(id: StationId, path: string, durMs: number, age: number, hue: string): string {
+  // Past its travel the comet is left out: an image drops a motion that ended before its time 0, freeze and all, and
+  // the `<set>` (no end) would show the comet at the band's origin.
+  const comet = age >= durMs
+    ? ''
+    : `<linearGradient id="pulse-${id}" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="${hue}"` +
+      ` stop-opacity="0"/><stop offset="1" stop-color="${hue}" stop-opacity="0.7"/></linearGradient>` +
+      `<g opacity="0"><set attributeName="opacity" to="1" begin="${beginAt(age)}"/>` +
+      `<animateMotion path="${path}" begin="${beginAt(age)}" dur="${durMs / 1000}s" keyPoints="0;1" keyTimes="0;1"` +
+      ` calcMode="spline" keySplines="${EASE_OUT}" rotate="auto" fill="freeze"/>` +
+      `<animate attributeName="opacity" from="1" to="0" dur="${FADE_MS / 1000}s" begin="${beginAt(age - durMs)}"` +
+      ` fill="freeze"/><path d="M0 -2.8L-14 0L0 2.8Z" fill="url(#pulse-${id})"/><circle r="3.5"/></g>`
+  return `<g data-part="pulse" fill="${hue}">${comet}</g>`
+}
+
+// The arrival ripple (§3.2), linear; its static and frozen opacity 0 is the resting state.
+function rippleSvg(s: BandStation, durMs: number, age: number, hue: string): string {
+  const timing = `dur="${RIPPLE_MS / 1000}s" begin="${beginAt(age - durMs)}" fill="freeze"`
+  return `<circle data-part="ripple" cx="${num(s.cx)}" cy="${s.cy}" r="11" fill="none" stroke="${hue}"` +
+    ` stroke-width="1.5" opacity="0"><animate attributeName="r" values="11;19" ${timing}/>` +
+    `<animate attributeName="opacity" values="0.7;0" ${timing}/></circle>`
 }
 
 function stationSvg(input: BandInput, l: BandLayout, s: BandStation, look: Look, flash: string): string {
@@ -240,13 +251,16 @@ function stationSvg(input: BandInput, l: BandLayout, s: BandStation, look: Look,
   const running = input.running[id]
   const x = num(cx)
   let out = ''
+  // §3.4: a steady halo and, under full motion, a spreading beat ring. Both lie under the circle, whose `raised` fill
+  // is opaque, so only their outside shows.
   if (running > 0) {
-    const glow = `<circle cx="${x}" cy="${cy}" r="14" fill="${hue}" opacity="0.18"`
-    out += look.motion === 'reduced'
-      ? `${glow}/>`
-      : `${glow}><animate attributeName="opacity" values="0.12;0.24;0.12" keyTimes="0;0.5;1" calcMode="spline"` +
-        ` keySplines="${EASE};${EASE}" dur="${GLOW_MS / 1000}s" begin="${loopBegin(input.nowMs, GLOW_MS)}"` +
-        ' repeatCount="indefinite"/></circle>'
+    out += `<circle cx="${x}" cy="${cy}" r="14" fill="${hue}" opacity="0.16"/>`
+    if (look.motion === 'full') {
+      const timing = `dur="${BEAT_MS / 1000}s" begin="${loopBegin(input.nowMs, BEAT_MS)}" repeatCount="indefinite"`
+      out += `<circle cx="${x}" cy="${cy}" r="11" fill="none" stroke="${hue}" stroke-width="1.5" opacity="0">` +
+        `<animate attributeName="r" values="11;21" ${timing}/>` +
+        `<animate attributeName="opacity" values="0.9;0" ${timing}/></circle>`
+    }
   }
   const stroke = failed > 0 ? SURFACE.fail.dark : running > 0 ? hue : SURFACE.line.dark
   out += `<circle cx="${x}" cy="${cy}" r="11" fill="${SURFACE.raised.dark}" stroke="${stroke}"` +
@@ -314,11 +328,13 @@ export function drawBand(input: BandInput, bodyPx: number, look: Look):
     const { path, durMs } = pulseRoute(l, s)
     const at = input.stations[s.id].lastCallAt
     const age = at === null ? Infinity : input.nowMs - at
-    // A pulse lives through its travel, its fade and the flash (R16 g); `reduced` draws none.
-    const isDue = look.motion === 'full' && age < durMs + FADE_MS + FLASH_MS
+    // A pulse lives through its travel and the ripple, which outlasts the fade and the flash (§3.3); `reduced` draws
+    // none.
+    const isDue = look.motion === 'full' && age < durMs + RIPPLE_MS
     let flash = ''
     if (isDue) {
-      pulses += pulseSvg(path, durMs, age, STATION_HUES[s.id].dark)
+      const hue = STATION_HUES[s.id].dark
+      pulses += pulseSvg(s.id, path, durMs, age, hue) + rippleSvg(s, durMs, age, hue)
       flash = '<animate attributeName="stroke-width" values="1.25;2.25;1.25" keyTimes="0;0.5;1" calcMode="spline"' +
         ` keySplines="${EASE_OUT};${EASE_OUT}" dur="${FLASH_MS / 1000}s" begin="${beginAt(age - durMs)}"/>`
     }
@@ -328,7 +344,8 @@ export function drawBand(input: BandInput, bodyPx: number, look: Look):
     [...Object.values(SURFACE), ...Object.values(STATION_HUES)].map((c) => [c.dark, c.light] as const),
   )
   const w = num(l.widthPx)
-  // Z-order (§4.1): core, trunk/fork/rails, pulses, then each station's glow, circle, icon, badge and disc, text.
+  // Z-order (§4.1): core, trunk/fork/rails, pulses and ripples, then each station's halo, beat ring, circle, icon,
+  // badge, disc, text.
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${l.heightPx}"` +
     ` viewBox="0 0 ${w} ${l.heightPx}">${style}${coreSvg(input, l.xc, l.cy0, look)}${railsSvg(l)}${pulses}` +
     `${stations}</svg>`
