@@ -1,8 +1,9 @@
 import { test, expect } from 'claude-code/testing'
 import {
-  drawRibbon, legendItems, ribbonCeilingMs, ribbonDetail, ribbonFromAcc, ribbonSegments, ribbonTerminal, withLive,
+  drawRibbon, legendRows, ribbonCeilingMs, ribbonDetail, ribbonFromAcc, ribbonSegments, ribbonTerminal, stationTimes,
+  withLive,
 } from './ribbon'
-import type { RibbonInput, RibbonPart } from './ribbon'
+import type { LegendItem, RibbonInput, RibbonPart } from './ribbon'
 import { STATION_HUES, zeroStationMs } from './stations'
 import type { InFlightCall, ToolStationId } from './stations'
 import { computeTurnStats } from './stats'
@@ -46,6 +47,18 @@ const STATS: TurnStats = {
   responseRate: null, tokensIn: 0, tokensOut: 0, cachePct: null, costUsd: null, ribbon: null,
 }
 const STATIONS: ToolStationId[] = ['files', 'shell', 'web']
+// The mockup's Turn 2: three steps of 4, 6 and 5 s, a Read between each two, finished at 16.5 s.
+const TURN2: RibbonInput = {
+  startedAt: T0, endMs: s(16.5), isLive: false,
+  steps: [[0, 4], [4.3, 10.3], [11.5, 16.5]].map(([a = 0, b = 0]) => ({ tStart: s(a), tEnd: s(b) })),
+  tools: [tool(4.0, 4.3, 'files', 'Read a'), tool(10.3, 11.5, 'files', 'Read b')],
+  earlier: zeroStationMs(), live: null,
+}
+const STATS2: TurnStats = { ...STATS, steps: 3, ttftMs: 900 }
+// A legend row as §17.10 writes it: `■ ` for a desktop item's swatch slot and gap, ` · ` between the items.
+const rowText = (row: LegendItem[], isDesktop: boolean): string =>
+  row.map((item) => `${item.station !== null && isDesktop ? '■ ' : ''}${joined(item.spans)}`).join(' · ')
+const legendText = (rows: LegendItem[][], isDesktop: boolean): string[] => rows.map((row) => rowText(row, isDesktop))
 
 // Steps of [model s, tool s] back to back (a 0 s tool is none), the tools' stations cycling; finished at the last end.
 function finishedTurn(spans: [number, number][]): RibbonInput {
@@ -243,23 +256,29 @@ test('a tool belongs to the step before it; parallel calls of one step are one p
 })
 
 test('the source holds no <title', () => {
-  expect(drawRibbon(EXAMPLE, 264, FULL, STATS).svg).not.toContain('<title')
+  expect(drawRibbon(EXAMPLE, 264, FULL, STATS, stationTimes(EXAMPLE)).svg).not.toContain('<title')
 })
 
 test('the alt', () => {
-  expect(drawRibbon(EXAMPLE, 264, FULL, STATS).alt).toBe('Turn 2m 14s: model 58%, tools 42%, 6 steps, 1 failed call')
+  const times = stationTimes(EXAMPLE)
+  expect(drawRibbon(EXAMPLE, 264, FULL, STATS, times).alt)
+    .toBe('Turn 2m 14s: model 58%, files <1%, shell 23%, agents 17%, mcp 2%, you <1%, 6 steps, 1 failed call')
   const passed: RibbonInput = { ...EXAMPLE, tools: EXAMPLE.tools.map((t) => ({ ...t, failed: false })) }
-  expect(drawRibbon(passed, 264, FULL, STATS).alt).toBe('Turn 2m 14s: model 58%, tools 42%, 6 steps')
-  expect(drawRibbon(passed, 264, FULL, { ...STATS, steps: 1 }).alt).toBe('Turn 2m 14s: model 58%, tools 42%, 1 step')
+  expect(drawRibbon(passed, 264, FULL, STATS, times).alt)
+    .toBe('Turn 2m 14s: model 58%, files <1%, shell 23%, agents 17%, mcp 2%, you <1%, 6 steps')
+  expect(drawRibbon(passed, 264, FULL, { ...STATS, steps: 1 }, times).alt).toMatch(/, you <1%, 1 step$/)
+  // §17.6: with no parts known, today's alt.
+  expect(drawRibbon(EXAMPLE, 264, FULL, STATS, null).alt)
+    .toBe('Turn 2m 14s: model 58%, tools 42%, 6 steps, 1 failed call')
 })
 
 test('the live end: the cap, the growth and the rest of the scale', () => {
-  const svg = drawRibbon(EXAMPLE, 264, FULL, STATS).svg
+  const svg = drawRibbon(EXAMPLE, 264, FULL, STATS, stationTimes(EXAMPLE)).svg
   expect(svg).toContain('<rect data-part="cap" x="196" y="1" width="2" height="14"')
   expect(svg).toMatch(/<rect data-part="live"[^>]*><animate attributeName="width" to="93" dur="46s" fill="freeze"\/>/)
   expect(svg).toContain('<line data-part="rest" x1="199" y1="8.5" x2="264" y2="8.5"')
   expect(svg).toContain('<rect data-part="tick" x="263" y="5" width="1" height="6"')
-  const done = drawRibbon(FINISHED, 264, FULL, STATS).svg
+  const done = drawRibbon(FINISHED, 264, FULL, STATS, stationTimes(FINISHED)).svg
   for (const part of ['data-part="cap"', 'data-part="live"', 'data-part="rest"', 'data-part="tick"', '<animate']) {
     expect(done).not.toContain(part)
   }
@@ -268,21 +287,21 @@ test('the live end: the cap, the growth and the rest of the scale', () => {
 })
 
 test('ruling D: the cap\'s loop is phase-locked to the clock', () => {
-  const svg = drawRibbon(EXAMPLE, 264, FULL, STATS).svg
+  const svg = drawRibbon(EXAMPLE, 264, FULL, STATS, stationTimes(EXAMPLE)).svg
   expect(svg).toContain(`attributeName="opacity" values="1;0.3;1"`)
   expect(svg).toContain(`begin="${loopBegin(EXAMPLE.endMs, 1600)}"`)
   expect(svg).not.toContain('begin="0s"')
 })
 
 test('reduced motion', () => {
-  const svg = drawRibbon(EXAMPLE, 264, REDUCED, STATS).svg
+  const svg = drawRibbon(EXAMPLE, 264, REDUCED, STATS, stationTimes(EXAMPLE)).svg
   expect(svg).not.toContain('<animate')
   expect(svg).toContain('data-part="cap"')
 })
 
 test('escaping: no tool label reaches the source', () => {
   const input: RibbonInput = { ...EXAMPLE, tools: [tool(9.0, 9.4, 'shell', 'Bash echo "<a>" & \'b\'\u{7}', true)] }
-  const { svg, alt } = drawRibbon(input, 264, FULL, STATS)
+  const { svg, alt } = drawRibbon(input, 264, FULL, STATS, stationTimes(input))
   expect(svg).not.toContain('echo')
   expect(/[\u{0}-\u{1F}\u{7F}-\u{9F}]/u.test(alt)).toBe(false)
 })
@@ -290,7 +309,7 @@ test('escaping: no tool label reaches the source', () => {
 test('the source stays under the cap', () => {
   const kinds = /data-part="(model|tool|earlier|live)"/g
   for (const input of [heavyTurn(60, 3), heavyTurn(1, 300)]) {
-    const svg = drawRibbon(input, 4096, FULL, STATS).svg
+    const svg = drawRibbon(input, 4096, FULL, STATS, stationTimes(input)).svg
     expect(svg.length).toBeLessThan(SVG_SOURCE_MAX)
     expect([...svg.matchAll(kinds)].length).toBeLessThanOrEqual(131)
     expect(ribbonSegments(input, 4096).length).toBeLessThanOrEqual(131)
@@ -316,7 +335,7 @@ test('ribbonFromAcc puts the live part where the turn is', () => {
   const input = ribbonFromAcc(old, {}, now)
   expect(input.tools).toEqual([])
   expect(input.earlier).toEqual(zeroStationMs())
-  expect(drawRibbon(input, 264, FULL, STATS).svg).toContain('data-part="live"')
+  expect(drawRibbon(input, 264, FULL, STATS, stationTimes(input)).svg).toContain('data-part="live"')
 })
 
 test('withLive adds the running part', () => {
@@ -328,20 +347,133 @@ test('withLive adds the running part', () => {
   expect([shell.modelMs, shell.toolMs, shell.steps, shell.elapsedMs]).toEqual([5000, 18_000, 1, 23_000])
 })
 
-test('the legend and its narrow rules', () => {
-  const terminal = legendItems(STATS, 44, 'terminal')
-  expect(joined(terminal)).toBe('Model 58% · Tools 42% · 6 steps · TTFT 1.2s')
-  expect(terminal[0]).toEqual({ text: 'Model', color: STATION_HUES.model.dark })
-  expect(joined(legendItems(STATS, 43, 'terminal'))).toBe('Model 58% · Tools 42% · 6 steps')
-  expect(joined(legendItems(STATS, 33, 'terminal'))).toBe('Model 58% · Tools 42%')
-  const desktop = (cols: number): string => joined(legendItems(STATS, cols, 'desktop'))
-  expect(legendItems(STATS, 36, 'desktop')[0]).toEqual({ text: 'Model', dimColor: true })
-  expect(desktop(36).replaceAll('\u{a0}', ' ')).toBe('Model 58% · Tools 42% · 6 steps · TTFT 1.2s')
-  expect(desktop(36)).not.toContain(' ')
-  expect(desktop(35)).not.toContain('TTFT')
-  expect(desktop(30)).toContain('steps')
-  expect(desktop(29)).not.toContain('steps')
-  expect(joined(legendItems({ ...STATS, ttftMs: null }, 44, 'terminal'))).toBe('Model 58% · Tools 42% · 6 steps')
+test('stationTimes sums the bar\'s parts by station', () => {
+  expect(stationTimes(EXAMPLE)).toEqual({
+    model: 78_000, files: 400, shell: 31_000, web: 0, agents: 22_300, mcp: 2100, skills: 0, you: 200,
+  })
+  const inMcp = stationTimes({ ...EXAMPLE, live: { station: 'mcp', fromMs: s(116) } })
+  expect([inMcp.model, inMcp.mcp]).toEqual([60_000, 20_100])
+})
+
+test('stationTimes counts earlier and the calls before the first step', () => {
+  const times = stationTimes({
+    ...FINISHED, earlier: { ...zeroStationMs(), model: 5000, files: 700 },
+    tools: [tool(-2, -1, 'web', 'WebFetch'), ...FINISHED.tools],
+  })
+  expect([times.model, times.files, times.web]).toEqual([65_000, 1100, 1000])
+})
+
+test('parallel calls give their group to the first-started call\'s station', () => {
+  const times = stationTimes({
+    ...FINISHED, steps: [{ tStart: s(0), tEnd: s(9) }, { tStart: s(9.4), tEnd: s(10) }], endMs: s(10),
+    tools: [tool(9.1, 9.3, 'files', 'Read a'), tool(9.0, 9.2, 'web', 'WebFetch')],
+  })
+  expect([times.web, times.files]).toEqual([300, 0])
+})
+
+test('sequential calls count the gap between them', () => {
+  const input: RibbonInput = {
+    startedAt: T0, endMs: s(5), isLive: false, steps: [{ tStart: s(0), tEnd: s(1) }, { tStart: s(4), tEnd: s(5) }],
+    tools: [tool(1, 2, 'shell', 'Bash a'), tool(3, 4, 'shell', 'Bash b')], earlier: zeroStationMs(), live: null,
+  }
+  const times = stationTimes(input)
+  // The group spans 1 → 4.
+  expect([times.shell, times.model]).toEqual([3000, 2000])
+  // `toolMs` is the union, 2 s; the shares are of the parts' sum, 5 s.
+  const stats = { ...STATS, modelMs: 2000, toolMs: 2000 }
+  expect(rowText(legendRows(stats, times, 80, 'terminal')[0] ?? [], false)).toStartWith('Model 40% · Shell 60%')
+})
+
+test('the items: Model first, then the stations with time in station order, then steps and TTFT', () => {
+  const rows = legendRows(STATS, stationTimes(EXAMPLE), 80, 'terminal')
+  expect(legendText(rows, false)).toEqual([
+    'Model 58% · Files <1% · Shell 23% · Agents 17% · MCP 2% · You <1% · 6 steps',
+    'TTFT 1.2s',
+  ])
+  const items = rows.flat()
+  expect(items[0]?.spans).toEqual([{ text: 'Model', color: STATION_HUES.model.dark }, { text: ' 58%' }])
+  const texts = items.map((item) => joined(item.spans))
+  expect(texts.some((text) => /^(Web|Skills) /.test(text))).toBe(false)
+  expect(texts.slice(1, 6).some((text) => text.endsWith(' 0%'))).toBe(false)
+  // A running turn at its first instant: every time 0.
+  const first: RibbonInput = {
+    startedAt: T0, endMs: T0, isLive: true, steps: [], tools: [], earlier: zeroStationMs(),
+    live: { station: 'model', fromMs: T0 },
+  }
+  expect(legendText(legendRows(STATS, stationTimes(first), 80, 'terminal'), false))
+    .toEqual(['Model 0% · 6 steps · TTFT 1.2s'])
+  expect(legendText(legendRows({ ...STATS, ttftMs: null }, stationTimes(EXAMPLE), 80, 'terminal'), false).join())
+    .not.toContain('TTFT')
+})
+
+test('the rows of §17.10', () => {
+  const times = stationTimes(EXAMPLE)
+  const at = (cols: number, surface: 'desktop' | 'terminal', stats = STATS, t = times): string[] =>
+    legendText(legendRows(stats, t, cols, surface), surface === 'desktop')
+  expect(at(33, 'desktop')).toEqual([
+    '■ Model 58% · ■ Files <1%', '■ Shell 23% · ■ Agents 17%', '■ MCP 2% · ■ You <1% · 6 steps', 'TTFT 1.2s',
+  ])
+  expect(at(41, 'desktop')).toEqual([
+    '■ Model 58% · ■ Files <1% · ■ Shell 23%', '■ Agents 17% · ■ MCP 2% · ■ You <1%', '6 steps · TTFT 1.2s',
+  ])
+  expect(at(56, 'desktop')).toEqual([
+    '■ Model 58% · ■ Files <1% · ■ Shell 23% · ■ Agents 17%', '■ MCP 2% · ■ You <1% · 6 steps · TTFT 1.2s',
+  ])
+  expect(at(44, 'terminal')).toEqual([
+    'Model 58% · Files <1% · Shell 23%', 'Agents 17% · MCP 2% · You <1% · 6 steps', 'TTFT 1.2s',
+  ])
+  expect(at(80, 'terminal')).toEqual([
+    'Model 58% · Files <1% · Shell 23% · Agents 17% · MCP 2% · You <1% · 6 steps', 'TTFT 1.2s',
+  ])
+  // The mockup's Turn 2.
+  const t2 = stationTimes(TURN2)
+  expect(at(33, 'desktop', STATS2, t2)).toEqual(['■ Model 91% · ■ Files 9%', '3 steps · TTFT 0.9s'])
+  expect(at(41, 'desktop', STATS2, t2)).toEqual(['■ Model 91% · ■ Files 9% · 3 steps', 'TTFT 0.9s'])
+  expect(at(56, 'desktop', STATS2, t2)).toEqual(['■ Model 91% · ■ Files 9% · 3 steps · TTFT 0.9s'])
+  for (const cols of [44, 80]) {
+    expect(at(cols, 'terminal', STATS2, t2)).toEqual(['Model 91% · Files 9% · 3 steps · TTFT 0.9s'])
+  }
+  // The desktop's label is dim beside its swatch; the terminal's is in the station's hue, with no swatch.
+  const files = (surface: 'desktop' | 'terminal'): LegendItem | undefined =>
+    legendRows(STATS, times, 80, surface).flat()[1]
+  expect(files('desktop')).toEqual({ station: 'files', spans: [{ text: 'Files', dimColor: true }, { text: ' <1%' }] })
+  expect(files('terminal')).toEqual({
+    station: null, spans: [{ text: 'Files', color: STATION_HUES.files.dark }, { text: ' <1%' }],
+  })
+})
+
+test('no terminal row is wider than cols, and no row is empty', () => {
+  const times = stationTimes(EXAMPLE)
+  for (const cols of [0, 8, 20, 39, 44, 80]) {
+    for (const surface of ['desktop', 'terminal'] as const) {
+      for (const row of legendRows(STATS, times, cols, surface)) {
+        expect(row.length, `${surface} ${cols}`).toBeGreaterThan(0)
+        if (surface === 'terminal') {
+          const used = row.reduce((n, item) => n + cellsOf(item.spans), 3 * (row.length - 1))
+          expect(used, `${cols}`).toBeLessThanOrEqual(Math.max(cols, 0))
+        }
+      }
+    }
+  }
+})
+
+test('an item wider than its row is cut with …', () => {
+  const times = stationTimes(EXAMPLE)
+  expect(rowText(legendRows(STATS, times, 8, 'terminal')[0] ?? [], false)).toBe('Model 5…')
+  expect(joined(legendRows(STATS, times, 8, 'desktop')[0]?.[0]?.spans ?? [])).toBe('Model…')
+})
+
+test('the fallback: Model and Tools by pctOf', () => {
+  expect(legendText(legendRows(STATS, null, 44, 'terminal'), false))
+    .toEqual(['Model 58% · Tools 42% · 6 steps · TTFT 1.2s'])
+  const [model, tools] = legendRows(STATS, null, 44, 'terminal').flat()
+  expect(model?.spans[0]).toEqual({ text: 'Model', color: STATION_HUES.model.dark })
+  expect(tools?.spans[0]).toEqual({ text: 'Tools', dimColor: true })
+  const desktop = legendRows(STATS, null, 80, 'desktop').flat()
+  expect(desktop.map((item) => item.station)).toEqual(['model', null, null, null])
+  expect(desktop[0]?.spans[0]).toEqual({ text: 'Model', dimColor: true })
+  expect(legendText(legendRows(STATS, null, 33, 'terminal'), false))
+    .toEqual(['Model 58% · Tools 42% · 6 steps', 'TTFT 1.2s'])
 })
 
 test('the terminal bar at 44 columns', () => {
@@ -381,12 +513,11 @@ test('no terminal row is longer than its width', () => {
     for (const input of [EXAMPLE, FINISHED]) {
       expect(cellsOf(ribbonTerminal(input, cols))).toBeLessThanOrEqual(Math.max(cols, 0))
     }
-    expect(cellsOf(legendItems(STATS, cols, 'terminal'))).toBeLessThanOrEqual(Math.max(cols, 0))
   }
   expect(barCells(ribbonTerminal(EXAMPLE, 120))).toBe(112)
   expect(barCells(ribbonTerminal(EXAMPLE, 200))).toBe(192)
   for (const barPx of [0, 5]) {
-    const svg = drawRibbon(EXAMPLE, barPx, FULL, STATS).svg
+    const svg = drawRibbon(EXAMPLE, barPx, FULL, STATS, stationTimes(EXAMPLE)).svg
     for (const [, size] of svg.matchAll(/<svg[^>]* (?:width|height)="([^"]+)"/g)) {
       expect(Number(size)).toBeGreaterThanOrEqual(1)
       expect(Number(size)).toBeLessThanOrEqual(4096)
@@ -406,6 +537,6 @@ test('a draw stays fast', () => {
     return best
   }
   const input = heavyTurn(60, 3)
-  expect(bestMs(() => drawRibbon(input, 3304, FULL, STATS))).toBeLessThanOrEqual(0.6)
+  expect(bestMs(() => drawRibbon(input, 3304, FULL, STATS, stationTimes(input)))).toBeLessThanOrEqual(0.6)
   expect(bestMs(() => ribbonTerminal(input, 200))).toBeLessThanOrEqual(0.6)
 })

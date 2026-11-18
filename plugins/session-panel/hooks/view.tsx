@@ -12,15 +12,17 @@ import type { BandInput } from './band'
 import type { Span } from './cells'
 import { drawAxis, drawLane, LANE_VALUE_CELLS, laneLabelCells, laneLabels, laneModel, lanesTerminal } from './lanes'
 import type { LaneLabel } from './lanes'
-import { drawRibbon, legendItems, ribbonFromAcc, ribbonFromTurn, ribbonTerminal, withLive } from './ribbon'
+import {
+  drawRibbon, LEGEND_SEP, legendRows, ribbonFromAcc, ribbonFromTurn, ribbonTerminal, stationTimes, withLive,
+} from './ribbon'
 import type { RibbonInput } from './ribbon'
 import {
   computeTurnStats, fmtClock, fmtCountdown, fmtDuration, fmtPct, fmtRate, fmtTokens, fmtTtft, fmtUsd, normTurn,
   splitCost, TYPE_MAX,
 } from './stats'
 import type { AgentRow, CostSplit, LogEntry, TurnStats } from './stats'
-import { runningOf, STATION_HUES, zeroStationMs } from './stations'
-import type { Motion } from './stations'
+import { runningOf, STATION_HUES, STATION_LABELS, STATION_ORDER, zeroStationMs } from './stations'
+import type { Motion, StationId, StationMs } from './stations'
 import { BAD, clampPct, meterColor, NEUTRAL, OK, pctColor, SVG_MAX_PX, svgPx, themeStyle } from './svg'
 import type { Look } from './svg'
 
@@ -108,7 +110,7 @@ const TEXT_MARK_CELLS = 1 // the mark of a row where there is no icon slot
 const RIBBON_ROOM_PX = 64 // §5.1: the ribbon's area is the body less this, the gap and the elapsed time
 const RIBBON_PX = 16 // the ribbon's height
 const ELAPSED_CELLS = 7 // `2m 14s`, right-aligned
-const SWATCH_PX = 8 // the legend's Model swatch
+const SWATCH_PX = 8 // the legend's swatch
 
 // The dot of an MCP chip. The no-break space keeps the gap: a plain space at the end of a flex item may be dropped.
 const DOT = '●\u00a0'
@@ -166,11 +168,13 @@ const ICON: Record<HeaderId | 'branch' | 'changes', string> = {
   ),
 }
 
-// The legend's swatch: a rounded square in the Model hue of the ribbon (spec 0.7.0 §5.4).
-const SWATCH_SVG =
+// The legend's swatches (spec 0.7.1 §17.3): one fixed source per station, a rounded square in its hue.
+const SWATCHES = Object.fromEntries(STATION_ORDER.map(id => [
+  id,
   `<svg xmlns="http://www.w3.org/2000/svg" width="${SWATCH_PX}" height="${SWATCH_PX}"` +
-  ` viewBox="0 0 ${SWATCH_PX} ${SWATCH_PX}">${themeStyle([[STATION_HUES.model.dark, STATION_HUES.model.light]])}` +
-  `<rect width="${SWATCH_PX}" height="${SWATCH_PX}" rx="1.5" fill="${STATION_HUES.model.dark}"/></svg>`
+    ` viewBox="0 0 ${SWATCH_PX} ${SWATCH_PX}">${themeStyle([[STATION_HUES[id].dark, STATION_HUES[id].light]])}` +
+    `<rect width="${SWATCH_PX}" height="${SWATCH_PX}" rx="1.5" fill="${STATION_HUES[id].dark}"/></svg>`,
+])) as Record<StationId, string>
 
 // Meter bar after Desktop Statusline (George Liu, centminmod, MIT): a rounded track with a rounded fill on it.
 export function meterSvg(pct: number, widthPx: number): string {
@@ -569,22 +573,29 @@ function usageSection(d: Draw): Block {
 type Line = [label: string, value: string | null, color?: string]
 
 // The turn the ribbon draws (spec 0.7.0 §5.7, §8.3): the running one, live, with its stats so far; else the last one;
-// else none. A lastTurn of 0.6.1 has no ribbon: its bar is empty.
-function turnShown(d: Draw): { input: RibbonInput; stats: TurnStats } | null {
+// else none. A lastTurn of 0.6.1 has no ribbon: its bar is empty, and its legend the fallback (spec 0.7.1 §17.6,
+// `times` null), reached only by a lastTurn of 0.6.1 kept over a hot reload.
+function turnShown(d: Draw): { input: RibbonInput; stats: TurnStats; times: StationMs | null } | null {
   const { turn, lastTurn, inFlight, now, usage } = d.data
   if (turn !== null) {
     const acc = normTurn(turn)
+    const input = ribbonFromAcc(acc, inFlight, now)
     return {
-      input: ribbonFromAcc(acc, inFlight, now),
+      input,
       stats: computeTurnStats(acc, now - turn.startedAt, undefined, usage.costUsd ?? null),
+      times: stationTimes(input),
     }
   }
   if (lastTurn === null) return null
-  const ribbon = lastTurn.ribbon ?? {
-    startedAt: 0, endedAt: lastTurn.elapsedMs, steps: [], tools: [], earlier: zeroStationMs(),
+  // A lastTurn of 0.6.1 has no `ribbon` field at all.
+  const ribbon = lastTurn.ribbon ?? null
+  if (ribbon === null) {
+    const empty = { startedAt: 0, endedAt: lastTurn.elapsedMs, steps: [], tools: [], earlier: zeroStationMs() }
+    return { input: ribbonFromTurn(empty), stats: lastTurn, times: null }
   }
+  const input = ribbonFromTurn(ribbon)
 
-  return { input: ribbonFromTurn(ribbon), stats: lastTurn }
+  return { input, stats: lastTurn, times: stationTimes(input) }
 }
 
 // Turn stats (spec 0.7.0 §5): the ribbon with the elapsed time, its legend, and the details Button that folds today's
@@ -595,18 +606,21 @@ function turnSection(d: Draw): Block {
   if (shownTurn === null) {
     return section(d, 'turn', 'Turn stats', '', [shrinkText(d, 'No completed turn yet', { dimColor: true })])
   }
-  const { input, stats } = shownTurn
+  const { input, stats, times } = shownTurn
   // The running part counts in the legend and the alt; the table is computeTurnStats' own.
   const shown = withLive(stats, input)
   const isOpen = !isFolded(d, 'turnDetails')
+  // Spec 0.7.1 §17.8: one body element per legend row, so the section's count of its rows is exact.
+  const legend = legendRows(shown, times, d.cols, Svg === undefined ? 'terminal' : 'desktop')
   const rows: RenderElement[] = []
   if (Svg === undefined) {
     rows.push(
-      spanLine(d, ribbonTerminal(input, d.cols, shown.elapsedMs)), spanLine(d, legendItems(shown, d.cols, 'terminal')),
+      spanLine(d, ribbonTerminal(input, d.cols, shown.elapsedMs)),
+      ...legend.map(row => spanLine(d, row.flatMap((item, i) => (i > 0 ? [LEGEND_SEP, ...item.spans] : item.spans)))),
     )
   } else {
     const barPx = svgPx(d.bodyPx - RIBBON_ROOM_PX)
-    const ribbon = drawRibbon(input, barPx, d.look, shown)
+    const ribbon = drawRibbon(input, barPx, d.look, shown, times)
     rows.push(
       <Box flexDirection="row" height={1} alignItems="center" columnGap={1}>
         <Box flexDirection="row" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
@@ -616,12 +630,25 @@ function turnSection(d: Draw): Block {
           <Text>{fmtDuration(shown.elapsedMs)}</Text>
         </Box>
       </Box>,
-      <Box flexDirection="row" alignItems="center" columnGap={1}>
-        <Box flexDirection="row" width={1} flexShrink={0} alignItems="center">
-          <Svg source={SWATCH_SVG} alt="Model" width={SWATCH_PX} height={SWATCH_PX} />
+      // The slot of 2 cells holds the swatch's cell and the gap after it (§17.3).
+      ...legend.map(row => (
+        <Box flexDirection="row" alignItems="center" overflow="hidden">
+          {row.flatMap((item, i) => [
+            ...(i > 0 ? [spanLine(d, [LEGEND_SEP])] : []),
+            ...(item.station === null ? [] : [
+              <Box flexDirection="row" width={2} flexShrink={0} alignItems="center">
+                <Svg
+                  source={SWATCHES[item.station]}
+                  alt={STATION_LABELS[item.station]}
+                  width={SWATCH_PX}
+                  height={SWATCH_PX}
+                />
+              </Box>,
+            ]),
+            spanLine(d, item.spans),
+          ])}
         </Box>
-        {spanLine(d, legendItems(shown, d.cols, 'desktop'))}
-      </Box>,
+      )),
     )
   }
   rows.push(

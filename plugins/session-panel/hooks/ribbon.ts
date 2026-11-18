@@ -1,10 +1,10 @@
 // The turn ribbon (spec §5): one bar per turn against a ceiling, a part per model call and per step's tool calls, the
-// older steps merged into one part per station, a live end that grows, the legend and the terminal's bar. Pure: no
-// `$`, no engine.
+// older steps merged into one part per station, a live end that grows, the legend by station (spec 0.7.1 §17) and the
+// terminal's bar. Pure: no `$`, no engine.
 
 import { fitRow, padStart, spansCells } from './cells'
 import type { Span } from './cells'
-import { STATION_HUES, STATION_ORDER } from './stations'
+import { STATION_HUES, STATION_LABELS, STATION_ORDER, zeroStationMs } from './stations'
 import type { InFlightCall, StationId, StationMs } from './stations'
 import { fmtDuration, fmtTtft, ribbonOf } from './stats'
 import type { RibbonTurn, ToolSegment, TurnAcc, TurnStats } from './stats'
@@ -16,6 +16,9 @@ export type RibbonInput = {
   steps: { tStart: number; tEnd: number }[]; tools: ToolSegment[]; earlier: StationMs
   live: { station: StationId; fromMs: number } | null // the running part, from the end of the last finished one
 }
+/** An item of the legend: its spans, and on the desktop the station whose swatch leads it (null: none). */
+export type LegendItem = { station: StationId | null; spans: Span[] }
+export const LEGEND_SEP: Span = { text: ' · ', dimColor: true }
 export type RibbonPart = {
   kind: 'model' | 'tool' | 'earlier' | 'live'; station: StationId; x: number; w: number; ms: number; failed: boolean
 }
@@ -142,6 +145,15 @@ function piecesOf(earlier: StationMs, rows: Row[], first: number, live: Piece | 
   return out
 }
 
+/** §17.2: each station's time as the bar draws it, every stored step in detail: piecesOf(head, rows, 0, live). */
+export function stationTimes(input: RibbonInput): StationMs {
+  const { head, rows, live } = rowsOf(input)
+  // The bar's colours, not ribbonSegments' merge, which follows the bar's width: the legend does not change with it.
+  const times = zeroStationMs()
+  for (const p of piecesOf(head, rows, 0, live)) times[p.station] += p.ms
+  return times
+}
+
 /**
  * `total` cells or px over `weights`, at least 1 each (callers keep `weights.length` ≤ `total`): each floored share, a
  * 0 raised to 1, the rest by the largest remainders (taken back from the largest when the raises overshoot).
@@ -244,8 +256,18 @@ const pctOf = (ms: number, stats: TurnStats): number => {
   return total > 0 ? Math.round((ms / total) * 100) : 0
 }
 
+// §17.1: a station's share of the station times' sum; above 0 but rounding to 0 is `<1%`.
+function shareText(ms: number, total: number): string {
+  const pct = total > 0 ? Math.round((ms / total) * 100) : 0
+  return ms > 0 && pct === 0 ? '<1%' : `${pct}%`
+}
+const stepsText = (steps: number): string => `${steps} step${steps === 1 ? '' : 's'}`
+// Model, then the tool stations with time, in station order.
+const shownStations = (times: StationMs): StationId[] => STATION_ORDER.filter((id) => id === 'model' || times[id] > 0)
+const sumOf = (times: StationMs): number => STATION_ORDER.reduce((n, id) => n + times[id], 0)
+
 export function drawRibbon(
-  input: RibbonInput, barPx: number, look: Look, stats: TurnStats,
+  input: RibbonInput, barPx: number, look: Look, stats: TurnStats, times: StationMs | null,
 ): { svg: string; alt: string } {
   const w = svgPx(barPx)
   const parts = ribbonSegments(input, w)
@@ -297,33 +319,61 @@ export function drawRibbon(
     `<g clip-path="url(#bar)">${bar}</g>${fails}${cap}</svg>`
   // shortcut: failures folded into `earlier` past 60 steps are not counted, carry a folded count if long turns need it
   const failed = input.tools.filter((t) => t.failed).length
-  const alt = `Turn ${fmtDuration(stats.elapsedMs)}: model ${pctOf(stats.modelMs, stats)}%, tools ` +
-    `${pctOf(stats.toolMs, stats)}%, ${stats.steps} step${stats.steps === 1 ? '' : 's'}` +
+  // §17.7: the stations as the legend lists them; with no parts known (§17.6), Model and Tools.
+  const total = times === null ? 0 : sumOf(times)
+  const shares = times === null
+    ? `model ${pctOf(stats.modelMs, stats)}%, tools ${pctOf(stats.toolMs, stats)}%`
+    : shownStations(times).map((id) => `${STATION_LABELS[id].toLowerCase()} ${shareText(times[id], total)}`).join(', ')
+  const alt = `Turn ${fmtDuration(stats.elapsedMs)}: ${shares}, ${stepsText(stats.steps)}` +
     `${failed > 0 ? `, ${failed} failed call${failed === 1 ? '' : 's'}` : ''}`
   return { svg: fitSvg(svg), alt: altText(alt) }
 }
 
-/** §5.4 and §5.8's legend: whole items by the narrow rules; the terminal's then as many as fit in `cols`. */
-export function legendItems(stats: TurnStats, cols: number, surface: 'desktop' | 'terminal'): Span[] {
+/**
+ * §17.1-§17.6: the legend as rows of whole items, ` · ` (LEGEND_SEP, the caller's) between the items of a row. Model,
+ * then each tool station with time, then the steps and TTFT; `times` null is the fallback (Model and Tools by pctOf).
+ */
+export function legendRows(
+  stats: TurnStats, times: StationMs | null, cols: number, surface: 'desktop' | 'terminal',
+): LegendItem[][] {
   const isDesktop = surface === 'desktop'
-  const items: Span[][] = [
-    [isDesktop ? { text: 'Model', dimColor: true } : { text: 'Model', color: STATION_HUES.model.dark },
-      { text: ` ${pctOf(stats.modelMs, stats)}%` }],
-    [{ text: 'Tools', dimColor: true }, { text: ` ${pctOf(stats.toolMs, stats)}%` }],
-  ]
-  if (cols >= (isDesktop ? 30 : 34)) items.push([{ text: `${stats.steps} step${stats.steps === 1 ? '' : 's'}` }])
-  if (stats.ttftMs !== null && cols >= (isDesktop ? 36 : 44)) {
-    items.push([{ text: 'TTFT', dimColor: true }, { text: ` ${fmtTtft(stats.ttftMs)}` }])
+  const label = (id: StationId): Span => (isDesktop
+    ? { text: STATION_LABELS[id], dimColor: true }
+    : { text: STATION_LABELS[id], color: STATION_HUES[id].dark })
+  const items: LegendItem[] = []
+  if (times === null) {
+    items.push(
+      { station: isDesktop ? 'model' : null, spans: [label('model'), { text: ` ${pctOf(stats.modelMs, stats)}%` }] },
+      { station: null, spans: [{ text: 'Tools', dimColor: true }, { text: ` ${pctOf(stats.toolMs, stats)}%` }] },
+    )
+  } else {
+    const total = sumOf(times)
+    for (const id of shownStations(times)) {
+      items.push({ station: isDesktop ? id : null, spans: [label(id), { text: ` ${shareText(times[id], total)}` }] })
+    }
   }
-  const sep: Span = { text: ' · ', dimColor: true }
-  let row = items.flatMap((item, i) => (i > 0 ? [sep, ...item] : item))
-  // The desktop's Text is proportional: its rules count the pane's cells, not the legend's.
-  while (!isDesktop && items.length > 0 && spansCells(row) > cols) {
-    items.pop()
-    row = items.flatMap((item, i) => (i > 0 ? [sep, ...item] : item))
+  items.push({ station: null, spans: [{ text: stepsText(stats.steps) }] })
+  if (stats.ttftMs !== null) {
+    items.push({ station: null, spans: [{ text: 'TTFT', dimColor: true }, { text: ` ${fmtTtft(stats.ttftMs)}` }] })
   }
-  // On the desktop a row of sibling Texts drops plain edge spaces, as V's LINES_SEP knows.
-  return isDesktop ? row.map((span) => ({ ...span, text: span.text.replaceAll(' ', '\u{a0}') })) : row
+  // §17.5: whole items in order, a row a time; an item wider than a row is cut to it, after its swatch's 2 cells.
+  const sep = spansCells([LEGEND_SEP])
+  const rows: LegendItem[][] = []
+  let used = 0
+  for (const item of items) {
+    const swatch = item.station === null ? 0 : 2
+    const spans = spansCells(item.spans) + swatch > cols ? fitRow(item.spans, cols - swatch) : item.spans
+    const w = spansCells(spans) + swatch
+    const row = rows[rows.length - 1]
+    if (row !== undefined && used + sep + w <= cols) {
+      row.push({ ...item, spans })
+      used += sep + w
+    } else {
+      rows.push([{ ...item, spans }])
+      used = w
+    }
+  }
+  return rows
 }
 
 /**
