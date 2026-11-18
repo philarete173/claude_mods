@@ -13,8 +13,8 @@ import type {
 import {
   addAgentCost, addStep, addTool, agentOutcome, attributeCost, computeTurnStats, endKind, engineLineText, finishTask,
   fmtDuration, fmtTokens, HANDBACK_TOOL, LOG_MAX, logText, MAIN_TURNS_MAX, normTurn, parseStatus, parseTaskNotification,
-  promptKind, pushLog, ribbonOf, shortType, SPAWN_TOOLS, stripFormat, sumNumstat, TASK_END, taskFromCall, taskLine,
-  toolLabel,
+  promptKind, pushLog, reviveRow, ribbonOf, shortType, SPAWN_TOOLS, stripFormat, sumNumstat, TASK_END, taskFromCall,
+  taskLine, toolLabel,
 } from './stats'
 import type {
   AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, TaskEndStatus, TaskRow, Usage,
@@ -698,17 +698,19 @@ async function reviveAgent($: EngineInterface, agentId: string): Promise<void> {
   const current = await read($, agentsAtom)
   const held = Object.hasOwn(current, agentId) ? current[agentId] : undefined
   if (held === undefined || held.status === 'running') return
+  // The resume time, read before the update: the new run starts at it, and the line is written at it.
+  const now = await $.clock.now()
   let revived = null as AgentRow | null // the cast stops TypeScript narrowing it to `null`: the update callback sets it
   await update($, agentsAtom, rows => {
     const row = Object.hasOwn(rows, agentId) ? rows[agentId] : undefined
     // The update runs again when its write misses, so it sets `revived` on every run.
-    revived = row !== undefined && row.status !== 'running' ? { ...row, status: 'running', endedAt: null } : null
+    revived = row !== undefined && row.status !== 'running' ? reviveRow(row, now) : null
 
     return revived === null ? rows : { ...rows, [agentId]: revived }
   })
   if (revived !== null) {
     const line = `resumed · ${revived.type}: ${revived.description}`
-    await addLog($, await $.clock.now(), 'main', logText(line), 'info')
+    await addLog($, now, 'main', logText(line), 'info')
   }
 }
 
@@ -1243,8 +1245,9 @@ export const register: Register = (on, options) => {
       // A run that resumes an agent raises agent.spawn again from engine 2.1.308 (SendMessage to a stopped subagent,
       // the engine waking a parked one, a teammate brought back from disk), with `resume` and the agent's own type
       // and description; 2.1.288 has no such field, hence the `in` check. A row the pane holds is that agent's: it
-      // keeps its start, its cost and its mark, and runs again, logged once (reviveAgent). With no row (one that ran
-      // before the rows a restore read), the row is made as for a spawn, its cost the cost since (`restored`).
+      // keeps its cost and its mark, its run moves to `runs`, and it runs again from the resume, logged once
+      // (reviveAgent). With no row (one that ran before the rows a restore read), the row is made as for a spawn, its
+      // cost the cost since (`restored`).
       const isResume = 'resume' in e && e.resume !== undefined
       if (isResume && Object.hasOwn(await read($, agentsAtom), agentId)) {
         await reviveAgent($, agentId)

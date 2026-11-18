@@ -4953,15 +4953,21 @@ test('a subagent that a message resumes runs again, with one line in the log, un
     const ended = await readState($)
     expect(ended.agents.a1).toMatchObject({ status: 'done', endedAt, costUsd: 0.5 })
 
-    // A message wakes it: its next request carries its id, and the row runs again. Nothing else of the row changes,
-    // the cost of the first run included (the request costs nothing here).
+    // A message wakes it: its next request carries its id, and the row runs again. Its first run moves to `runs` and
+    // the new run starts at the resume; nothing else of the row changes, the cost of the first run included (the
+    // request costs nothing here).
     w.stepCost = 0
     await clock.advance(5000)
     const resumedAt = clock.now()
     await runStep($, clock, { turnId: 't1', index: 1, agentId: 'a1' })
     await clock.advance(10)
     const resumed = await readState($)
-    expect(resumed.agents.a1).toEqual({ ...ended.agents.a1, status: 'running', endedAt: null })
+    const resumeStart = resumed.agents.a1?.startedAt ?? NaN
+    expect(resumeStart).toBeGreaterThanOrEqual(resumedAt)
+    expect(resumed.agents.a1).toEqual({
+      ...ended.agents.a1, status: 'running', startedAt: resumeStart, endedAt: null,
+      runs: [{ start: ended.agents.a1?.startedAt, end: endedAt }],
+    })
     expect(resumed.log).toHaveLength(ended.log.length + 1)
     expect(resumed.log[0]).toMatchObject({
       who: 'main', text: 'resumed · feature-dev:code-reviewer: Fix cart total qty', kind: 'info',
@@ -4981,7 +4987,7 @@ test('a subagent that a message resumes runs again, with one line in the log, un
     const endedAgainAt = clock.now()
     const again = await readState($)
     expect(endedAgainAt).toBeGreaterThan(endedAt)
-    expect(again.agents.a1).toEqual({ ...ended.agents.a1, endedAt: endedAgainAt })
+    expect(again.agents.a1).toEqual({ ...resumed.agents.a1, status: 'done', endedAt: endedAgainAt })
     expect(again.log[0]).toEqual({
       at: endedAgainAt, who: 'code-reviewer', text: 'done · $0.500 — and again', kind: 'ok', outcome: '✓ 3.0s',
     })
@@ -7219,7 +7225,7 @@ const SPAWNED = 'spawned · engineer: Fix cart total qty'
 const RESUMED = 'resumed · engineer: Fix cart total qty'
 const texts = async ($: Engine): Promise<string[]> => (await readState($)).log.map(entry => entry.text).reverse()
 
-test('a resumed subagent keeps its row, its start and its cost, and is logged resumed once', SLOW_READER,
+test('a resumed subagent keeps its row and its cost, its first run in runs, and is logged resumed once', SLOW_READER,
   async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })
     const w = bottom(on, clock)
@@ -7230,11 +7236,15 @@ test('a resumed subagent keeps its row, its start and its cost, and is logged re
     const first = (await readState($)).agents.a1
     expect(await chargedAfter($, clock, w, 'a1', 0.5)).toBe(0.5)
     await finish($, 'a1', 'ok')
+    const finishedAt = (await readState($)).agents.a1?.endedAt ?? NaN
     await clock.advance(1000)
 
     expect(await $.agent.spawn(resumeOf('a1'))).toMatchObject({ agentId: 'a1' })
     const row = (await readState($)).agents.a1
-    expect(row).toMatchObject({ status: 'running', endedAt: null, startedAt: first?.startedAt, costUsd: 0.5 })
+    expect(row).toMatchObject({
+      status: 'running', endedAt: null, costUsd: 0.5, runs: [{ start: first?.startedAt, end: finishedAt }],
+    })
+    expect(row?.startedAt).toBeGreaterThanOrEqual(finishedAt)
     expect('restored' in (row ?? {})).toBe(false)
     expect((await texts($)).filter(text => text === SPAWNED)).toHaveLength(1)
     expect((await texts($)).filter(text => text === RESUMED)).toHaveLength(1)

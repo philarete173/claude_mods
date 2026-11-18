@@ -79,10 +79,12 @@ export function laneLabelCells(cols: number): number {
 const spansOf = (start: number | null, end: number | null): Lane['spans'] =>
   (start === null && end === null ? [] : [{ start, end }])
 
-// §6.1's order: running lanes by the older start (unknown last), then ended ones by the newer end (unknown last).
+// §6.1's order: running lanes by the older start (unknown last), then ended ones by the newer end (unknown last). A
+// resumed subagent's spans are its runs and then its current one: the first run's start is its start, the last span's
+// end its latest end (§10.2).
 const orderKey = (lane: Lane): [number, number] => lane.status === 'running'
   ? [0, lane.spans[0]?.start ?? Infinity]
-  : [1, -(lane.spans[0]?.end ?? -Infinity)]
+  : [1, -(lane.spans.at(-1)?.end ?? -Infinity)]
 
 export function laneModel(input: {
   agents: Record<string, AgentRow>; tasks: Record<string, TaskRow>; mainTurns: MainTurn[]; mainUsd: number | null
@@ -93,7 +95,7 @@ export function laneModel(input: {
   const rows: Lane[] = [
     ...Object.entries(input.agents).map(([key, a]): Lane => ({
       key, kind: 'agent', label: a.description, tag: `@${shortType(a.type)}`, status: a.status, station: 'agents',
-      spans: spansOf(a.startedAt, a.status === 'running' ? null : a.endedAt),
+      spans: [...(a.runs ?? []), ...spansOf(a.startedAt, a.status === 'running' ? null : a.endedAt)],
       value: a.costUsd === null ? null : `${fmtUsd(a.costUsd)}${a.restored === true ? '+' : ''}`,
     })),
     ...Object.entries(input.tasks).map(([key, t]): Lane => ({

@@ -64,6 +64,8 @@ export type AgentRow = {
   // Marks a row rebuilt from the session's messages: its cost before the restore is not known, so a cost it has is
   // the cost since.
   restored?: true
+  // The agent's closed earlier runs, oldest first, AGENT_RUNS_MAX at most (reviveRow pushes none of unknown start).
+  runs?: { start: number | null; end: number }[]
 }
 // A turn of the main agent: when it started, and when it ended (null while it runs).
 export type MainTurn = { start: number; end: number | null }

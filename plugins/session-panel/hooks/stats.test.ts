@@ -2,6 +2,7 @@ import { test, expect } from 'claude-code/testing'
 import { zeroStationMs } from './stations'
 import {
   addAgentCost,
+  AGENT_RUNS_MAX,
   addStep,
   addTool,
   agentOutcome,
@@ -30,6 +31,7 @@ import {
   promptKind,
   pushLog,
   redact,
+  reviveRow,
   ribbonOf,
   shortType,
   shorten,
@@ -2290,4 +2292,41 @@ test('engineLineText is the tag\'s name, masked and cut as the Log draws it', ()
   expect(token).toHaveLength(40)
   expect(engineLineText(token)).not.toContain(token)
   expect(engineLineText(token)).toBe(shorten(redact(token), LOG_TEXT_MAX))
+})
+
+test('reviveRow moves the closed run to runs and starts a new one', () => {
+  const row: AgentRow = { ...agent('done', 1000), endedAt: 2000 }
+  expect(reviveRow(row, 5000)).toEqual({
+    ...row, status: 'running', startedAt: 5000, endedAt: null, runs: [{ start: 1000, end: 2000 }],
+  })
+  const twice: AgentRow = { ...row, runs: [{ start: 10, end: 20 }, { start: 30, end: 40 }] }
+  expect(reviveRow(twice, 5000).runs)
+    .toEqual([{ start: 10, end: 20 }, { start: 30, end: 40 }, { start: 1000, end: 2000 }])
+})
+
+test('the ninth run merges the two oldest', () => {
+  expect(AGENT_RUNS_MAX).toBe(8)
+  const runs = Array.from({ length: 8 }, (_, i) => ({ start: 10 * i, end: 10 * i + 5 }))
+  const revived = reviveRow({ ...agent('done', 100), endedAt: 105, runs }, 200)
+  expect(revived.runs).toHaveLength(8)
+  expect(revived.runs?.[0]).toEqual({ start: 0, end: 15 })
+  expect(revived.runs?.[1]).toEqual({ start: 20, end: 25 })
+  expect(revived.runs?.at(-1)).toEqual({ start: 100, end: 105 })
+})
+
+test('a row with no end pushes nothing and keeps its start', () => {
+  const row: AgentRow = { ...agent('ended', null), restored: true }
+  const revived = reviveRow(row, 5000)
+  expect(revived).toEqual({ ...row, status: 'running' })
+  expect('runs' in revived).toBe(false)
+})
+
+test('a run of unknown start is not kept; the current run starts at the resume', () => {
+  const row: AgentRow = { ...agent('done', null), endedAt: 2000, restored: true }
+  const revived = reviveRow(row, 5000)
+  expect(revived).toEqual({ ...row, status: 'running', startedAt: 5000, endedAt: null })
+  expect('runs' in revived).toBe(false)
+  // The runs it had stand as they were.
+  const runs = [{ start: 10, end: 20 }]
+  expect(reviveRow({ ...row, runs }, 5000).runs).toEqual(runs)
 })

@@ -5,6 +5,7 @@ import {
 } from './lanes'
 import type { Lane, LaneModel } from './lanes'
 import { STATION_HUES } from './stations'
+import { reviveRow } from './stats'
 import type { AgentRow, MainTurn, TaskRow } from './stats'
 import { BAD, GREEN, loopBegin, OK, SVG_SOURCE_MAX } from './svg'
 
@@ -541,4 +542,130 @@ test('a draw stays fast', () => {
   }
   expect(bestMs(() => drawAxis(m.axis, 3032, FULL))).toBeLessThanOrEqual(0.6)
   expect(bestMs(() => lanesTerminal(m, 200))).toBeLessThanOrEqual(0.6)
+})
+
+// 0.7.0's draws of a lane with no runs, as literals: 0.7.1's runs change none of them.
+test('a row without runs draws as 0.7.0', () => {
+  const SVGS: Record<string, string> = {
+    'Review the diff': [
+      '<svg xmlns="http://www.w3.org/2000/svg" width="152" height="19" viewBox="0 0 152 19"><style>@media',
+      ' (prefers-color-scheme:',
+      ' light){[fill="#e58fae"]{fill:#b44a74}[stroke="#e58fae"]{stroke:#b44a74}',
+      '[stop-color="#e58fae"]{stop-color:#b44a74}}</style><rect',
+      ' data-part="bar" x="70" y="6.5" width="70" height="6" rx="3" fill="#e58fae"/><rect data-part="cap" x="138"',
+      ' y="4.5" width="2" height="10" fill="#e58fae"><animate attributeName="opacity" values="1;0.3;1"',
+      ' keyTimes="0;0.5;1" calcMode="spline" keySplines=".45 0 .55 1;.45 0 .55 1" dur="1.6s" begin="-0.800s"',
+      ' repeatCount="indefinite"/></rect></svg>',
+    ].join(''),
+    'Map the mask': [
+      '<svg xmlns="http://www.w3.org/2000/svg" width="152" height="19" viewBox="0 0 152 19"><style>@media',
+      ' (prefers-color-scheme:',
+      ' light){[fill="#e58fae"]{fill:#b44a74}[stroke="#e58fae"]{stroke:#b44a74}',
+      '[stop-color="#e58fae"]{stop-color:#b44a74}}</style><rect',
+      ' data-part="bar" x="126.58" y="8" width="4.47" height="3" rx="1.5" fill="#e58fae"/><g data-part="mark"',
+      ' transform="translate(137.06 9.5)"><path d="M-3.92 .08L-1.2 2.8 3.92-2.8" fill="none" stroke="#2ea043"',
+      ' stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></g></svg>',
+    ].join(''),
+    'Repro check': [
+      '<svg xmlns="http://www.w3.org/2000/svg" width="152" height="19" viewBox="0 0 152 19"><style>@media',
+      ' (prefers-color-scheme:',
+      ' light){[fill="#e58fae"]{fill:#b44a74}[stroke="#e58fae"]{stroke:#b44a74}',
+      '[stop-color="#e58fae"]{stop-color:#b44a74}}</style><rect',
+      ' data-part="bar" x="93.33" y="8" width="11.67" height="3" rx="1.5" fill="#e58fae"/><g data-part="mark"',
+      ' transform="translate(111 9.5)"><path d="M-3.25-3.25l6.5 6.5M3.25-3.25l-6.5 6.5" fill="none"',
+      ' stroke="#e5484d" stroke-width="1.4" stroke-linecap="round"/></g></svg>',
+    ].join(''),
+    'Engine facts': [
+      '<svg xmlns="http://www.w3.org/2000/svg" width="152" height="19" viewBox="0 0 152 19"><style>@media',
+      ' (prefers-color-scheme:',
+      ' light){[fill="#e58fae"]{fill:#b44a74}[stroke="#e58fae"]{stroke:#b44a74}',
+      '[stop-color="#e58fae"]{stop-color:#b44a74}}</style><rect',
+      ' data-part="bar" x="0" y="8" width="93.33" height="3" rx="1.5" fill="#e58fae"/><g data-part="mark"',
+      ' transform="translate(99.33 9.5)"><path d="M-3.92 .08L-1.2 2.8 3.92-2.8" fill="none" stroke="#2ea043"',
+      ' stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></g></svg>',
+    ].join(''),
+  }
+  for (const [name, svg] of Object.entries(SVGS)) {
+    expect(drawLane(laneOf(model(), name), AXIS_360, 152, FULL).svg, name).toBe(svg)
+  }
+  expect(lanesTerminal(model(), 44).map(joined)).toEqual([
+    'main                ────   ─── ━━━◐    $3.20',
+    'Review the diff            ━━━━━━━◐   $0.310',
+    'npm test                      ━━━━◐   3m 40s',
+    'Plan critique       ┄┄┄┄┄┄┄┄┄┄┄┄┄┄◐  $0.410+',
+    'Map the mask                     ─✓   $0.120',
+    'Repro check                  ──✗      $0.050',
+    'Engine facts        ─────────✓        $0.880',
+    'dev server            ─────■          4m 00s',
+    '                                now',
+    '+1 more',
+  ])
+})
+
+// A subagent resumed twice: two closed runs, then the current one.
+const RESUMED_TWICE: AgentRow = {
+  ...agent('a', 'Resumed', 'a', 'running', ago(200), null, null),
+  runs: [{ start: ago(600), end: ago(500) }, { start: ago(400), end: ago(300) }],
+}
+const heightsOf = (svg: string): string[] =>
+  [...svg.matchAll(/<rect data-part="bar"[^>]* height="(\d+)"/g)].map(([, h = '']) => h)
+
+test('a subagent\'s spans are its runs, then its current run', () => {
+  const m = model({ agents: { a: RESUMED_TWICE }, tasks: {} })
+  expect(laneOf(m, 'Resumed').spans).toEqual([
+    { start: ago(600), end: ago(500) }, { start: ago(400), end: ago(300) }, { start: ago(200), end: null },
+  ])
+})
+
+test('the order uses the first run\'s start (running) and the last end (ended); the axis starts at the earliest first '
+  + 'run of the shown lanes, here e1\'s earlier run', () => {
+  const agents = {
+    r1: { ...agent('r1', 'r1', 'a', 'running', ago(100), null, null), runs: [{ start: ago(700), end: ago(650) }] },
+    r2: agent('r2', 'r2', 'a', 'running', ago(650), null, null),
+    e1: { ...agent('e1', 'e1', 'a', 'done', ago(200), ago(100), null), runs: [{ start: ago(900), end: ago(800) }] },
+    e2: agent('e2', 'e2', 'a', 'done', ago(500), ago(150), null),
+  }
+  const m = model({ agents, tasks: {} })
+  expect(m.lanes.map((l) => l.label)).toEqual(['main', 'r1', 'r2', 'e1', 'e2'])
+  expect(m.axis.startMs).toBe(ago(900))
+})
+
+test('a resumed row of unknown start sorts and sets the axis by its resume', () => {
+  const restored = agent('x', 'Revived', 'a', 'done', null, ago(400), null, true)
+  const agents = { x: reviveRow(restored, ago(300)), y: agent('y', 'Later', 'a', 'running', ago(200), null, null) }
+  const m = model({ agents, tasks: {} })
+  expect(laneOf(m, 'Revived').spans).toEqual([{ start: ago(300), end: null }])
+  expect(m.lanes.map((l) => l.label)).toEqual(['main', 'Revived', 'Later'])
+  expect(m.axis.startMs).toBe(ago(300))
+})
+
+test('drawLane at 360 px: a bar per run and the current one, with the gaps', () => {
+  const running = laneOf(model({ agents: { a: RESUMED_TWICE }, tasks: {} }), 'Resumed')
+  const svg = drawLane(running, AXIS_360, 152, FULL).svg
+  const bars = barsOf(svg)
+  const want: [number, number][] = [[23.33, 42.78], [62.22, 81.67], [101.11, 140]]
+  expect(bars).toHaveLength(3)
+  want.forEach(([from, to], i) => {
+    near(bars[i]?.[0] ?? NaN, from)
+    near(bars[i]?.[1] ?? NaN, to)
+  })
+  expect(heightsOf(svg)).toEqual(['3', '3', '6'])
+  expect(svg).toContain('data-part="cap"')
+  expect(svg).not.toContain('linearGradient')
+
+  const ended = { ...RESUMED_TWICE, status: 'done' as const, endedAt: ago(100) }
+  const doneSvg = drawLane(laneOf(model({ agents: { a: ended }, tasks: {} }), 'Resumed'), AXIS_360, 152, FULL).svg
+  expect(heightsOf(doneSvg)).toEqual(['3', '3', '3'])
+  expect(marksOf(doneSvg)).toHaveLength(1)
+  near(marksOf(doneSvg)[0] ?? NaN, (140 * 620) / 720 + 6)
+})
+
+test('laneBar draws the runs too', () => {
+  const m = laneModel({
+    agents: { a: RESUMED_TWICE }, tasks: {}, mainTurns: [], mainUsd: null, nowMs: NOW, isMainRunning: false,
+  })
+  if (m === null) throw new Error('no model')
+  expect(m.axis.startMs).toBe(ago(600))
+  const row = [...joined(lanesTerminal(m, 44)[1] ?? [])].slice(20, 35).join('')
+  expect(row).toBe('──   ──  ━━━━━◐')
 })

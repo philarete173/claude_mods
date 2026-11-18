@@ -70,6 +70,25 @@ export type AgentRow = {
   // Marks a row rebuilt from the session's messages: its cost before the restore is not known, so a cost it has is
   // the cost since.
   restored?: true
+  // The agent's closed earlier runs, oldest first, AGENT_RUNS_MAX at most (reviveRow pushes none of unknown start).
+  runs?: { start: number | null; end: number }[]
+}
+// The most closed runs an AgentRow keeps (a ninth merges the two oldest).
+export const AGENT_RUNS_MAX = 8
+// A closed row that runs again: its run moves to `runs`, oldest first, and the new run starts at `now`. With more than
+// AGENT_RUNS_MAX the two oldest merge. A row with no end (a restored row that ended unseen) has no run to keep: it
+// keeps its start, as before 0.7.1. A run of unknown start (a restored row that ended live) is not kept: it would draw
+// nothing, and as the first span it would sort the lane among the unknown starts and keep its known start off the axis.
+export function reviveRow(row: AgentRow, now: number): AgentRow {
+  if (row.endedAt === null) return { ...row, status: 'running' }
+  if (row.startedAt === null) return { ...row, status: 'running', startedAt: now, endedAt: null }
+  const runs = [...(row.runs ?? []), { start: row.startedAt, end: row.endedAt }]
+  const [first, second, ...rest] = runs
+  const kept = runs.length > AGENT_RUNS_MAX && first !== undefined && second !== undefined
+    ? [{ start: first.start, end: second.end }, ...rest]
+    : runs
+
+  return { ...row, status: 'running', startedAt: now, endedAt: null, runs: kept }
 }
 // A turn of the main agent: when it started, and when it ended (null while it runs).
 export type MainTurn = { start: number; end: number | null }
