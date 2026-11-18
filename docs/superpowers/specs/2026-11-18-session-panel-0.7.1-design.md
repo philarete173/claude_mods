@@ -270,7 +270,9 @@ a tag sub-column (`labelParts`, `gen.ts:209-225`):
    - for each description the tail is its last `t0` code points; when the tail starts inside a word, that word
      starts at most 3 code points earlier, and `room` less the tail from the word's start still leaves ≥ 4, the tail
      moves back to the word's start;
-   - the text is the head (the first `room − t` code points, trailing spaces dropped), `…`, and the tail.
+   - the text is the head (the first `room − t` code points), `…`, and the tail. The head's trailing spaces are
+     dropped only while it keeps at least 4 code points; otherwise it keeps its first `room − t` code points as they
+     are. Example: `Fix the X12` and `Fix the Y12` at `descW` 8 give `Fix …X12` and `Fix …Y12`.
 3. Other descriptions keep the end cut. Descriptions that read the same in whole stay the same.
 
 The live check's lanes (`gen.ts:169-177`):
@@ -338,8 +340,9 @@ dev server            ─────■          4m 00s
 - At L 48 with `@code-reviewer`, `@shell` and `@general-purpo…`: every tag starts at cell 33 in the terminal, and on
   the desktop the description Box is 32 cells wide; tags are whole.
 - No tag below L 24; main has none.
-- The middle cut: the table of §4.3 at 41, 44 and 52; lanes whose end cuts differ keep them; the head keeps ≥ 4
-  code points; no label is wider than L, for every L from 9 to 64.
+- The middle cut: the table of §4.3 at 41, 44 and 52; `Fix the X12` and `Fix the Y12` at `descW` 8 give
+  `Fix …X12` and `Fix …Y12` (the head keeps its trailing space); lanes whose end cuts differ keep them; the head
+  keeps ≥ 4 code points; no label is wider than L, for every L from 9 to 64.
 - The 44-column strings above (`hooks/lanes.test.ts:403`; `hooks/view.test.tsx:3975`).
 - Replaced: `hooks/lanes.test.ts:190-212` (0.7.0's label cells and the tag that gives way).
 
@@ -501,6 +504,10 @@ step on 2.1.288, `:1045`):
 - with 9 runs the two oldest merge into one: `{ start: runs[0].start, end: runs[1].end }`;
 - a row with `endedAt === null` (a restored row that ended unseen, `hooks/restore.ts:66`) pushes nothing and keeps
   its start, as today (detail: `end` is a number by the decision);
+- a row with `startedAt === null` (a restored row that ended live and was then resumed) pushes no run either. Such a
+  run would draw nothing (`knownSpans`); as the first span it would also sort the lane among the unknown starts and
+  keep its known current start off the axis. Its current run starts at the resume time, as for any revive. The type
+  stays as it is;
 - a row made by a resume with no row (`:1251-1258`) has no `runs`.
 
 ### 10.2 Lanes
@@ -521,6 +528,8 @@ step on 2.1.288, `:1045`):
 
 - A revive of an ended row pushes the run and moves `startedAt` to the resume time; the 9th run merges the two
   oldest; a row with `endedAt` null pushes nothing.
+- A revive of a row with `startedAt` null and `endedAt` set pushes no run and starts the current run at the resume
+  time; its lane sorts by that start among the known starts, and the axis reaches it.
 - `laneModel`: spans = runs + current; the running lanes' order and the axis start by the first run's start; the
   ended lanes' order by the last span's end.
 - `drawLane` at 360 px: one bar per run plus the current one, with the gaps; `laneBar` likewise.
