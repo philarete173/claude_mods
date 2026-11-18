@@ -24,8 +24,8 @@ export const STATION_HUES: Record<StationId, { dark: string; light: string }> = 
   web: { dark: '#93aac4', light: '#4f6b8a' },
   agents: { dark: '#e58fae', light: '#b44a74' },
   mcp: { dark: '#a3c47a', light: '#5b822f' },
-  skills: { dark: '#d9c95a', light: '#8c7a00' },
-  you: { dark: '#d48ae0', light: '#9a48b0' },
+  skills: { dark: '#f0e07f', light: '#695700' },
+  you: { dark: '#eeb6fb', light: '#752f84' },
 }
 
 export const STATION_LABELS: Record<StationId, string> = {

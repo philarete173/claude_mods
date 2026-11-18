@@ -21,19 +21,21 @@ const EXAMPLE: BandInput = {
     agents: tally(5), mcp: tally(3), skills: tally(6), you: tally(3),
   },
   running: { model: 3, files: 0, shell: 1, web: 0, agents: 2, mcp: 0, skills: 0, you: 0 },
-  nowMs: NOW,
+  nowMs: NOW, isTurnRunning: false,
 }
 // Every count, every station running and failing, every pulse in flight.
 const CAPS: BandInput = {
   pct: 100, tokens: 1_000_000, window: 1_000_000, model: 'claude-opus-5-5', compactions: 50,
   stations: each(() => tally(99_999, 12, NOW - 10)),
   running: each(() => 12),
-  nowMs: NOW,
+  nowMs: NOW, isTurnRunning: false,
 }
 const EMPTY: BandInput = {
   pct: undefined, tokens: undefined, window: undefined, model: null, compactions: 0,
-  stations: each(() => tally(0)), running: each(() => 0), nowMs: NOW,
+  stations: each(() => tally(0)), running: each(() => 0), nowMs: NOW, isTurnRunning: false,
 }
+// Nothing runs at any station, the rest of EXAMPLE's session.
+const REST: BandInput = { ...EXAMPLE, running: each(() => 0) }
 const NO_PULSE: BandInput = { ...CAPS, stations: each(() => tally(99_999, 12, null)) }
 const withStation = (input: BandInput, id: StationId, t: StationTally): BandInput => ({
   ...input, stations: { ...input.stations, [id]: t },
@@ -184,9 +186,76 @@ test('the parts are bounded for every input and the source is under the cap', ()
       expect(band.heightPx >= 1 && band.heightPx <= SVG_MAX_PX).toBe(true)
     }
   }
-  // CAPS at 268, two rows with no labels: core 5, ticks 5, 8 lines, and per station a glow, a circle, an icon, a
+  // CAPS at 268, two rows with no labels: core 6, ticks 5, 8 lines, and per station a glow, a circle, an icon, a
   // badge, a disc, a count and a pulse.
-  expect(bandParts(drawBand(CAPS, 268, FULL).svg)).toBe(74)
+  expect(bandParts(drawBand(CAPS, 268, FULL).svg)).toBe(75)
+  expect(BAND_PARTS_MAX).toBe(83)
+})
+
+// The core group holds no nested `<g>`.
+const coreOf = (svg: string): string => /<g data-part="core">(.*?)<\/g>/.exec(svg)?.[1] ?? ''
+// The halo's loop: spline easing on both halves, phase-locked to the clock.
+const T = (ms: number): string =>
+  ` keyTimes="0;0.5;1" calcMode="spline" keySplines=".45 0 .55 1;.45 0 .55 1" dur="${ms / 1000}s"` +
+  ` begin="${loopBegin(NOW, ms)}" repeatCount="indefinite"`
+const haloOf = (peak: string, ms: number, stroke = '#2f7de1'): string =>
+  `<circle cx="164" cy="47.5" r="26" fill="none" stroke="${stroke}" stroke-width="0" opacity="0.05">` +
+  `<animate attributeName="r" values="26;29;26"${T(ms)}/>` +
+  `<animate attributeName="stroke-width" values="0;6;0"${T(ms)}/>` +
+  `<animate attributeName="opacity" values="0.05;${peak};0.05"${T(ms)}/></circle>`
+
+test('the core breathes at rest: one halo outside the ring, every 4.8 s', () => {
+  const core = coreOf(drawBand(REST, 328, FULL).svg)
+  expect(core.startsWith(haloOf('0.12', 4800))).toBe(true)
+  expect(occurrences(core, 'r="26"')).toBe(1)
+})
+
+test('the core breathes faster while busy, either way', () => {
+  for (const input of [EXAMPLE, { ...REST, isTurnRunning: true }]) {
+    expect(coreOf(drawBand(input, 328, FULL).svg).startsWith(haloOf('0.24', 1600))).toBe(true)
+  }
+})
+
+test('nothing of the core but the track and the arc lies inside r 26', () => {
+  for (const input of [REST, EXAMPLE]) {
+    const circles = [...coreOf(drawBand(input, 328, FULL).svg).matchAll(/<circle [^>]*>/g)].map(([c]) => c)
+    expect(circles.every((c) => c.includes('fill="none"'))).toBe(true)
+    // The halo and the ring's two circles: the track and the arc are the two of r 24.
+    expect(circles.filter((c) => c.includes('r="24"'))).toHaveLength(2)
+    const halo = coreOf(drawBand(input, 328, FULL).svg)
+    const values = (attr: string): number[] =>
+      (new RegExp(`attributeName="${attr}" values="([^"]*)"`).exec(halo)?.[1] ?? '').split(';').map(Number)
+    const [r, width] = [values('r'), values('stroke-width')]
+    expect(r).toHaveLength(3)
+    expect(r.map((v, i) => v - (width[i] ?? NaN) / 2)).toEqual([26, 26, 26])
+  }
+})
+
+test('the halo takes the arc\'s colour', () => {
+  const colours = [[79, '#2f7de1'], [80, '#e0a030'], [95, '#e5484d'], [undefined, '#2f7de1']] as const
+  for (const [pct, colour] of colours) {
+    const core = coreOf(drawBand({ ...REST, pct }, 328, FULL).svg)
+    expect(/^<circle [^>]*stroke="([^"]*)"/.exec(core)?.[1], `${pct}`).toBe(colour)
+  }
+})
+
+test('motion reduced: a steady halo, no breath', () => {
+  const halo = (op: string): string =>
+    `<circle cx="164" cy="47.5" r="27.5" fill="none" stroke="#2f7de1" stroke-width="3" opacity="${op}"/>`
+  for (const [input, op] of [[REST, '0.08'], [EXAMPLE, '0.16']] as const) {
+    const core = coreOf(drawBand(input, 328, { motion: 'reduced' }).svg)
+    expect(core.startsWith(halo(op))).toBe(true)
+    expect(core).not.toContain('<animate')
+  }
+})
+
+test('the halo stays inside the band at both heights', () => {
+  for (const w of [328, 868]) {
+    const band = drawBand(REST, w, FULL)
+    const cy = Number(/^<circle cx="[\d.]+" cy="([\d.]+)"/.exec(coreOf(band.svg))?.[1])
+    expect(cy - 32, `${w}`).toBeGreaterThanOrEqual(0)
+    expect(cy + 32, `${w}`).toBeLessThanOrEqual(band.heightPx)
+  }
 })
 
 test('the states of §4.6', () => {

@@ -394,6 +394,7 @@ function sessionBand(d: Draw): { parts: RenderElement[]; rows: number } {
   const input: BandInput = {
     pct, tokens: hasTokens ? contextTokens : undefined, window: hasTokens ? contextWindow : undefined,
     model: mainModel, compactions, stations, running: runningOf(inFlight, agents, tasks, turn !== null), nowMs: now,
+    isTurnRunning: turn !== null,
   }
   if (Svg === undefined) {
     const lines = bandTerminal(input, d.cols).map(spans => spanLine(d, spans))

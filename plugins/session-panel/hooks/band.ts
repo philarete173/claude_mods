@@ -18,6 +18,7 @@ import type { Look } from './svg'
 export type BandInput = {
   pct: number | undefined; tokens: number | undefined; window: number | undefined; model: string | null
   compactions: number; stations: StationsState; running: Record<StationId, number>; nowMs: number
+  isTurnRunning: boolean // main's turn runs (the view's `turn !== null`): with any station running, the core is busy
 }
 export type Rect = { x0: number; y0: number; x1: number; y1: number }
 // `text` is never null: with no label it is the count's box.
@@ -27,7 +28,7 @@ export type BandLayout = {
   pitch: number; textPx: 10 | 9 | null; isStacked: boolean; core: Rect; stations: BandStation[]
 }
 
-export const BAND_PARTS_MAX = 82 // §9.7's terms: core 5 + ticks 5 + 8 stations × (7 parts + 1 pulse group) + 8 lines
+export const BAND_PARTS_MAX = 83 // core 6 (the halo added) + ticks 5 + 8 stations × (7 parts + 1 pulse group) + 8 lines
 
 const SIDES = [[LEFT_STATIONS, -1], [RIGHT_STATIONS, 1]] as const
 const ROWS_Y = [25.5, 68.5] as const // the two station rows of the two-row band
@@ -36,6 +37,8 @@ const FORK = 36 // the fork point's distance from the core's x
 const ARC = 6 // the r 6 corners of the fork and of the pulse's T junction
 const ARC_LEN = (Math.PI * ARC) / 2
 const EASE = '.45 0 .55 1'
+const HALO_REST_MS = 4800 // the core's halo breathes this slowly at rest
+const HALO_BUSY_MS = 1600 // and this fast while main's turn or any station runs
 const EASE_OUT = '.2 .6 .35 1'
 const GLOW_MS = 2400
 const FADE_MS = 150
@@ -138,10 +141,25 @@ function coreModel(model: string): string {
   return cutCells(cells(short) > 8 ? (short.split(' ')[0] ?? '') : short, 8)
 }
 
-function coreSvg(input: BandInput, xc: number, cy0: number): string {
+function coreSvg(input: BandInput, xc: number, cy0: number, look: Look): string {
   const p = input.pct === undefined ? 0 : clampPct(input.pct)
   const ring = `<circle cx="${num(xc)}" cy="${cy0}" r="24" fill="none"`
-  let out = `${ring} stroke="#808080" stroke-opacity="0.3" stroke-width="4"/>`
+  const busy = input.isTurnRunning || STATION_ORDER.some((id) => input.running[id] > 0)
+  // §2.2: the halo is an annulus from r 26 (the ring's outer edge) to r + width / 2, so nothing is drawn inside it.
+  const isFull = look.motion === 'full'
+  const halo = `<circle cx="${num(xc)}" cy="${cy0}" r="${isFull ? 26 : 27.5}" fill="none" stroke="${meterColor(p)}"` +
+    ` stroke-width="${isFull ? 0 : 3}"`
+  let out = `${halo} opacity="${busy ? 0.16 : 0.08}"/>`
+  if (isFull) {
+    const period = busy ? HALO_BUSY_MS : HALO_REST_MS
+    const timing = ` keyTimes="0;0.5;1" calcMode="spline" keySplines="${EASE};${EASE}" dur="${period / 1000}s"` +
+      ` begin="${loopBegin(input.nowMs, period)}" repeatCount="indefinite"`
+    const loop = (name: string, values: string): string =>
+      `<animate attributeName="${name}" values="${values}"${timing}/>`
+    out = `${halo} opacity="0.05">${loop('r', '26;29;26')}${loop('stroke-width', '0;6;0')}` +
+      `${loop('opacity', `0.05;${busy ? 0.24 : 0.12};0.05`)}</circle>`
+  }
+  out += `${ring} stroke="#808080" stroke-opacity="0.3" stroke-width="4"/>`
   if (p > 0) {
     out += `${ring} stroke="${meterColor(p)}" stroke-width="4" pathLength="100" stroke-dasharray="${num(p)} 100"` +
       ` transform="rotate(-90 ${num(xc)} ${cy0})"/>`
@@ -312,7 +330,8 @@ export function drawBand(input: BandInput, bodyPx: number, look: Look):
   const w = num(l.widthPx)
   // Z-order (§4.1): core, trunk/fork/rails, pulses, then each station's glow, circle, icon, badge and disc, text.
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${l.heightPx}"` +
-    ` viewBox="0 0 ${w} ${l.heightPx}">${style}${coreSvg(input, l.xc, l.cy0)}${railsSvg(l)}${pulses}${stations}</svg>`
+    ` viewBox="0 0 ${w} ${l.heightPx}">${style}${coreSvg(input, l.xc, l.cy0, look)}${railsSvg(l)}${pulses}` +
+    `${stations}</svg>`
   return {
     svg: fitSvg(svg), widthPx: l.widthPx, heightPx: l.heightPx, rows: l.rows, offsetPx: l.offsetPx,
     alt: bandAlt(input),

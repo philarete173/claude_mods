@@ -2860,6 +2860,17 @@ test('the band replaces the Context rows: one Svg in a clipping Box of whole row
   }
 })
 
+test('the band breathes busy while main\'s turn runs, with nothing counted running', () => {
+  const bandSource = (data: PaneData): string => String(
+    flat(draw(data)).map(({ node }) => node)
+      .find(node => node.type === 'Svg' && /^Context /.test(String(node.props?.alt)))?.props?.source,
+  )
+  // Main has a call in flight, so `runningOf` counts nothing: every station reads 0 while the turn runs.
+  const call = { station: 'agents', agentId: null, at: NOW, label: 'SendMessage' } as const
+  expect(bandSource({ ...EMPTY, turn: RUNNING, inFlight: { u1: call } })).toContain('values="0.05;0.24;0.05"')
+  expect(bandSource(EMPTY)).toContain('values="0.05;0.12;0.05"')
+})
+
 test('the terminal band is the core line and the grid', () => {
   for (const [bodyColumns, gridRows] of [[40, 3], [44, 2], [120, 1]] as const) {
     const [top] = childrenOf(draw(onSurface(FULL, 'terminal'), bodyColumns))
