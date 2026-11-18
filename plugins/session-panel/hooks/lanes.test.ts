@@ -1,6 +1,7 @@
 import { test, expect } from 'claude-code/testing'
+import { cutCells } from './cells'
 import {
-  drawAxis, drawLane, laneLabelCells, laneLabelSpans, laneModel, lanesTerminal, taskTime, TASK_TIME_CELLS,
+  drawAxis, drawLane, laneLabelCells, laneLabels, laneModel, lanesTerminal, taskTime, TASK_TIME_CELLS,
 } from './lanes'
 import type { Lane, LaneModel } from './lanes'
 import { STATION_HUES } from './stations'
@@ -187,28 +188,93 @@ test('hostile ids are plain ids', () => {
   expect(m.lanes.map((l) => l.label)).toEqual(['main', 'ctor', 'proto'])
 })
 
-test('the label cells follow §6.6', () => {
-  expect([33, 41, 52, 108].map(laneLabelCells)).toEqual([9, 12, 15, 32])
-  expect([40, 44, 60, 80, 120, 200].map(laneLabelCells)).toEqual([12, 13, 18, 24, 32, 32])
+test('the label column follows §4.1', () => {
+  expect([33, 41, 44, 52, 54, 108, 200].map(laneLabelCells)).toEqual([14, 18, 19, 23, 24, 48, 64])
   expect([20, 0, -4].map(laneLabelCells)).toEqual([9, 9, 9])
+  expect([143, 500].map(laneLabelCells)).toEqual([64, 64])
 })
 
-test('the tag shows from 24 label cells and gives way after the description', () => {
-  const review = laneOf(model(), 'Review the diff')
-  // 30 cells hold `Review the diff @code-reviewer` whole: the description primary, the tag dim.
-  expect(laneLabelSpans(review, 30)).toEqual([{ text: 'Review the diff' }, { text: ' @code-reviewer', dimColor: true }])
-  // At 24 the description gives way first: 24 − 1 − 14 = 9 cells.
-  expect(laneLabelSpans(review, 24)).toEqual([{ text: 'Review t…' }, { text: ' @code-reviewer', dimColor: true }])
-  expect(laneLabelSpans(review, 18)).toEqual([{ text: 'Review the diff' }])
-  const long: Lane = { ...review, label: 'x'.repeat(40), tag: '@a-very-long-agent-type' }
-  // The description down to 6 cells, then the tag cut with `…`.
-  expect(laneLabelSpans(long, 24)).toEqual([{ text: 'xxxxx…' }, { text: ' @a-very-long-age…', dimColor: true }])
-  for (const n of [24, 26, 30, 32, 40]) {
-    expect(cellsOf(joined(laneLabelSpans(long, n))), String(n)).toBeLessThanOrEqual(n)
-    expect(cellsOf(joined(laneLabelSpans(review, n))), String(n)).toBeLessThanOrEqual(n)
+test('at L 48 the tags start on one cell and stay whole', () => {
+  const labels = laneLabels(model().lanes, 48)
+  expect(labels.map((label) => label.descCells)).toEqual(Array(8).fill(32))
+  const tagOf = (desc: string): string | undefined => labels.find((label) => label.desc === desc)?.tag
+  expect(['Review the diff', 'npm test', 'Repro check', 'main'].map(tagOf))
+    .toEqual(['@code-reviewer', '@shell', '@general-purpo…', ''])
+  // 108 columns: L 48, the description 32 cells, a gap, then every tag at code point 33 of its row.
+  const rows = lanesTerminal(model(), 108)
+  labels.forEach((label, i) => {
+    if (i === 0) return
+    expect([...joined(rows[i] ?? [])].slice(33).join('').startsWith(label.tag), label.desc).toBe(true)
+  })
+})
+
+test('no tag below L 24; main has none', () => {
+  for (const label of laneLabels(model().lanes, 23)) expect([label.tag, label.descCells]).toEqual(['', 23])
+  expect(laneLabels(model().lanes, 24).map((label) => label.tag !== '')).toEqual([
+    false, true, true, true, true, true, true, true,
+  ])
+})
+
+// The live check's lanes (the mockup's, gen.ts:166-180): four `Band check` lanes, two `Write the …` ones, one more.
+const MIN = 60_000
+const minAgent = (id: string, description: string, type: string, status: AgentRow['status'], start: number,
+  end: number | null, costUsd: number): [string, AgentRow] =>
+  [id, agent(id, description, type, status, NOW - start * MIN, end === null ? null : NOW - end * MIN, costUsd)]
+const MOCKUP = model({
+  agents: Object.fromEntries([
+    minAgent('a', 'Band check: background sleep A', 'general-purpose', 'running', 6, null, 0.21),
+    minAgent('b', 'Band check: background sleep B', 'general-purpose', 'running', 5.5, null, 0.18),
+    minAgent('c', 'Band check: background sleep C', 'general-purpose', 'done', 6, 3, 0.12),
+    minAgent('d', 'Band check: background sleep D', 'general-purpose', 'done', 11, 9, 0.11),
+    minAgent('w51', 'Write the 0.5.1 live-check doc', 'general-purpose', 'done', 14, 8, 0.64),
+    minAgent('w60', 'Write the 0.6.0 live-check doc', 'general-purpose', 'done', 12, 5, 0.58),
+    minAgent('sec', 'Security review of the 0.7.0 branch', 'appsec-engineer', 'running', 10, null, 0.41),
+  ]),
+  tasks: { t1: task('t1', 'npm test', 'running', NOW - 160_000, null, null) },
+  mainUsd: 1.84, isMainRunning: true,
+  mainTurns: [{ start: NOW - 16 * MIN, end: NOW - 13 * MIN }, { start: NOW - 12 * MIN, end: null }],
+})
+
+test('the middle cut of the live check\'s lanes', () => {
+  expect(MOCKUP.lanes.map((lane) => lane.key)).toEqual(['main', 'sec', 'a', 'b', 't1', 'c', 'w60', 'w51'])
+  expect(MOCKUP.more).toBe(1)
+  const descsAt = (l: number): Record<string, string> =>
+    Object.fromEntries(laneLabels(MOCKUP.lanes, l).map((label, i) => [MOCKUP.lanes[i]?.key, label.desc]))
+  // §4.3's table at 41, 44 and 52 columns: the group of `Band check` is cut in the middle, the rest at the end.
+  const cases: [number, string, string, string][] = [
+    [18, 'Band check…sleep ', 'Write the 0.6.0 l…', 'Write the 0.5.1 l…'],
+    [19, 'Band check:…sleep ', 'Write the 0.6.0 li…', 'Write the 0.5.1 li…'],
+    [23, 'Band check: bac…sleep ', 'Write the 0.6.0 live-c…', 'Write the 0.5.1 live-c…'],
+  ]
+  for (const [l, band, w60, w51] of cases) {
+    const descs = descsAt(l)
+    expect([descs.a, descs.b, descs.c], String(l)).toEqual([`${band}A`, `${band}B`, `${band}C`])
+    expect([descs.w60, descs.w51, descs.sec], String(l))
+      .toEqual([w60, w51, cutCells('Security review of the 0.7.0 branch', l)])
   }
-  const ended = laneOf(model(), 'Map the mask')
-  expect(laneLabelSpans(ended, 12)).toEqual([{ text: 'Map the mask', dimColor: true }])
+  const at48 = laneLabels(MOCKUP.lanes, laneLabelCells(108))[2]
+  expect([at48?.desc, at48?.tag]).toEqual(['Band check: background sleep A', '@general-purpo…'])
+})
+
+test('no label is wider than L', () => {
+  for (let l = 9; l <= 64; l += 1) {
+    for (const lanes of [model().lanes, MOCKUP.lanes]) {
+      for (const { desc, tag, descCells } of laneLabels(lanes, l)) {
+        const where = `${l}: ${desc}`
+        expect(cellsOf(desc), where).toBeLessThanOrEqual(descCells)
+        expect(descCells + (tag === '' ? 0 : 1 + cellsOf(tag)), where).toBeLessThanOrEqual(l)
+        // A middle cut's `…` comes after a head of 4 code points at least.
+        const at = [...desc].indexOf('…')
+        if (at >= 0 && at < cellsOf(desc) - 1) expect(at, where).toBeGreaterThanOrEqual(4)
+      }
+    }
+  }
+})
+
+test('isDim marks the ended lanes', () => {
+  expect(laneLabels(model().lanes, 19).map((label) => label.isDim))
+    .toEqual([false, false, false, false, true, true, true, true])
+  expect(laneLabels(model().lanes, 19)[4]?.desc).toBe('Map the mask')
 })
 
 test('the shapes of R5 per status', () => {
@@ -355,7 +421,7 @@ test('a restored lane that ended live keeps its end and its status mark', () => 
   expect(back).toMatch(new RegExp(`data-part="mark" transform="translate\\(146 9.5\\)"><path [^>]*${GREEN}`))
   expect(drawLane(laneOf(m, 'lost end'), m.axis, 152, FULL).svg).toMatch(/data-part="mark"[^>]*><path [^>]*#e5484d/)
   const rows = lanesTerminal(m, 44)
-  expect(joined(rows[1] ?? [])).toBe(`came back     ${'┄'.repeat(20)}✓  $0.200+`)
+  expect(joined(rows[1] ?? [])).toBe(`came back${' '.repeat(11)}${'┄'.repeat(14)}✓  $0.200+`)
   expect(rows[1]?.find((span) => span.text === '✓')).toEqual({ text: '✓', color: OK })
   expect(rows[2]?.find((span) => span.text === '✗')).toEqual({ text: '✗', color: BAD })
 })
@@ -403,20 +469,21 @@ test('escaping', () => {
 test('the terminal strings at 44 columns', () => {
   const rows = lanesTerminal(model(), 44)
   expect(rows.map(joined)).toEqual([
-    'main          ─────    ─────  ━━━━◐    $3.20',
-    'Review the d…           ━━━━━━━━━━◐   $0.310',
-    'npm test                    ━━━━━━◐   3m 40s',
-    'Plan critique ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄◐  $0.410+',
-    'Map the mask                    ─✓    $0.120',
-    'Repro check                ──✗        $0.050',
-    'Engine facts  ─────────────✓          $0.880',
-    'dev server       ───────■             4m 00s',
-    '                11:55    12:00  now',
+    'main                ────   ─── ━━━◐    $3.20',
+    'Review the diff            ━━━━━━━◐   $0.310',
+    'npm test                      ━━━━◐   3m 40s',
+    'Plan critique       ┄┄┄┄┄┄┄┄┄┄┄┄┄┄◐  $0.410+',
+    'Map the mask                     ─✓   $0.120',
+    'Repro check                  ──✗      $0.050',
+    'Engine facts        ─────────✓        $0.880',
+    'dev server            ─────■          4m 00s',
+    '                                now',
     '+1 more',
   ])
-  const bar = (row: number): string => [...joined(rows[row] ?? [])].slice(14, 35).join('')
+  // L 19: the label column is 20 cells, the bar 15.
+  const bar = (row: number): string => [...joined(rows[row] ?? [])].slice(20, 35).join('')
   expect([bar(0), bar(4), bar(6)])
-    .toEqual(['─────    ─────  ━━━━◐', `${' '.repeat(18)}─✓ `, `${'─'.repeat(13)}✓${' '.repeat(7)}`])
+    .toEqual(['────   ─── ━━━◐', `${' '.repeat(13)}─✓`, `${'─'.repeat(9)}✓${' '.repeat(5)}`])
   const colourOf = (row: number, ch: string): object | undefined => {
     const span = rows[row]?.find((s) => s.text.includes(ch))
     return span === undefined ? undefined : { color: span.color, dimColor: span.dimColor }
@@ -440,7 +507,7 @@ test('the terminal strings at 44 columns', () => {
   // An ended lane of unknown span: `┄` and a dim `○` in the gutter.
   const ended = { ...model(), lanes: [{ ...laneOf(model(), 'Map the mask'), status: 'ended' as const, spans: [] }] }
   const endedRow = lanesTerminal(ended, 44)[0] ?? []
-  expect(joined(endedRow)).toBe(`Map the mask  ${'┄'.repeat(20)}○   $0.120`)
+  expect(joined(endedRow)).toBe(`Map the mask        ${'┄'.repeat(14)}○   $0.120`)
   expect(endedRow.find((s) => s.text === '○')).toEqual({ text: '○', dimColor: true })
 })
 
@@ -455,7 +522,7 @@ test('no terminal row is longer than its width', () => {
     for (const row of lanesTerminal(m, cols).slice(0, 8)) expect(cellsOf(joined(row)), `${cols}`).toBe(cols)
   }
   const tagged = (cols: number): boolean => joined(lanesTerminal(m, cols)[1] ?? []).includes('@code-reviewer')
-  expect([60, 80, 120].map(tagged)).toEqual([false, true, true])
+  expect([52, 54, 60, 120].map(tagged)).toEqual([false, true, true, true])
 })
 
 test('a draw stays fast', () => {

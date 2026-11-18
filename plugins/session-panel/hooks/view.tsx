@@ -10,7 +10,8 @@ import type {
 import { bandTerminal, drawBand } from './band'
 import type { BandInput } from './band'
 import type { Span } from './cells'
-import { drawAxis, drawLane, LANE_VALUE_CELLS, laneLabelCells, laneLabelSpans, laneModel, lanesTerminal } from './lanes'
+import { drawAxis, drawLane, LANE_VALUE_CELLS, laneLabelCells, laneLabels, laneModel, lanesTerminal } from './lanes'
+import type { LaneLabel } from './lanes'
 import { drawRibbon, legendItems, ribbonFromAcc, ribbonFromTurn, ribbonTerminal, withLive } from './ribbon'
 import type { RibbonInput } from './ribbon'
 import {
@@ -679,8 +680,25 @@ function activitySection(d: Draw): Block {
       <Box flexDirection="row" width={LANE_VALUE_CELLS} flexShrink={0} justifyContent="flex-end">{value}</Box>
     </Box>
   )
-  const rows = model.lanes.map(lane => laneRow(
-    spanLine(d, laneLabelSpans(lane, labelCells)), drawLane(lane, model.axis, areaPx, d.look), 19,
+  // §4.4: with a tag, a FIXED Box of the description's cells (a spanLine, which never wraps where the proportional font
+  // overruns them; the Box clips it), then the whole tag after a no-break space. The wrapper is a cell of a row: FIXED.
+  const labelCell = (label: LaneLabel): RenderElement => {
+    const desc = spanLine(d, [{ text: label.desc, ...(label.isDim ? { dimColor: true } : {}) }])
+    if (label.tag === '') return desc
+
+    return (
+      <Box flexDirection="row" flexShrink={0}>
+        <Box flexDirection="row" width={label.descCells} flexShrink={0} overflow="hidden">{desc}</Box>
+        <Box flexDirection="row" flexShrink={0}>
+          <Text dimColor>{`\u{a0}${label.tag}`}</Text>
+        </Box>
+      </Box>
+    )
+  }
+  const labels = laneLabels(model.lanes, labelCells)
+  const rows = model.lanes.map((lane, i) => laneRow(
+    labelCell(labels[i] ?? { desc: '', tag: '', descCells: labelCells, isDim: false }),
+    drawLane(lane, model.axis, areaPx, d.look), 19,
     lane.value === null ? <Text dimColor>—</Text> : <Text>{lane.value}</Text>,
   ))
   rows.push(laneRow(null, drawAxis(model.axis, areaPx, d.look), 16, null))

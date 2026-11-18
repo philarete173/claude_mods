@@ -1,7 +1,7 @@
 // Activity (spec §6): one lane per subagent, one per background task and main's turns on one time axis, drawn with
 // R5's status shapes, the axis of clock ticks, and the terminal's rows. Pure: no `$`, no engine.
 
-import { cells, cutCells, fitRow, padStart, spansCells } from './cells'
+import { cells, cutCells, fitRow, middleCut, padEnd, padStart, spansCells } from './cells'
 import type { Span } from './cells'
 import { STATION_HUES } from './stations'
 import type { StationId } from './stations'
@@ -35,7 +35,6 @@ const LANES_MAX = 8
 const AXIS_MIN_MS = 120_000
 const GUTTER_PX = 12
 const TAG_FROM = 24 // the label cells from which the type tag shows (R15)
-const LABEL_MIN = 6 // the cells a description keeps before the tag gives way (R16 d)
 const STEPS_MIN = [1, 2, 5, 10, 15, 30, 60, 120, 240, 480, 720, 1440]
 const CAP_MS = 1600
 const EASE = '.45 0 .55 1'
@@ -72,9 +71,9 @@ export function taskTime(task: TaskRow, now: number): string | null {
   return text === null || text.length > TASK_TIME_CELLS ? null : text
 }
 
-/** §6.6's label column: `clamp(floor(cols × 0.3), 9, 32)` cells. */
+/** §4.1's label column: `clamp(floor(cols × 0.45), 9, 64)` cells. */
 export function laneLabelCells(cols: number): number {
-  return Math.min(32, Math.max(9, Math.floor(cols * 0.3)))
+  return Math.min(64, Math.max(9, Math.floor(cols * 0.45)))
 }
 
 const spansOf = (start: number | null, end: number | null): Lane['spans'] =>
@@ -124,12 +123,33 @@ export function laneModel(input: {
   }
 }
 
-/** The label column's spans: the description, then from 24 cells the dim tag; the description gives way first. */
-export function laneLabelSpans(lane: Lane, labelCells: number): Span[] {
-  const style: Partial<Span> = lane.kind === 'main' || lane.status === 'running' ? {} : { dimColor: true }
-  if (labelCells < TAG_FROM || lane.tag === '') return [{ text: cutCells(lane.label, labelCells), ...style }]
-  const label = cutCells(lane.label, Math.max(LABEL_MIN, labelCells - 1 - cells(lane.tag)))
-  return [{ text: label, ...style }, { text: ` ${cutCells(lane.tag, labelCells - cells(label) - 1)}`, dimColor: true }]
+/** One shown lane's label (§4.2-§4.4): the description as drawn, the tag ('' when none shows) and the
+ * description's cells (descW; L below TAG_FROM or with no tag column). `isDim`: an ended lane's description. */
+export type LaneLabel = { desc: string; tag: string; descCells: number; isDim: boolean }
+
+/** The shown lanes' labels in `labelCells`, one per lane in order: tags whole in a column as wide as the widest, the
+ * descriptions cut at the end, or in the middle where their end cuts read the same (§4.2, §4.3). */
+export function laneLabels(lanes: Lane[], labelCells: number): LaneLabel[] {
+  const tagW = labelCells >= TAG_FROM ? Math.max(0, ...lanes.map((lane) => cells(lane.tag))) : 0
+  const descCells = tagW > 0 ? labelCells - 1 - tagW : labelCells
+  const descs = lanes.map((lane) => cutCells(lane.label, descCells))
+  const groups = new Map<string, number[]>() // an end cut to the lanes that cut to it
+  descs.forEach((desc, i) => {
+    if (cells(lanes[i]?.label ?? '') <= descCells) return
+    const group = groups.get(desc)
+    if (group === undefined) groups.set(desc, [i])
+    else group.push(i)
+  })
+  for (const group of groups.values()) {
+    if (group.length < 2) continue
+    middleCut(group.map((i) => lanes[i]?.label ?? ''), descCells).forEach((desc, n) => {
+      descs[group[n] ?? 0] = desc
+    })
+  }
+  return lanes.map((lane, i) => ({
+    desc: descs[i] ?? '', tag: tagW > 0 ? lane.tag : '', descCells,
+    isDim: !(lane.kind === 'main' || lane.status === 'running'),
+  }))
 }
 
 // The spans with a known start that reach into the axis (main's older turns do not).
@@ -290,12 +310,17 @@ function axisRow(axis: LaneAxis, axisCells: number): string {
   return `${out}${' '.repeat(Math.max(0, nowAt - pos))}now`
 }
 
-/** §6.5's rows but the header: the lanes, the axis and `+N more`, each cut to `cols`. */
+/** §6.5's rows but the header: the lanes, the axis and `+N more`, each cut to `cols`. The labels are §4.4's. */
 export function lanesTerminal(model: LaneModel, cols: number): Span[][] {
   const l = laneLabelCells(cols)
   const axisCells = Math.max(0, cols - l - 10) - 1
-  const rows = model.lanes.map((lane) => {
-    const label = laneLabelSpans(lane, l)
+  const labels = laneLabels(model.lanes, l)
+  const rows = model.lanes.map((lane, i) => {
+    const { desc, tag, descCells, isDim } = labels[i] ?? { desc: '', tag: '', descCells: l, isDim: false }
+    const label: Span[] = [
+      { text: tag === '' ? desc : padEnd(desc, descCells), ...(isDim ? { dimColor: true } : {}) },
+      ...(tag === '' ? [] : [{ text: ` ${tag}`, dimColor: true }]),
+    ]
     const value: Span = lane.value === null
       ? { text: padStart('—', LANE_VALUE_CELLS), dimColor: true }
       : { text: padStart(lane.value, LANE_VALUE_CELLS) }

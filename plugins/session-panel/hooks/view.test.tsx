@@ -4,6 +4,7 @@ import type { On, RenderPropsOf, RenderSurface, SessionRateLimit } from 'claude-
 
 import { chipRows, isSectionFolded, limitMeterWidth, meterSvg, renderPane, spanLine } from './view'
 import type { PaneData } from './view'
+import { cutCells } from './cells'
 import { restoreFromMessages } from './restore'
 import { emptyStationsState, STATION_HUES, STATION_ORDER, zeroStationMs } from './stations'
 import type { ToolStationId } from './stations'
@@ -584,11 +585,12 @@ test('the pane draws the blocks of the mockup on desktop and on terminal', SLOW,
       expect(await ui.find({ type: 'Text', text }), `${surface}: ${text}`).toBeDefined()
     }
     expect((await ui.find({ type: 'Text', text: '99%' }))?.props.color, `${surface} cache`).toBe('success')
-    // Activity: main's lane, then the running subagent, then the finished one, their labels cut to the 12 cells of 40
-    // columns, too few for the tag. The desktop's alts carry the tag, which loses its plugin prefix, and main's cost.
+    // Activity: main's lane, then the running subagent, then the finished one, their labels whole in the 18 cells of
+    // 40 columns, too few for the tag. The desktop's alts carry the tag, which loses its plugin prefix, and main's
+    // cost.
     const lanes = textsOf(sectionOf(await ui.drawn(), 'activity'))
-    expect(lanes.filter(text => /^(main|Revert stoc…|Fix cart to…)$/.test(text))).toEqual([
-      'main', 'Revert stoc…', 'Fix cart to…',
+    expect(lanes.filter(text => /^(main|Revert stockUnits|Fix cart total qty)$/.test(text))).toEqual([
+      'main', 'Revert stockUnits', 'Fix cart total qty',
     ])
     expect(await ui.find({ type: 'Text', text: /^@/ }), surface).toBeUndefined()
     if (isDesktop) {
@@ -646,7 +648,7 @@ test('a chevron folds its section, the store keeps the map, a second press unfol
   const bodies: [id: string, title: string, text: string | RegExp][] = [
     ['usage', 'Usage', 'Weekly'],
     ['turn', 'Turn stats', 'Tools'],
-    ['activity', 'Activity', /^Revert stoc…$/],
+    ['activity', 'Activity', /^Revert stockUnits$/],
     ['mcp', 'MCP', 'codebase-memory'],
     ['sources', 'Context sources', 'Skills'],
     ['log', 'Log', 'fix the stock order qty'],
@@ -1324,17 +1326,17 @@ test('the texts that can overrun a row carry the truncation props; the values ne
       expect(placed, `${surface}: ${text}`).toBeDefined()
       expect(placed?.node.props?.wrap, `${surface}: ${text}`).toBeUndefined()
     }
-    // A lane's label is cut to its column (13 cells at 45 columns) with an ellipsis before it is drawn: it carries no
+    // A lane's label is cut to its column (20 cells at 45 columns) with an ellipsis before it is drawn: it carries no
     // truncation, and neither does the value beside it.
-    const label = textNode(tree, 'Map the orde…')
+    const label = textNode(tree, cutCells(AGENTS[0]?.description ?? '', 20))
     expect(label, surface).toBeDefined()
     expect(label?.node.props?.wrap, surface).toBeUndefined()
-    // The type tag shows from a label column of 24 cells (80 columns), dim and cut by shortType, not by the layout.
+    // The type tag shows from a label column of 24 cells (54 columns), dim and cut by shortType, not by the layout.
     const tagsAt = (bodyColumns: number): Node[] => flat(draw(onSurface(FULL, surface), bodyColumns))
       .map(({ node }) => node)
       .filter(node => node.type === 'Text' && isType((textsOf(node)[0] ?? '').replace(/^[\s\u{a0}]+/u, '')))
-    expect(tagsAt(79), surface).toEqual([])
-    const tags = tagsAt(80)
+    expect(tagsAt(53), surface).toEqual([])
+    const tags = tagsAt(54)
     expect(tags.map(node => (textsOf(node)[0] ?? '').trim()), surface).toEqual([
       '@code-reviewer', '@minimal-chang…', ...Array(5).fill('@code-reviewer'),
     ])
@@ -1422,14 +1424,14 @@ test('the lanes outgrow no pane, at the narrowest and the widest body the tests 
   expect(problems[0]).toContain('neither fixed nor flexible')
 })
 
-test('a lane keeps its `@type` from a label column of 24 cells (80 columns), and drops it below that', () => {
+test('a lane keeps its `@type` from a label column of 24 cells (54 columns), and drops it below that', () => {
   for (const surface of SURFACES) {
-    for (const bodyColumns of [8, 79, 80, 120]) {
+    for (const bodyColumns of [8, 53, 54, 120]) {
       const where = `${surface} ${bodyColumns} columns`
       const tree = draw(withAgents(TYPED, surface), bodyColumns)
       expect(rowProblems(tree), where).toEqual([])
       const tags = textsOf(activityOf(tree)).map(text => text.trim()).filter(isType)
-      expect(tags, where).toEqual(bodyColumns >= 80 ? ['@code-reviewer', '@ui-designer', '@frontend-deve…'] : [])
+      expect(tags, where).toEqual(bodyColumns >= 54 ? ['@code-reviewer', '@ui-designer', '@frontend-deve…'] : [])
     }
     // The line that counts the rest does not move: of nine subagents seven have a lane, and `+2 more` is at column 0.
     const nine = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => agent(n, 'running', { type: 'ui-designer' }))
@@ -3922,7 +3924,8 @@ test('Activity is hidden with no subagents and no tasks', () => {
 })
 
 test('a lane row is a label of L cells, an Svg of 19 px and a value of 8 cells', () => {
-  // At 41 columns L is 12 cells and the area 41 × 8 − (12 + 10) × 8 = 152 px.
+  // At 41 columns L is 18 cells and the area 41 × 8 − (18 + 10) × 8 = 104 px. Below 24 cells there is no tag: the
+  // label cell holds the description alone, one spanLine.
   const tree = draw(LANES, 41)
   const body = activityBody(tree)
   expect(body).toHaveLength(10)
@@ -3931,19 +3934,19 @@ test('a lane row is a label of L cells, an Svg of 19 px and a value of 8 cells',
     const [label, area, value, ...rest] = childrenOf(lane)
     expect(rest).toEqual([])
     expect(lane.props).toMatchObject({ flexDirection: 'row', alignItems: 'center', columnGap: 1 })
-    expect(isFixed(label) && label?.props?.width).toBe(12)
+    expect(isFixed(label) && label?.props?.width).toBe(18)
     expect(childrenOf(label)).toHaveLength(1)
     expect(isSpanLine(childrenOf(label)[0])).toBe(true)
     expect(isFlex(area)).toBe(true)
     expect(childrenOf(area).map(image => [image.type, image.props?.width, image.props?.height])).toEqual([
-      ['Svg', 152, 19],
+      ['Svg', 104, 19],
     ])
     expect(isFixed(value)).toBe(true)
     expect(value?.props).toMatchObject({ width: 8, justifyContent: 'flex-end' })
   }
   expect(lanes.map(lane => childrenOf(childrenOf(lane)[1])[0]?.props?.alt)).toEqual(LANE_ALTS)
   expect(lanes.map(lane => textsOf(childrenOf(lane)[0]).join(''))).toEqual([
-    'main', 'Review the …', 'npm test', 'Plan critiq…', 'Map the mask', 'Repro check', 'Engine facts', 'dev server',
+    'main', 'Review the diff', 'npm test', 'Plan critique', 'Map the mask', 'Repro check', 'Engine facts', 'dev server',
   ])
   // Running lanes and main primary, the rest dim.
   expect(lanes.map(lane => flat(childrenOf(lane)[0]).find(({ node }) => node.type === 'Text')?.node.props?.dimColor))
@@ -3951,14 +3954,14 @@ test('a lane row is a label of L cells, an Svg of 19 px and a value of 8 cells',
   expect(lanes.map(lane => textsOf(childrenOf(lane)[2]))).toEqual([
     ['—'], ['$0.310'], ['3m 40s'], ['$0.410+'], ['$0.120'], ['$0.050'], ['$0.880'], ['4m 00s'],
   ])
-  // The axis row: an empty label cell, the axis 152 × 16, an empty value cell.
+  // The axis row: an empty label cell, the axis 104 × 16, an empty value cell.
   const [axisLabel, axisArea, axisValue, ...axisRest] = childrenOf(body[8])
   expect(axisRest).toEqual([])
   expect(body[8]?.props).toMatchObject({ flexDirection: 'row', alignItems: 'center', columnGap: 1 })
-  expect(isFixed(axisLabel) && axisLabel?.props?.width).toBe(12)
+  expect(isFixed(axisLabel) && axisLabel?.props?.width).toBe(18)
   expect(isFlex(axisArea)).toBe(true)
   expect(childrenOf(axisArea).map(image => [image.type, image.props?.width, image.props?.height, image.props?.alt]))
-    .toEqual([['Svg', 152, 16, 'axis 11:52 to now']])
+    .toEqual([['Svg', 104, 16, 'axis 11:52 to now']])
   expect(isFixed(axisValue) && axisValue?.props?.width).toBe(8)
   expect([...childrenOf(axisLabel), ...childrenOf(axisValue)]).toEqual([])
   // `+1 more`: dim, at column 0.
@@ -3973,26 +3976,56 @@ test('a lane row is a label of L cells, an Svg of 19 px and a value of 8 cells',
   expect(rowProblems(tree)).toEqual([])
 })
 
-test('the terminal Activity rows at 44 columns are §6.5\'s', () => {
+test('the terminal Activity rows at 44 columns are §4.5\'s', () => {
   const tree = draw(onSurface(LANES, 'terminal'), 44)
   const [header] = headerRows(activityOf(tree))
   expect([header?.title, header?.label, header?.summary]).toEqual(['Activity', '▾', '3/8'])
   const body = activityBody(tree)
   expect(body.every(isSpanLine)).toBe(true)
-  // Main's value is a dash: Plan critique is restored, so main's cost is not known. §6.5's example, which shows
-  // `$3.20`, is aligned in Task 13.
+  // Main's value is a dash: Plan critique is restored, so main's cost is not known.
   expect(body.map(line => spanTexts(line).join(''))).toEqual([
-    'main          ─────    ─────  ━━━━◐        —',
-    'Review the d…           ━━━━━━━━━━◐   $0.310',
-    'npm test                    ━━━━━━◐   3m 40s',
-    'Plan critique ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄◐  $0.410+',
-    'Map the mask                    ─✓    $0.120',
-    'Repro check                ──✗        $0.050',
-    'Engine facts  ─────────────✓          $0.880',
-    'dev server       ───────■             4m 00s',
-    '                11:55    12:00  now',
+    'main                ────   ─── ━━━◐        —',
+    'Review the diff            ━━━━━━━◐   $0.310',
+    'npm test                      ━━━━◐   3m 40s',
+    'Plan critique       ┄┄┄┄┄┄┄┄┄┄┄┄┄┄◐  $0.410+',
+    'Map the mask                     ─✓   $0.120',
+    'Repro check                  ──✗      $0.050',
+    'Engine facts        ─────────✓        $0.880',
+    'dev server            ─────■          4m 00s',
+    '                                now',
     '+1 more',
   ])
+  expect(rowProblems(tree)).toEqual([])
+})
+
+test('the desktop label column at 108 columns: a 32-cell description Box, then the whole tag', () => {
+  const tree = draw(LANES, 108)
+  const lanes = activityBody(tree).slice(0, 8)
+  const tags = ['@code-reviewer', '@shell', '@plan-critic', '@explorer', '@general-purpo…', '@general-purpo…', '@shell']
+  lanes.forEach((lane, i) => {
+    const label = childrenOf(lane)[0]
+    expect(isFixed(label) && label?.props?.width, String(i)).toBe(48)
+    expect(childrenOf(label), String(i)).toHaveLength(1)
+    const [inner] = childrenOf(label)
+    if (i === 0) {
+      // Main has no tag: its description alone.
+      expect(isSpanLine(inner)).toBe(true)
+      expect(spanTexts(inner)).toEqual(['main'])
+      return
+    }
+    expect(isRow(inner) && isFixed(inner), String(i)).toBe(true)
+    const [desc, tag, ...rest] = childrenOf(inner)
+    expect(rest).toEqual([])
+    expect(isRow(desc) && isFixed(desc), String(i)).toBe(true)
+    expect(desc?.props).toMatchObject({ width: 32, overflow: 'hidden' })
+    expect(childrenOf(desc), String(i)).toHaveLength(1)
+    expect(isSpanLine(childrenOf(desc)[0]), String(i)).toBe(true)
+    expect(spanTexts(childrenOf(desc)[0]), String(i)).toEqual([LANE_ALTS[i]?.split(' (')[0]])
+    expect(flat(desc).some(({ node }) => node.props?.wrap !== undefined), String(i)).toBe(false)
+    expect(isRow(tag) && isFixed(tag), String(i)).toBe(true)
+    expect(childrenOf(tag).map(text => [text.type, textsOf(text), text.props?.dimColor]), String(i))
+      .toEqual([['Text', [`\u{a0}${tags[i - 1]}`], true]])
+  })
   expect(rowProblems(tree)).toEqual([])
 })
 
