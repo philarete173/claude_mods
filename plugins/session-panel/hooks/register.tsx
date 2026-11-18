@@ -1102,21 +1102,31 @@ export const register: Register = (on, options) => {
     // stop did. That is no fault of the tool, so the line is no error. The signal is read at once, before any other
     // wait.
     const isAbandoned = ran.isError === true && next.signal.aborted
+    // shortcut: the engine marks a blocked call only by its text, `Blocked:`; verify the field live and use a deny or a
+    // reason field if the engine gives one
+    const isBlocked = ran.isError === true && (ran.text?.startsWith('Blocked:') === true ||
+      (typeof ran.result === 'string' && ran.result.startsWith('Blocked:')))
+    // A call the engine blocked before it ran is a denial, not a failure (§9).
+    const isDenied = ran.deny !== undefined || isBlocked
     const t1 = await $.clock.now()
     // The call's station, its flight and its turn interval are written first, as soon as the call has returned, so
     // nothing later in the hook can skip them. A failure is one whose Log line is an error with a mark: not denied, not
     // abandoned, not of an agent with no row (the line's kind below).
     const station = stationOf(e.tool)
     const { who, isUnknown } = await whoIs($, e.agentId)
-    const isStationFailure = ran.isError === true && ran.deny === undefined && !isAbandoned && !isUnknown
+    const isStationFailure = ran.isError === true && !isDenied && !isAbandoned && !isUnknown
+    const callId = e.tool_use_id
+    // A call with no entry in flight is one whose chunk the mod never saw (no id, or one no stream named: another
+    // plugin's $.tool.call): it pulses at its return. One with an entry pulsed at its chunk (markInFlight, §7).
+    const isUnseen = callId === undefined || !Object.hasOwn(await read($, inFlightAtom), callId)
     await update($, stationsAtom, held => ({
       ...held,
       [station]: {
         ...held[station], calls: held[station].calls + 1,
         failedThisTurn: held[station].failedThisTurn + (isStationFailure ? 1 : 0),
+        ...(isUnseen ? { lastCallAt: t1 } : {}),
       },
     }))
-    const callId = e.tool_use_id
     if (callId !== undefined) {
       doneCallIds.delete(callId)
       doneCallIds.add(callId)
@@ -1130,8 +1140,8 @@ export const register: Register = (on, options) => {
     // A call that may have changed a file asks for a read of the project, whatever its outcome (a command that failed
     // may have changed some first); a denied one never ran. A call that core ran read-only (a Bash `ls`) changed no
     // file, so it asks for none.
-    if (ran.deny === undefined && ran.isReadOnly !== true && WRITE_TOOLS.includes(e.tool)) requestProjectLater($, t1)
-    const isFailed = ran.deny !== undefined || ran.isError === true
+    if (!isDenied && ran.isReadOnly !== true && WRITE_TOOLS.includes(e.tool)) requestProjectLater($, t1)
+    const isFailed = isDenied || ran.isError === true
     // A subagent that reports through the hand-back tool (auto mode) says it in its `done` line: the message is kept
     // for it. The input is not typed, so only a string counts.
     if (e.tool === HANDBACK_TOOL && e.agentId !== undefined && !isFailed) {
@@ -1158,7 +1168,7 @@ export const register: Register = (on, options) => {
       // How it went is the outcome, a column of its own: the time it took behind a mark, or `denied`. An abandoned call
       // has the time alone, as a stopped subagent has, and is news, not a fault.
       const took = fmtDuration(t1 - t0)
-      const outcome = ran.deny !== undefined ? 'denied' : isAbandoned ? took : `${isFailed ? '✗' : '✓'} ${took}`
+      const outcome = isDenied ? 'denied' : isAbandoned ? took : `${isFailed ? '✗' : '✓'} ${took}`
       // The engine's own forks and a workflow's agents carry ids that no agent.spawn announced, so the agents atom has
       // no row for them. Core refuses the tools of most forks, so a fork that tries one would show a red failure that
       // nobody caused (the 0.4.1 live check). The pane cannot tell a fork from a workflow's agent, whose failure is

@@ -749,7 +749,8 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
   on('tool.call', async (_$, e) => {
     // What a call says decides how it ends: the command of a Bash, the new text of an Edit, the description of an
     // Agent, the message of a SendMessage or of a SubagentHandback, the id of a TaskStop. One that starts with `deny`
-    // is denied, one that starts with `fail` fails, and a Bash that starts with `move` is moved to the background.
+    // is denied, one that starts with `fail` fails, a Bash that starts with `blocked-` is blocked by the engine, and a
+    // Bash that starts with `move` is moved to the background.
     let says = ''
     if (e.tool === 'Bash') says = e.command
     if (e.tool === 'Edit') says = e.new_string
@@ -758,6 +759,15 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     if (e.tool === 'TaskStop') says = e.task_id ?? ''
     if (e.tool === HANDBACK_TOOL) says = String('message' in e ? e.message : '')
     if (says.startsWith('deny')) return { deny: 'no' }
+    // A call the engine blocked before it ran (2.1.325): its text, or its result alone, starts `Blocked:`; one where
+    // `Blocked:` comes later is an ordinary error.
+    if (says.startsWith('blocked-text')) {
+      return { isError: true as const, result: undefined, text: 'Blocked: standalone sleep 60' }
+    }
+    if (says.startsWith('blocked-result')) return { isError: true as const, result: 'Blocked: standalone sleep 60' }
+    if (says.startsWith('blocked-late')) {
+      return { isError: true as const, result: 'Error: Blocked: x', text: 'Error: Blocked: x' }
+    }
     const readOnly = w.isReadOnly ? { isReadOnly: true as const } : {}
     // A Bash told to run in the background, a Monitor and a Workflow start a task: their result holds its id
     // (`w.taskId`) under the name that the tool gives it. A failing one holds it too, which a real error does not, so
@@ -3461,7 +3471,72 @@ test('tool.call clears its call, counts its station and keeps the pulse', SLOW_R
   await drive(clock, $.tool.call({ tool: 'Bash', command: 'ls' }))
   state = await readState($)
   expect(Object.keys(state.inFlight)).toEqual(['u2'])
-  expect(state.stations.shell.calls).toBe(2)
+  expect(state.stations.shell).toMatchObject({ calls: 2, lastCallAt: clock.now() })
+})
+
+test('a call the mod saw no chunk of pulses at its return', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await startTurn($)
+
+  const t0 = clock.now()
+  await drive(clock, $.tool.call({ tool: 'Bash', command: 'ls' }))
+  expect((await readState($)).stations.shell).toMatchObject({ calls: 1, lastCallAt: t0 + 300 })
+
+  // An id that no stream named is as unseen as no id.
+  const t1 = clock.now()
+  await drive(clock, $.tool.call({ tool: 'Bash', command: 'ls', tool_use_id: 'zz' }))
+  expect((await readState($)).stations.shell).toMatchObject({ calls: 2, lastCallAt: t1 + 300 })
+})
+
+// The engine refuses some calls before they run (`Blocked: standalone sleep 60`); the mod counts one as a denial.
+test('a call the engine blocked counts as a denial', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await startTurn($)
+  await runStep($, clock, { turnId: 't0', index: 0 })
+
+  await drive(clock, $.tool.call({ tool: 'Bash', command: 'blocked-text sleep 60' }))
+  const state = await readState($)
+  expect(state.stations.shell).toMatchObject({ calls: 1, failedThisTurn: 0 })
+  expect(state.log[0]).toMatchObject({ outcome: 'denied' })
+  expect(state.turn?.tools.at(-1)).toMatchObject({ failed: false })
+
+  // The Log's kind is a denial's.
+  await $.tool.call({ tool: 'Bash', command: 'deny it' })
+  expect(state.log[0]?.kind).toBe((await readState($)).log[0]?.kind)
+})
+
+test('a blocked call whose result alone says so is a denial too', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await startTurn($)
+  await runStep($, clock, { turnId: 't0', index: 0 })
+
+  await drive(clock, $.tool.call({ tool: 'Bash', command: 'blocked-result sleep 60' }))
+  const state = await readState($)
+  expect(state.stations.shell).toMatchObject({ calls: 1, failedThisTurn: 0 })
+  expect(state.log[0]).toMatchObject({ outcome: 'denied' })
+  expect(state.turn?.tools.at(-1)).toMatchObject({ failed: false })
+})
+
+test('Blocked: later in the text, and a plain error, stay failures', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await startTurn($)
+
+  await $.tool.call({ tool: 'Bash', command: 'blocked-late x' })
+  let state = await readState($)
+  expect(state.stations.shell.failedThisTurn).toBe(1)
+  expect(state.log[0]?.outcome).toMatch(/^✗/)
+
+  await $.tool.call({ tool: 'Bash', command: 'fail now' })
+  state = await readState($)
+  expect(state.stations.shell.failedThisTurn).toBe(2)
 })
 
 test('a call whose tool.call has run is never marked in flight later', SLOW_READER, async ($, on) => {
