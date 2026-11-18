@@ -1009,8 +1009,9 @@ unknown tool goes to Shell.
 - **`failedThisTurn`:** counted since main's current `turn.start`, and reset there. A failure is a call whose Log line
   is an error with a ✗ mark: `ran.isError === true`, not denied, not abandoned, and not by an agent with no row
   (`hooks/register.tsx:1023-1030`). A denied call is not a failure, and neither is a call the engine blocked before it
-  ran: an error whose `text`, or whose `result` string, starts `Blocked:` counts as a denial everywhere the hook reads
-  `ran.deny` (`isDenied`; its Log outcome is `denied`). As any error, it starts no task and hands nothing back
+  ran: a built-in tool's error (not `mcp__…`) whose `text`, or whose `result` string, starts `Blocked:` counts as a
+  denial (`isDenied`; its Log outcome is `denied`). It still asks the project read, which reads `ran.deny` alone: a
+  call that printed `Blocked:` may have changed files. As any error, it starts no task and hands nothing back
   (0.7.1 §9).
 - **`lastCallAt`** (0.7.1 §7): the time the mod saw the call's first chunk in the model's stream, or the first chunk
   of a model step for Model. A call that reaches `tool.call` with no in-flight entry (no `tool_use_id`, or one no
@@ -1055,13 +1056,15 @@ another plugin can keep the event from the mod, as cc-plugin-sec-default does.
 
 **A compaction the mod did not see** (0.7.1 §8). The engine drops `context.tokens` after a compaction, until the next
 response. A usage reading with no tokens while `usageAtom` holds some is a compaction the mod did not see. Every
-reading checks it: `refreshUsage` (the 60 s tick, the pane's start, a model change, a seen compaction's refresh),
+reading checks it: `refreshUsage` (the 60 s tick, the pane's start, a model change, a compaction found at a turn),
 `session.measure`, and main `turn.start`'s light `$.session.usage()` read. The decision and the clearing of the held
 tokens are one `update` of `usageAtom`, so of two readings that race, only the one whose update cleared them counts:
 the tick, and a Log line `compacted` with no token numbers (who `main`, kind `info`). At `turn.start` the line is at
 the turn's time, under the prompt's, and a refresh follows. A seen `session.compact` clears the held tokens itself
-before its refresh; `/clear` and a resume clear them first in their reset, so a reading that lands during the reset
-counts nothing.
+and asks no refresh: the engine may drop the tokens only after the hook's chain returns, so a reading then could put
+the old ones back; the tick reads the rest. `/clear` and a resume clear them first in their reset, so a reading that
+lands during the reset counts nothing, and a `refreshUsage` asked before the reset and answered after it writes
+nothing.
 
 ### 8.6 Restore after a reopen
 
@@ -1163,8 +1166,9 @@ pulses, the ripples, the beat rings and the core's breath and makes the caps sta
     Two races are accepted: a reading taken before a seen compaction and written after its clear puts the old tokens
     back, so a later reading can count that compaction again; and a tick's reading taken after the engine drops the
     tokens can land before `session.compact`'s own clear, so the two count it twice. This is documented;
-  - a call the engine blocked (its error starts `Blocked:`) is a denial, not a failure (§8.2). The rule reads the
-    engine's text: a heuristic, carried as a `shortcut:` until the engine gives a field for it.
+  - a call the engine blocked (a built-in tool's error that starts `Blocked:`) is a denial, not a failure (§8.2), and
+    still asks the project read. The rule reads the engine's text: a heuristic, carried as a `shortcut:` until the
+    engine gives a field for it.
 
 ## 11. Engine facts, risks and the first task (T4)
 

@@ -750,7 +750,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     // What a call says decides how it ends: the command of a Bash, the new text of an Edit, the description of an
     // Agent, the message of a SendMessage or of a SubagentHandback, the id of a TaskStop. One that starts with `deny`
     // is denied, one that starts with `fail` fails, a Bash that starts with `blocked-` is blocked by the engine, and a
-    // Bash that starts with `move` is moved to the background.
+    // Bash that starts with `move` is moved to the background. An MCP tool's call says its `says`.
     let says = ''
     if (e.tool === 'Bash') says = e.command
     if (e.tool === 'Edit') says = e.new_string
@@ -758,6 +758,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     if (e.tool === 'SendMessage') says = e.message
     if (e.tool === 'TaskStop') says = e.task_id ?? ''
     if (e.tool === HANDBACK_TOOL) says = String('message' in e ? e.message : '')
+    if (e.tool.startsWith('mcp__')) says = String('says' in e ? e.says : '')
     if (says.startsWith('deny')) return { deny: 'no' }
     // A call the engine blocked before it ran (2.1.325): its text, or its result alone, starts `Blocked:`; one where
     // `Blocked:` comes later is an ordinary error.
@@ -768,6 +769,8 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     if (says.startsWith('blocked-late')) {
       return { isError: true as const, result: 'Error: Blocked: x', text: 'Error: Blocked: x' }
     }
+    // An error whose text is no string (a plugin above may answer anything).
+    if (says.startsWith('fail-number')) return { isError: true as const, result: 'boom', text: 5 as never }
     const readOnly = w.isReadOnly ? { isReadOnly: true as const } : {}
     // A Bash told to run in the background, a Monitor and a Workflow start a task: their result holds its id
     // (`w.taskId`) under the name that the tool gives it. A failing one holds it too, which a real error does not, so
@@ -3215,11 +3218,10 @@ test('the context is measured against the breakdown\'s window, which session.mea
     expect(compacted.contextTokens).toBeUndefined()
     expect(compacted.contextPct).toBeUndefined()
 
-    // A reading that comes with no breakdown leaves the window as it was.
+    // A reading that comes with no breakdown (the tick's: a compaction asks none) leaves the window as it was.
     w.rawMaxTokens = undefined
     w.tokens = 60_000
-    await $.session.compact({ trigger: 'manual', messages: MESSAGES })
-    await clock.advance(1)
+    await clock.advance(60_000)
     expect(await shown()).toMatchObject({ contextTokens: 60_000, contextWindow: 600_000, contextPct: 10 })
   })
 
@@ -3538,6 +3540,45 @@ test('Blocked: later in the text, and a plain error, stay failures', SLOW_READER
   state = await readState($)
   expect(state.stations.shell.failedThisTurn).toBe(2)
 })
+
+// An MCP server writes its error text freely: only a built-in tool's call counts as blocked.
+test('an MCP call whose error text starts with Blocked: stays a failure', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await startTurn($)
+
+  await $.tool.call({ tool: 'mcp__x__y', says: 'blocked-text' } as never)
+  const state = await readState($)
+  expect(state.stations.mcp).toMatchObject({ calls: 1, failedThisTurn: 1 })
+  expect(state.log[0]?.outcome).toMatch(/^✗/)
+})
+
+// A call that printed `Blocked:` may still have changed files: it keeps the project read.
+test('a built-in blocked call still asks the project read', WITH_READER, async ($, on) => {
+  const clock = mock.clock(on)
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  w.runs.length = 0
+
+  await $.tool.call({ tool: 'Bash', command: 'blocked-text sleep 60' })
+  await clock.advance(PROJECT_DELAY_MS)
+  expect(reads(w)).toBe(1)
+})
+
+test('an error whose text is no string is a plain failure, and the hook completes its writes', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    bottom(on, clock)
+    await $.session.start(START)
+    await startTurn($)
+
+    expect(await $.tool.call({ tool: 'Bash', command: 'fail-number x' })).toMatchObject({ isError: true, text: 5 })
+    const state = await readState($)
+    expect(state.stations.shell).toMatchObject({ calls: 1, failedThisTurn: 1 })
+    expect(state.log[0]?.outcome).toMatch(/^✗/)
+  })
 
 test('a call whose tool.call has run is never marked in flight later', SLOW_READER, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
@@ -6335,7 +6376,7 @@ test('the engine list closes subagents that are still running and never rewrites
     expect(agents.a4).toMatchObject({ status: 'running', endedAt: null })
   })
 
-test('a compaction is logged and refreshes usage; a skipped one and a subagent\'s are not logged', WITH_READER,
+test('a compaction is logged and asks no refresh; a skipped one and a subagent\'s are not logged', WITH_READER,
   async ($, on) => {
     const clock = mock.clock(on, { now: 1_000_000 })
     const w = bottom(on, clock)
@@ -6348,7 +6389,7 @@ test('a compaction is logged and refreshes usage; a skipped one and a subagent\'
     expect((await readState($)).log).toEqual([
       { at: compactedAt, who: 'main', text: 'compacted 180k → 40k', kind: 'info' },
     ])
-    expect(w.breakdowns).toBe(2)
+    expect(w.breakdowns).toBe(1) // the start's alone
 
     await $.session.compact({ trigger: 'auto', agentId: 'a9', messages: MESSAGES })
     w.compacted = { skip: 'off' }
@@ -6416,7 +6457,20 @@ test('a seen compaction counts once', WITH_READER, async ($, on) => {
   w.tokens = undefined
   w.compacted = { messages: MESSAGES, tokensBefore: 180_000, tokensAfter: 40_000 }
   await $.session.compact({ trigger: 'manual', messages: MESSAGES })
-  await clock.advance(1) // its refresh
+  await clock.advance(1)
+  await clock.advance(60_000) // a tick
+  expect((await readState($)).compactions).toBe(1)
+  expect((await readState($)).log?.filter(entry => entry.text.startsWith('compacted')).map(entry => entry.text))
+    .toEqual(['compacted 180k → 40k'])
+})
+
+// The engine may drop the tokens only after the whole chain of session.compact returns: a reading the mod took right
+// after its clear would find the old ones and put them back, for the tick's reading to count again.
+test('a seen compaction whose tokens drop after the hook counts once', WITH_READER, async ($, on) => {
+  const { clock, w } = await holdTokens($, on)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES })
+  await clock.advance(1)
+  w.tokens = undefined // the engine installs the compaction now
   await clock.advance(60_000) // a tick
   expect((await readState($)).compactions).toBe(1)
   expect((await readState($)).log?.filter(entry => entry.text.startsWith('compacted')).map(entry => entry.text))
@@ -6458,6 +6512,53 @@ test('a tick\'s reading with no tokens in the middle of a /clear counts nothing'
   expect((await readState($)).compactions ?? 0).toBe(0)
   expect(await compactedLines($)).toHaveLength(0)
 })
+
+// A reading asked before a /clear and answered after it is the old conversation's: it writes nothing (the tokens, the
+// servers) and counts nothing, so the new conversation's first reading with no tokens finds none held.
+test('a refresh whose reading straddles a /clear writes nothing and counts nothing', SLOW_READER, async ($, on) => {
+  const { clock, w } = await holdTokens($, on)
+  const { mcp } = await readState($)
+  await clock.advance(59_000) // the second tick, the one that refreshes, is 1 s off
+  w.usageLag = 2000
+  w.mcpServers = ['other']
+  await clock.advance(1000) // the tick's refresh asks; its reading is held
+  await endSession($)
+  await clock.advance(2000) // the reading comes back after the reset
+  let state = await readState($)
+  expect(state.usage.contextTokens).toBeUndefined()
+  expect(state.mcp).toEqual(mcp)
+
+  w.usageLag = 0
+  w.tokens = undefined
+  await clock.advance(60_000)
+  state = await readState($)
+  expect(state.compactions ?? 0).toBe(0)
+  expect(await compactedLines($)).toHaveLength(0)
+})
+
+// A refresh that starts once a reset has raised the epoch, but before the reset's clear of the usage lands, writes
+// nothing while the reset runs: no tokens, no servers, no count. The hold keeps the reset before that clear.
+test('a refresh that starts while a reset runs, before its clear lands, writes nothing and counts nothing',
+  WITH_WRITE_HOLDER, async ($, on) => {
+    const { clock, w } = await holdTokens($, on)
+    const { mcp } = await readState($)
+    await clock.advance(59_000) // the second tick, the one that refreshes, is 1 s off
+    w.tokens = undefined
+    w.mcpServers = ['other']
+    await armHold($, { keys: ['usage'], mode: 'before', ms: 2000 })
+    const reset = endSession($)
+    await clock.advance(1000) // the tick's refresh reads and writes while the reset waits before its clear
+    await clock.advance(1000)
+    await reset
+    let state = await readState($)
+    expect(state.usage.contextTokens).toBeUndefined()
+    expect(state.mcp).toEqual(mcp)
+
+    await clock.advance(60_000) // a reading with no tokens, after the reset
+    state = await readState($)
+    expect(state.compactions ?? 0).toBe(0)
+    expect(await compactedLines($)).toHaveLength(0)
+  })
 
 test('tokens on both sides count nothing', WITH_READER, async ($, on) => {
   const { clock, w } = await holdTokens($, on)

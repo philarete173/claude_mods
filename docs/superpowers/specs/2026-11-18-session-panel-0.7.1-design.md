@@ -375,9 +375,11 @@ gap makes `isEmpty` read a non-empty pane, and the restore is skipped.
 
 New order, after `const started = await next(e)`:
 
-1. `isDue` and `isRestoreDue` as today (`:863-864`);
+1. `isDue` and `isRestoreDue` as today (`:863-864`); the start claims the pane (`isStarted = true`) here, right after
+   `next(e)` and before its first await, so the turn fallback cannot restore a second time;
 2. `if (isDue) askRestore($, null)`;
-3. `await update($, inFlightAtom, () => ({}))`;
+3. `await update($, inFlightAtom, () => ({}))`, whose `.catch` swallows a refused write: the start has claimed the
+   pane, so no turn fallback would start it, and the pane still starts;
 4. `startPane` on the first start, as today.
 
 `restorePane` clears `inFlightAtom` itself when it restores (`:320`); step 3 still clears it for a reload in the middle
@@ -406,8 +408,8 @@ Tests: a call whose chunk was seen keeps `lastCallAt` at the chunk's time after 
 
 ## 8. A compaction another plugin hid (finding 5)
 
-`session.compact` (`hooks/register.tsx:1307-1321`) counts the tick, writes `compacted … → …` and refreshes the usage.
-When another plugin keeps the event from the mod, none of that happens.
+`session.compact` (`hooks/register.tsx:1307-1321`) counts the tick, writes `compacted … → …` and clears the held
+tokens. When another plugin keeps the event from the mod, none of that happens.
 
 The signal: the engine drops `context.tokens` right after a compaction, until the next response. The types say so:
 "`tokens` and `percent` … absent until the first response of the live window: a fresh session, or one just
@@ -419,7 +421,7 @@ compaction the mod did not see.
 **Where it runs:** on every usage reading the mod takes.
 
 - `refreshUsage` (`:374-396`, its write `:386-390`), whatever asked for it: the 60 s tick (`:833-835`), the pane's
-  start (`:827`), a model change (`:952`), a seen compaction's own refresh (`:1317`);
+  start (`:827`), a model change (`:952`), a compaction found at `turn.start`;
 - `session.measure`'s write (`:946-956`, the write `:949`);
 - main `turn.start`'s light `$.session.usage()` read (`:1001`), which today reads only the cost. It writes `usageAtom`
   only to clear the held tokens when it finds a compaction.
@@ -440,10 +442,16 @@ cleared them counts, so two readings that race count once.
 No `messages()` read.
 
 - **The seen compaction:** `session.compact` (`:1307-1321`) clears `contextTokens` and `contextPct` itself, in the
-  step that counts it (`:1314`) and before its `refreshUsage` (`:1317`), so that refresh finds nothing held.
+  step that counts it (`:1314`), so the ring reads `—` and the next reading finds nothing held. It asks no refresh:
+  the hook runs while the conversation is "about to be compacted", so the engine may drop `context.tokens` only after
+  the whole chain returns, and a reading taken then would put the old tokens back for a later reading to count again.
+  The 60 s tick reads the rest (skills, MCP servers, window: none of them changes with a compaction).
 - **A fresh session's first turn does not trigger it:** `usageAtom` starts with no `contextTokens` (`:31`) and no
   response has given one. After `/clear` or a resume, `session.end` writes `contextTokens: undefined` (`:919`). Its
   reset clears the held tokens first, so a reading that lands during the reset finds none held and counts nothing.
+  A `refreshUsage` whose read straddles the reset (asked before it, answered after its clear) writes nothing: it
+  keeps `logEpoch` from before its read, and when a reset has run since, or one runs at its write
+  (`resetsRunning !== 0`), it skips the usage write, the MCP write and the count, as `restorePane` guards its writes.
 - **Still missed, a limit:** a compaction whose next response lands before any reading. In practice that is an
   auto-compaction inside a running turn: the turn's next response brings the tokens back before a reading sees them
   absent. The code carries `// shortcut: a compaction answered before any usage reading is not seen (an
@@ -460,7 +468,13 @@ Tests:
   nothing;
 - a hidden compaction, then a main `turn.start`: + 1, the Log line under the prompt line, and a refresh asked;
 - `session.measure` with no tokens while tokens are held: + 1;
-- a seen `session.compact`, then its refresh, then a tick: one count;
+- a seen `session.compact` asks no breakdown read;
+- a seen `session.compact`, then a tick: one count; and with the tokens dropped only after the hook returns, a seen
+  `session.compact`, then a tick's reading with no tokens: one count, one numbered line, no bare `compacted` line;
+- a refresh whose read is held across a `/clear` writes nothing and counts nothing, and a reading with no tokens after
+  it counts nothing either;
+- a refresh that starts after `session.end` has raised `logEpoch` but before the reset's usage clear lands writes
+  nothing and counts nothing;
 - a fresh session: nothing;
 - a subagent's `turn.start`: nothing;
 - tokens present on both sides: nothing.
@@ -473,24 +487,31 @@ red `✗` and a failed Shell. 0.7.1 counts it as a denial.
 In `tool.call` (`hooks/register.tsx:1084-1164`):
 
 ```text
-isBlocked = ran.isError === true &&
-  (ran.text?.startsWith('Blocked:') === true || (typeof ran.result === 'string' && ran.result.startsWith('Blocked:')))
+isBlocked = ran.isError === true && !e.tool.startsWith('mcp__') && (
+  (typeof ran.text === 'string' && ran.text.startsWith('Blocked:')) ||
+  (typeof ran.result === 'string' && ran.result.startsWith('Blocked:')))
 isDenied  = ran.deny !== undefined || isBlocked
 ```
 
-- Every test of `ran.deny` in the hook reads `isDenied`: `isStationFailure` (`:1097`) is false, so the station has
-  no failure and main's segment is not failed (`:1155-1158`); no project read (`:1119`); the Log outcome is `denied`
-  (`:1147`), with a deny's kind.
+- Built-in tools only: an MCP tool (`mcp__…`) never counts as blocked, since its server writes its error text freely.
+  A `text` that is no string is no `Blocked:` text, so the check cannot throw.
+- The tests of `ran.deny` in the hook read `isDenied`: `isStationFailure` (`:1097`) is false, so the station has no
+  failure and main's segment is not failed (`:1155-1158`); the Log outcome is `denied` (`:1147`), with a deny's kind.
+- The project read (`:1119`) still reads `ran.deny === undefined`, as in 0.7.0: a blocked call asks it, since a call
+  that printed `Blocked:` may still have changed files; a real block costs one cheap read.
 - `isFailed` (`:1120`) stays true, as it is for any error: no task, no hand-back.
 - The fields: on an error, `result` is "the error text, or undefined", `text` is "the error as the model reads it"
   (2.1.325 d.ts:14738-14746; 2.1.308 :13609-13614). Which one carries `Blocked:`, and whether it starts the text, is
   to be verified live (§14).
-- A heuristic, marked in the code: `// shortcut: the engine marks a blocked call only by its text, \`Blocked:\`;
-  verify the field live and use a deny or a reason field if the engine gives one`.
+- A heuristic, marked in the code: `// shortcut: the engine marks a blocked call only by its text, \`Blocked:\`, of a
+  built-in tool (an MCP server writes its error text freely); verify the field live and use a deny or a reason field
+  if the engine gives one`.
 
 Tests: `isError` with `text: 'Blocked: standalone sleep 60'` → Shell `calls` + 1, `failedThisTurn` 0, Log outcome
 `denied`, segment not failed; the same with `result: 'Blocked: …'` and no `text`; `'Error: Blocked: x'` and a plain
-error stay failures.
+error stay failures; an `mcp__x__y` call whose error text starts `Blocked:` stays a failure (Log `✗`, MCP failed); a
+built-in blocked call still asks the project read; an error whose `text` is no string is a plain failure, and the hook
+completes its writes.
 
 ## 10. A resumed subagent's runs (finding 6b)
 
@@ -604,7 +625,9 @@ The other stale Context passages keep their text, and each gets a one-line note 
    both themes: the swatches in their hues, the rows ending short of the edge, no item clipped by its row on the
    desktop (capitals are wider than a cell). While a turn runs: how often a row is added, and whether that is calm.
 8. **`claude --resume <id> "…"`** (§6): the restore runs, and the pane shows the old session's rows. Only the live
-   engine can prove it: the restore relies on its atom reads being issued before the first await.
+   engine can prove it: the restore relies on its atom reads being issued before the first await. Also check that
+   the first prompt's line appears once in the Log: the restore at `session.start` cuts at no turn text, so a
+   `messages()` that already holds the prompt's row would show it twice.
 
 ## 15. Risks
 
@@ -614,10 +637,12 @@ The other stale Context passages keep their text, and each gets a one-line note 
   halo, 8 ripples and 8 beat rings at most, and the labels add the middle cut over ≤ 8 lanes. Both are small, but
   the budget tests must pass at the caps.
 - **The missed-compaction check** (§8) still misses a compaction inside a running turn, whose next response lands
-  before any reading. Two races can count a seen compaction twice: a reading from before it, written after its clear,
-  lets a later reading count it again; and a tick's reading taken after the engine drops the tokens, landing before
-  `session.compact`'s own clear, counts it as hidden before `session.compact` counts it.
-- **The `Blocked:` heuristic** (§9) depends on the engine's text.
+  before any reading. Two races can count a seen compaction twice: a reading from before it (a tick's, say: the seen
+  compaction asks no refresh of its own), written after its clear, lets a later reading count it again; and a tick's
+  reading taken after the engine drops the tokens, landing before `session.compact`'s own clear, counts it as hidden
+  before `session.compact` counts it. A reading that straddles a `/clear` or a resume is guarded: it writes nothing.
+- **The `Blocked:` heuristic** (§9) depends on the engine's text, for built-in tools only. A call that printed
+  `Blocked:` without being blocked still gets its project read; its Log line and station read as a denial.
 - **Narrow panes lose lane length** (§4.5): at 360 px the lane area drops from 152 to 104 px and the axis shows only
   `now`.
 

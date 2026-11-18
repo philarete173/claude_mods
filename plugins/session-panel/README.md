@@ -48,8 +48,8 @@ separate: a marketplace install writes `session-panel_philarete-mods-25995b3fb64
     badge shows `×N` (`×9+` from 10).
   - A failed call (one the Log draws as an error, with ✗; a denied or abandoned call is none) gives its station a red
     circle and a red disc with this turn's count of failures (`9+` from 10). It stays until the main agent's next turn
-    starts. A call the engine blocked before it ran (its error starts `Blocked:`) is drawn as a denial, not a failure:
-    its Log line reads `denied`.
+    starts. A call of a built-in tool that the engine blocked before it ran (its error starts `Blocked:`) is drawn as
+    a denial, not a failure: its Log line reads `denied`. An MCP tool's error is never taken for a block.
   - On each call (a model step, for Model) a pulse, a comet with a tail, runs from the core to the station; when it
     arrives the circle flashes and a ripple spreads from it. The pulse dates from the call's first chunk in the
     model's stream; a call the mod saw no chunk of (one another plugin made, for example) pulses at its return.
@@ -315,8 +315,8 @@ restarts.
   minute, the main agent's next prompt, or a measure. It draws the tick and a bare `compacted` line, with no token
   numbers. A compaction inside a running turn whose next response comes before any reading is still missed, and two
   rare races can count one compaction twice.
-- A call the engine blocked is known by its error text alone, which starts `Blocked:`. Should the engine change that
-  text, such a call reads as a failure again.
+- A call the engine blocked is known by its error text alone, which starts `Blocked:`, and only for built-in tools.
+  Should the engine change that text, such a call reads as a failure again.
 - Restored lanes are dashed, and restored stations have no running or failure marks of their own (see "What a reopen
   restores").
 - A call whose `tool.call` another plugin answers never reaches the mod's hook, so it stays in flight, and its station

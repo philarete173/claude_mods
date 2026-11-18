@@ -134,7 +134,7 @@ test('a pulse is drawn while its age is below its lifetime, with begin −age', 
   const shellPath = 'M138 47.5H134Q128 47.5 128 53.5V62.5Q128 68.5 122 68.5H104'
   const shell = drawBand(withStation(EXAMPLE, 'shell', tally(4, 1, NOW - 100)), 328, FULL).svg
   expect(shell).toContain(`<animateMotion path="${shellPath}" begin="-0.100s"`)
-  // Model at 328 travels 0.6 s: its lifetime is 600 + 150 + 300 ms.
+  // Model at 328 travels 0.6 s: its lifetime is 600 + 450 ms (the ripple).
   const modelAt = (age: number): string =>
     drawBand(withStation(EXAMPLE, 'model', tally(31, 0, NOW - age)), 328, FULL).svg
   expect(modelAt(1049)).toContain('data-part="pulse"')

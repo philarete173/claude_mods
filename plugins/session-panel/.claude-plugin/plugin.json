@@ -17,7 +17,7 @@
       "title": "Motion",
       "options": ["full", "reduced"],
       "default": "full",
-      "description": "With reduced, the pane draws no animation: no pulses, no breathing glows, still end caps."
+      "description": "With reduced, no animation: no pulses, ripples or beat rings; steady halos, still live ends."
     }
   }
 }

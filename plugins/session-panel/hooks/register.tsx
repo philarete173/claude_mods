@@ -385,6 +385,10 @@ const DESKTOP_SERVERS: string[] = ['Claude_Browser', 'scheduled-tasks', 'termina
 
 // Reads the usage figures with the context breakdown: the skill count and the MCP servers come from it.
 async function refreshUsage($: EngineInterface): Promise<void> {
+  // A reading asked before a reset (/clear, resume) is the old conversation's: written after the reset's clear, it
+  // would put the old tokens back for the next reading to count. So nothing is written once a reset has run since,
+  // nor while one runs (a reading asked after its epoch went up may still land on either side of its clear).
+  const epoch = logEpoch
   const now = await $.session.usage({ breakdown: 'summary' })
   const { breakdown } = now.context
   // WaitForMcpServers is not there for a module: every server that has tools in the context is listed, whatever its
@@ -399,19 +403,20 @@ async function refreshUsage($: EngineInterface): Promise<void> {
   // them counts, and two readings that race count once.
   let isCompacted = false
   await update($, usageAtom, held => {
-    isCompacted = now.context.tokens === undefined && held.contextTokens !== undefined
+    const isCurrent = epoch === logEpoch && resetsRunning === 0
+    isCompacted = isCurrent && now.context.tokens === undefined && held.contextTokens !== undefined
 
-    return {
+    return isCurrent ? {
       ...held,
       // The window is the breakdown's: a compaction window under the model's shows up only there. Without one, the
       // window held stands, and the model's is the last resort.
       ...usageFields(now, breakdown?.rawMaxTokens ?? held.contextWindow ?? now.context.window),
       skills: breakdown?.skills?.totalSkills,
-    }
+    } : held
   })
   if (isCompacted) await countHiddenCompaction($, await $.clock.now())
   const servers = names.map(name => ({ name }))
-  await update($, mcpAtom, () => ({ servers }))
+  await update($, mcpAtom, held => (epoch === logEpoch && resetsRunning === 0 ? { servers } : held))
 }
 
 // The branch; the short commit on a detached HEAD; null outside a git repository or when git fails. The format and
@@ -1148,9 +1153,10 @@ export const register: Register = (on, options) => {
     // stop did. That is no fault of the tool, so the line is no error. The signal is read at once, before any other
     // wait.
     const isAbandoned = ran.isError === true && next.signal.aborted
-    // shortcut: the engine marks a blocked call only by its text, `Blocked:`; verify the field live and use a deny or a
-    // reason field if the engine gives one
-    const isBlocked = ran.isError === true && (ran.text?.startsWith('Blocked:') === true ||
+    // shortcut: the engine marks a blocked call only by its text, `Blocked:`, of a built-in tool (an MCP server writes
+    // its error text freely); verify the field live and use a deny or a reason field if the engine gives one
+    const isBlocked = ran.isError === true && !e.tool.startsWith('mcp__') && (
+      (typeof ran.text === 'string' && ran.text.startsWith('Blocked:')) ||
       (typeof ran.result === 'string' && ran.result.startsWith('Blocked:')))
     // A call the engine blocked before it ran is a denial, not a failure (§9).
     const isDenied = ran.deny !== undefined || isBlocked
@@ -1184,9 +1190,10 @@ export const register: Register = (on, options) => {
       await update($, turnAtom, acc => acc && { ...acc, toolIntervals: [...acc.toolIntervals, interval] })
     }
     // A call that may have changed a file asks for a read of the project, whatever its outcome (a command that failed
-    // may have changed some first); a denied one never ran. A call that core ran read-only (a Bash `ls`) changed no
-    // file, so it asks for none.
-    if (!isDenied && ran.isReadOnly !== true && WRITE_TOOLS.includes(e.tool)) requestProjectLater($, t1)
+    // may have changed some first); a denied one never ran. A blocked one asks all the same: only its text says it was
+    // blocked, and a call that printed `Blocked:` may have changed files. A call that core ran read-only (a Bash `ls`)
+    // changed no file, so it asks for none.
+    if (ran.deny === undefined && ran.isReadOnly !== true && WRITE_TOOLS.includes(e.tool)) requestProjectLater($, t1)
     const isFailed = isDenied || ran.isError === true
     // A subagent that reports through the hand-back tool (auto mode) says it in its `done` line: the message is kept
     // for it. The input is not typed, so only a string counts.
@@ -1383,11 +1390,12 @@ export const register: Register = (on, options) => {
       compacted.tokensAfter !== undefined
     ) {
       await update($, compactionsAtom, count => count + 1)
-      // Its own refresh must find nothing held, or it would count this compaction again (§8).
+      // The ring reads `—` until the next reading, and that reading must find nothing held, or it would count this
+      // compaction again. No refresh is asked: the engine may drop the tokens only after the whole chain returns, and
+      // a reading taken now would put the old ones back (§8). The tick reads the rest.
       await update($, usageAtom, held => ({ ...held, contextTokens: undefined, contextPct: undefined }))
       const text = `compacted ${fmtTokens(compacted.tokensBefore)} → ${fmtTokens(compacted.tokensAfter)}`
       await addLog($, await $.clock.now(), 'main', text, 'info')
-      inBackground($, () => refreshUsage($))
     }
 
     return compacted
