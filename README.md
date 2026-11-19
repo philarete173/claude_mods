@@ -5,7 +5,7 @@ A live session-stats side pane for the Code tab of the Claude desktop app; it op
 is a plugin marketplace, `philarete-mods`, that holds this one plugin.
 
 <p align="center">
-  <img src="docs/images/session-panel.png" alt="The session-panel pane in the Claude desktop app" width="380">
+  <img src="docs/images/session-panel.png" alt="The session-panel pane in the Claude desktop app" width="600">
 </p>
 
 ## What it shows
