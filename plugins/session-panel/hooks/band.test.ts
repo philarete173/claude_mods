@@ -155,13 +155,13 @@ test('a pulse is drawn while its age is below its lifetime, with begin −age', 
   expect(shell).not.toContain('begin="0s"')
 })
 
-// Shell at 328 travels 600 ms from the ring's edge to its circle at (93, 68.5); its dark hue is #a48cf0.
+// Shell at 328 travels 600 ms from the ring's edge to its circle at (93, 68.5); its dark hue is #b8beff.
 const SHELL_AT = (age: number): string => drawBand(withStation(EXAMPLE, 'shell', tally(4, 1, NOW - age)), 328, FULL).svg
 
 test('a due pulse is one comet with a tail', () => {
   expect(SHELL_AT(100)).toContain(
-    '<g data-part="pulse" fill="#a48cf0"><linearGradient id="pulse-shell" x1="0" y1="0" x2="1" y2="0">' +
-      '<stop offset="0" stop-color="#a48cf0" stop-opacity="0"/><stop offset="1" stop-color="#a48cf0"' +
+    '<g data-part="pulse" fill="#b8beff"><linearGradient id="pulse-shell" x1="0" y1="0" x2="1" y2="0">' +
+      '<stop offset="0" stop-color="#b8beff" stop-opacity="0"/><stop offset="1" stop-color="#b8beff"' +
       ' stop-opacity="0.7"/></linearGradient><g opacity="0"><set attributeName="opacity" to="1" begin="-0.100s"/>' +
       '<animateMotion path="M138 47.5H134Q128 47.5 128 53.5V62.5Q128 68.5 122 68.5H104" begin="-0.100s" dur="0.6s"' +
       ' keyPoints="0;1" keyTimes="0;1" calcMode="spline" keySplines=".2 .6 .35 1" rotate="auto" fill="freeze"/>' +
@@ -176,13 +176,13 @@ test('a due pulse is one comet with a tail', () => {
 test('a pulse past its travel draws its group empty', () => {
   // At 700 ms Shell is past its travel and still inside its lifetime of 1050 ms.
   const svg = SHELL_AT(700)
-  expect(svg).toContain('<g data-part="pulse" fill="#a48cf0"></g>')
+  expect(svg).toContain('<g data-part="pulse" fill="#b8beff"></g>')
   expect(svg).not.toContain('r="3.5"')
   expect(svg).not.toContain('linearGradient')
 })
 
 test('a ripple spreads at the arrival', () => {
-  const ripple = '<circle data-part="ripple" cx="93" cy="68.5" r="11" fill="none" stroke="#a48cf0" stroke-width="1.5"' +
+  const ripple = '<circle data-part="ripple" cx="93" cy="68.5" r="11" fill="none" stroke="#b8beff" stroke-width="1.5"' +
     ' opacity="0"><animate attributeName="r" values="11;19" dur="0.45s" begin="-0.100s" fill="freeze"/>' +
     '<animate attributeName="opacity" values="0.7;0" dur="0.45s" begin="-0.100s" fill="freeze"/></circle>'
   const svg = SHELL_AT(700)
@@ -212,11 +212,11 @@ test('a running station has a steady halo and a beat ring, and no glow', () => {
     ` dur="1.4s" begin="${loopBegin(NOW, 1400)}" repeatCount="indefinite"/></circle>`
   // The station groups in station order: Model, Files, Shell, …
   const [model = '', files = '', shell = ''] = svg.split('<g data-part="station">').slice(1)
-  expect(model.startsWith(`${beat('#e1ac6e', 25.5)}<circle cx="93" cy="25.5" r="11" fill="#2e2d2b"`)).toBe(true)
+  expect(model.startsWith(`${beat('#df995e', 25.5)}<circle cx="93" cy="25.5" r="11" fill="#2e2d2b"`)).toBe(true)
   expect(files).not.toContain('r="14"')
   expect(files).not.toContain('values="11;21"')
   // Shell runs and failed: both, in its hue, and the circle's stroke stays the failure's.
-  expect(shell.startsWith(`${beat('#a48cf0', 68.5)}<circle cx="93" cy="68.5" r="11" fill="#2e2d2b"` +
+  expect(shell.startsWith(`${beat('#b8beff', 68.5)}<circle cx="93" cy="68.5" r="11" fill="#2e2d2b"` +
     ' stroke="#e5484d"')).toBe(true)
   for (const input of [EXAMPLE, CAPS, EMPTY, REST, NO_PULSE]) {
     for (const w of WIDTHS) expect(drawBand(input, w, FULL).svg).not.toContain('0.12;0.24;0.12')
@@ -244,7 +244,7 @@ test('motion reduced draws no animation', () => {
   expect(svg).not.toContain('<animate')
   expect(svg).not.toContain('<animateMotion')
   expect(svg).not.toContain('<set')
-  expect(svg).toContain('<circle cx="93" cy="25.5" r="14" fill="#e1ac6e" opacity="0.16"/>')
+  expect(svg).toContain('<circle cx="93" cy="25.5" r="14" fill="#df995e" opacity="0.16"/>')
   expect(svg).not.toContain('values="11;21"')
   expect(svg).not.toContain('data-part="ripple"')
   expect(svg).not.toContain('r="3.5"')
@@ -338,7 +338,7 @@ test('the halo stays inside the band at both heights', () => {
 
 test('the states of §4.6', () => {
   const svg = drawBand(EXAMPLE, 328, FULL).svg
-  expect(svg).toContain('<circle cx="93" cy="25.5" r="11" fill="#2e2d2b" stroke="#e1ac6e" stroke-width="1.5"')
+  expect(svg).toContain('<circle cx="93" cy="25.5" r="11" fill="#2e2d2b" stroke="#df995e" stroke-width="1.5"')
   expect(svg).toContain('>×3</text>')
   expect(svg).toContain('<circle cx="93" cy="68.5" r="11" fill="#2e2d2b" stroke="#e5484d" stroke-width="1.5"')
   expect(svg).toMatch(/<g data-part="disc"><circle cx="85" cy="60\.5" r="5\.5" fill="#e5484d"\/><text [^>]*>1<\/text>/)

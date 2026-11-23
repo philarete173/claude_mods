@@ -18,14 +18,14 @@ export const LEFT_STATIONS: StationId[] = ['model', 'files', 'shell', 'web']
 export const RIGHT_STATIONS: StationId[] = ['agents', 'mcp', 'skills', 'you']
 
 export const STATION_HUES: Record<StationId, { dark: string; light: string }> = {
-  model: { dark: '#e1ac6e', light: '#b8762a' },
-  files: { dark: '#5fc2b5', light: '#1c8c81' },
-  shell: { dark: '#a48cf0', light: '#6c4fc0' },
-  web: { dark: '#93aac4', light: '#4f6b8a' },
-  agents: { dark: '#e58fae', light: '#b44a74' },
-  mcp: { dark: '#a3c47a', light: '#5b822f' },
-  skills: { dark: '#f0e07f', light: '#695700' },
-  you: { dark: '#eeb6fb', light: '#752f84' },
+  model: { dark: '#df995e', light: '#ad6313' },
+  files: { dark: '#5adbda', light: '#007070' },
+  shell: { dark: '#b8beff', light: '#5456a7' },
+  web: { dark: '#91afc5', light: '#577d98' },
+  agents: { dark: '#ffa6c1', light: '#983c5e' },
+  mcp: { dark: '#74bf85', light: '#348c4e' },
+  skills: { dark: '#cfc86f', light: '#6a6400' },
+  you: { dark: '#ca93d7', light: '#995da6' },
 }
 
 export const STATION_LABELS: Record<StationId, string> = {

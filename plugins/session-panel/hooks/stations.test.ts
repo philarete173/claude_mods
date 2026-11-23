@@ -69,8 +69,13 @@ test('an unknown tool, an inherited name and an empty name go to Shell', () => {
 test('the station orders and tables cover the eight stations once', () => {
   expect(STATION_ORDER).toEqual(['model', 'files', 'shell', 'web', 'agents', 'mcp', 'skills', 'you'])
   expect([...LEFT_STATIONS, ...RIGHT_STATIONS].sort()).toEqual([...STATION_ORDER].sort())
-  expect(STATION_HUES.model).toEqual({ dark: '#e1ac6e', light: '#b8762a' })
-  expect(STATION_HUES.web).toEqual({ dark: '#93aac4', light: '#4f6b8a' })
+  const P2 = {
+    model: { dark: '#df995e', light: '#ad6313' }, files: { dark: '#5adbda', light: '#007070' },
+    shell: { dark: '#b8beff', light: '#5456a7' }, web: { dark: '#91afc5', light: '#577d98' },
+    agents: { dark: '#ffa6c1', light: '#983c5e' }, mcp: { dark: '#74bf85', light: '#348c4e' },
+    skills: { dark: '#cfc86f', light: '#6a6400' }, you: { dark: '#ca93d7', light: '#995da6' },
+  }
+  expect(STATION_HUES).toEqual(P2)
   for (const table of [STATION_HUES, STATION_LABELS, STATION_ICONS]) {
     expect(Object.keys(table).sort()).toEqual([...STATION_ORDER].sort())
   }
