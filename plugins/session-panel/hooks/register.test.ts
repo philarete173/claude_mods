@@ -5710,6 +5710,29 @@ test('a TaskStop that names its task by shell_id stops it too, and task_id is th
     ])
   })
 
+// A task id is looked up as an own key only: one that names `Object.prototype`'s members is no task.
+test('a TaskStop that names __proto__ or constructor changes nothing and throws nothing', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await runFor($, clock, w, 'b1', 1000)
+    const before = await readState($)
+    const version = await tasksVersion($)
+
+    await drive(clock, $.tool.call(stopTask('__proto__')))
+    await drive(clock, $.tool.call(stopTask('constructor')))
+
+    expect(await taskRows($)).toEqual(before.tasks)
+    expect(await tasksVersion($)).toBe(version)
+    expect((await logRows($)).slice(0, 2)).toEqual([
+      ['main', 'TaskStop', 'ok', '✓ 0.3s'],
+      ['main', 'TaskStop', 'ok', '✓ 0.3s'],
+    ])
+    expect((await readState($)).log).toHaveLength(before.log.length + 2)
+  })
+
 // A TaskStop is the call of whoever made it: a subagent may stop a task that the main agent started, and it is stopped.
 test('a TaskStop that a subagent made stops the task it names, though the main agent started it', SLOW_READER,
   async ($, on) => {

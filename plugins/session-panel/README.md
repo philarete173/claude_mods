@@ -324,10 +324,14 @@ restarts.
   next response, so the mod then counts it at its next usage reading that finds them gone: the reading of every minute,
   the main agent's next prompt, or a measure. It draws the tick and a bare `compacted` line, with no token numbers. A
   compaction inside a running turn whose next response comes before any reading is still missed, and two rare races can
-  count one compaction twice. A measure that lands after a `/clear` writes nothing, and the check at a turn's start
-  counts nothing when usage was written while it waited. A `/rewind`, or a `session.end` that another plugin keeps from
-  the mod, may still count a compaction: the engine drops the tokens and no signal tells them from one.
-- A call the engine or the person refused is known by the engine's error text alone, and only for built-in tools.
+  count one compaction twice. A measure raised before a `/clear` or a resume and answered after it writes nothing, and
+  the check at a turn's start counts nothing when usage was written while it waited. A `/rewind`, or a `session.end`
+  that another plugin keeps from the mod, may still count a compaction: the engine drops the tokens and no signal tells
+  them from one.
+- A call the engine or the person refused is known by the engine's error text alone, and only for built-in tools. One
+  rule reads a phrase anywhere in the first line (`, so auto mode cannot determine the safety of `), and a built-in
+  validator can echo the model's own input there (Grep's `Path does not exist: <path>`), so a failed call whose path
+  holds the phrase reads `denied` in the Log instead of as a failure. Only the drawing is affected.
   Should the engine change a text, such a call reads as a failure again, as an auto-mode text that lacks the phrase the
   mod looks for does now; and a built-in tool's own error that starts with one of the engine's texts reads as a denial.
 - A call pulses once within a module's life and for the latest 256 calls: after a hot reload, or when a call returns

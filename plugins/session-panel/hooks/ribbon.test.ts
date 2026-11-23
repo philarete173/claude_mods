@@ -443,7 +443,7 @@ test('sequential calls count the gap between them', () => {
     tools: [tool(1, 2, 'shell', 'Bash a'), tool(3, 4, 'shell', 'Bash b')], earlier: zeroStationMs(), live: null,
   }
   const times = stationTimes(input)
-  // The group spans 1 → 4.
+  // The pieces span 1 → 4: the gap joins the piece before it (R-4).
   expect([times.shell, times.model]).toEqual([3000, 2000])
   // `toolMs` is the union, 2 s; the shares are of the parts' sum, 5 s.
   const stats = { ...STATS, modelMs: 2000, toolMs: 2000 }

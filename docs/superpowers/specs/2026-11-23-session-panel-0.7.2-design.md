@@ -3,9 +3,9 @@
 ## 1. Status, origin, references
 
 Date: 2026-11-23. Status: settled with the owner (D1–D10, 2026-11-23) and the controller's rulings on the spec's open
-points (§15, R-1–R-11); not implemented yet. This spec writes the decisions down and checks them against the code and
-the engine. Where the code or the engine forced a choice of detail, the choice is marked "detail" with its reason. A
-rule that comes from a ruling says so (`R-n`).
+points (§15, R-1–R-11); implemented in 0.7.2 (2026-11-23). This spec writes the decisions down and checks them
+against the code and the engine. Where the code or the engine forced a choice of detail, the choice is marked "detail"
+with its reason. A rule that comes from a ruling says so (`R-n`).
 
 Origin:
 
@@ -293,7 +293,7 @@ leaves it: `Review …`.
 | cols | L | T | descCells | the tag drawn |
 |---|---|---|---|---|
 | 53 | 23 | — | 23 | none |
-| 54 (≈ 490 px pane) | 24 | 11 | 12 | `@appsec-en…` |
+| 54 (≈ 464 px pane) | 24 | 11 | 12 | `@appsec-en…` |
 | 57 | 25 | 12 | 12 | `@appsec-eng…` |
 | 62 | 27 | 14 | 12 | `@appsec-engin…` |
 | 63 | 28 | 15 | 12 | `@appsec-engine…` (whole) |
@@ -520,6 +520,10 @@ brief's "from 2.1.308" was wrong), and each item has `type: 'image' | 'audio' | 
 - **Cleared by the reset** too (`session.end`, beside `unfolded = []`, `:943`). Detail: a note from the old
   conversation must not name the new one's first turn.
 - **The restore** uses path (a) only: a row has no attachments. An images-only row whose text is `""` has no line.
+  It reads image lines only: an image-lines row right after a typed prompt's row is that prompt's companion
+  (`isCompanion`, `hooks/restore.ts`), which draws no line, and `cutAtTurn` passes over it. A resumed images-only first
+  prompt passes `imagesText(images)` as the turn text that cuts the restore (`turn.start`'s `turnText`). If the chain
+  rejects, `prompt.submit` clears the note and passes the same error on.
 - **With neither**, an empty text leaves no row, as today.
 
 ### 7.4 Tests
@@ -805,7 +809,9 @@ Files: `hooks/stations.ts`, the tests above.
 - **Refusals by text** (§2). The rule reads the engine's words, for built-in tools only. A new engine text, or a
   changed one, reads as a failure again; a built-in tool's own error that starts with one of the texts reads as a
   denial. Other auto-mode texts that lack the pinned phrase (`… gave no verdict for ${tool}: a hook changed …`,
-  `@316831510`) stay failures.
+  `@316831510`) stay failures. Rule 6 matches its phrase anywhere in the first line, and a built-in validator echoes
+  the model's input there (Grep's `Path does not exist: <path>`): a failed call whose path holds the phrase reads
+  `denied`. Only the drawing is affected; the project read and `isFailed` are not.
 - **An interrupted call whose result the engine made up** reads `denied` (kind `info`: `who` and outcome dim), not
   the time alone: the engine gives it the rejection's text, `kh`, and marks it `user-rejected` (§2.4, R-11).
 - **One pulse per call** (§3) holds within a module's life and for the latest 256 calls; a hot reload or a call

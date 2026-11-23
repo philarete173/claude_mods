@@ -721,7 +721,7 @@ async function syncAgents($: EngineInterface): Promise<void> {
     const synced = { ...rows }
     ended.clear()
     for (const info of listed) {
-      const row = synced[info.id]
+      const row = Object.hasOwn(synced, info.id) ? synced[info.id] : undefined
       const status = LISTED_STATUS[info.status]
       // An outcome that an event has recorded stands, whatever the list says later.
       if (row?.status === 'running' && status !== undefined) {
@@ -771,11 +771,12 @@ async function reviveAgent($: EngineInterface, agentId: string): Promise<void> {
 async function closeTask(
   $: EngineInterface, id: string, status: TaskEndStatus, at: number, durationMs: number | null, atMost: boolean,
 ): Promise<void> {
-  const held = (await read($, tasksAtom))[id]
+  const tasks = await read($, tasksAtom)
+  const held = Object.hasOwn(tasks, id) ? tasks[id] : undefined
   if (held === undefined || held.status !== 'running') return
   let closed = null as TaskRow | null // the cast stops TypeScript narrowing it to `null`: the update callback sets it
   await update($, tasksAtom, rows => {
-    const row = rows[id]
+    const row = Object.hasOwn(rows, id) ? rows[id] : undefined
     // The update runs again when its write misses, so it sets `closed` on every run.
     closed = row !== undefined && row.status === 'running' ? finishTask(row, status, at, durationMs, atMost) : null
 
@@ -1066,6 +1067,7 @@ export const register: Register = (on, options) => {
       // runs: a message that comes while the chain holds the start is for the next request, not for this start.
       queued = unfolded
       unfolded = []
+      // A note set while the chain holds this start belongs to the next prompt, so it is taken before the chain runs.
       images = pendingImages
       pendingImages = 0
     }
@@ -1409,7 +1411,9 @@ export const register: Register = (on, options) => {
     const arrival = $.clock.now().catch(() => null)
     // Before the chain runs, and so before any state: an idle prompt's turn.start runs inside next(e) (§7.3(b)).
     const isNoted = e.turnId === undefined && PERSON_ORIGINS.has(e.origin?.kind)
-    // The count cannot throw: the attachments come from a hook above, and a mod must never block the prompt.
+    // On the engine's own list the count cannot throw (from 2.1.308 the list is the engine's, whatever a hook passes
+    // down). On 2.1.288 a hook above may pass a hostile list (a Proxy, a throwing getter) that does throw; the engine
+    // then skips this hook and runs the ones beneath, so the prompt is never blocked.
     if (isNoted) {
       const { attachments } = e
       pendingImages = !Array.isArray(attachments) ? 0 : attachments.filter(
