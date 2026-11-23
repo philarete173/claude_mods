@@ -333,6 +333,35 @@ test('a call: ✓ or ✗ with no time, and no outcome while it runs', () => {
   ])
 })
 
+// The engine's refusal texts (0.7.2 spec §2.3, verbatim).
+const BLOCKED_LIVE = '<tool_use_error>Blocked: standalone sleep 30. To wait for a condition, use Monitor with an ' +
+  'until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use run_in_background: ' +
+  'true. Do not chain shorter sleeps to work around this block.</tool_use_error>'
+const REJECTED = 'The user doesn\'t want to proceed with this tool use. The tool use was rejected (eg. if it was a ' +
+  'file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell ' +
+  'you how to proceed.'
+const INTERRUPTED = `${REJECTED} Correction to the text above: this call was stopped while running, not refused ` +
+  'before it ran. It may have run in part or in full, and its changes may have been written.' // a head of `Jbn`
+const SAFETY_CHECK = 'Permission for this command was denied by a built-in Claude Code safety check'
+
+test('a call the engine or the person refused restores as denied', () => {
+  for (const text of [BLOCKED_LIVE, REJECTED, SAFETY_CHECK]) {
+    const restored = restore([assistant(call('Bash', { command: 'sleep 30' }, { isError: true, text }))])
+    expect(restored.log[0]).toEqual({ at: null, who: 'main', text: 'Bash sleep 30', kind: 'error', outcome: 'denied' })
+  }
+})
+
+test('an interrupted call, a failure and an MCP error restore as ✗', () => {
+  const failed = (tool: string, input: Fields, text: string): LogEntry | undefined =>
+    restore([assistant(call(tool, input, { isError: true, text }))]).log[0]
+
+  for (const entry of [
+    failed('Bash', { command: 'sleep 30' }, INTERRUPTED),
+    failed('Bash', { command: 'sleep 30' }, 'Exit code 1\nboom'),
+    failed('mcp__x__y', {}, BLOCKED_LIVE),
+  ]) expect(entry).toMatchObject({ kind: 'error', outcome: '✗' })
+})
+
 test('the Log keeps the newest 200 lines, newest first, and counts all; rows come newest first', () => {
   const reads = Array.from({ length: 250 }, (_, i) => assistant(read(`f${i}.ts`)))
   const restored = restore([assistant(launched('a1'), launched('a2'), bash('b1', DEV), bash('b2', DEV)), ...reads])

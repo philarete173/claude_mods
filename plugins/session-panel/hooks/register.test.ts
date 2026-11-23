@@ -468,6 +468,19 @@ const ANSWERER: Plugin = {
 }
 const WITH_ABANDONER = { plugins: [READER, ABANDONER], timeoutMs: 30_000 }
 const WITH_ANSWERER = { plugins: [READER, ANSWERER], timeoutMs: 30_000 }
+
+// The engine's refusal texts (0.7.2 spec §2.3, verbatim), as the bottom's `blocked-text` and `error-text` answer them.
+const BLOCKED_LIVE = '<tool_use_error>Blocked: standalone sleep 30. To wait for a condition, use Monitor with an ' +
+  'until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use run_in_background: ' +
+  'true. Do not chain shorter sleeps to work around this block.</tool_use_error>'
+const REJECTED = 'The user doesn\'t want to proceed with this tool use. The tool use was rejected (eg. if it was a ' +
+  'file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell ' +
+  'you how to proceed.'
+const INTERRUPTED = `${REJECTED} Correction to the text above: this call was stopped while running, not refused ` +
+  'before it ran. It may have run in part or in full, and its changes may have been written.' // a head of `Jbn`
+const UNMATCHED = 'This tool call was refused and did not run: the permission answer for it could not be matched to ' +
+  'this call. Do not run it again unless the user asks you to.'
+const BY_PLUGIN = 'Permission to use Bash denied by plugin guard: no shell here'
 const WITH_INTERRUPTER = { plugins: [READER, INTERRUPTER], timeoutMs: 30_000 }
 const WITH_FRACTIONAL_CLOCK = { plugins: [READER, FRACTIONAL_CLOCK], timeoutMs: 30_000 }
 const WITH_STORE = { plugins: [READER, OTHER_SESSION], timeoutMs: 30_000 }
@@ -749,8 +762,9 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
   on('tool.call', async (_$, e) => {
     // What a call says decides how it ends: the command of a Bash, the new text of an Edit, the description of an
     // Agent, the message of a SendMessage or of a SubagentHandback, the id of a TaskStop. One that starts with `deny`
-    // is denied, one that starts with `fail` fails, a Bash that starts with `blocked-` is blocked by the engine, and a
-    // Bash that starts with `move` is moved to the background. An MCP tool's call says its `says`.
+    // is denied, one that starts with `fail` fails, a Bash that starts with `blocked-` is blocked by the engine, a Bash
+    // that holds `error-text ` fails with what follows it as its text (an engine refusal, say), and a Bash that starts
+    // with `move` is moved to the background. An MCP tool's call says its `says`.
     let says = ''
     if (e.tool === 'Bash') says = e.command
     if (e.tool === 'Edit') says = e.new_string
@@ -762,9 +776,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     if (says.startsWith('deny')) return { deny: 'no' }
     // A call the engine blocked before it ran (2.1.325): its text, or its result alone, starts `Blocked:`; one where
     // `Blocked:` comes later is an ordinary error.
-    if (says.startsWith('blocked-text')) {
-      return { isError: true as const, result: undefined, text: 'Blocked: standalone sleep 60' }
-    }
+    if (says.startsWith('blocked-text')) return { isError: true as const, result: undefined, text: BLOCKED_LIVE }
     if (says.startsWith('blocked-result')) return { isError: true as const, result: 'Blocked: standalone sleep 60' }
     if (says.startsWith('blocked-late')) {
       return { isError: true as const, result: 'Error: Blocked: x', text: 'Error: Blocked: x' }
@@ -783,6 +795,11 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     }
     if (e.tool === 'Monitor') started = { taskId: w.taskId, timeoutMs: e.timeout_ms }
     if (e.tool === 'Workflow') started = { status: 'async_launched', taskId: w.taskId, workflowName: 'review' }
+    if (says.includes('error-text ')) {
+      if (w.toolFailMs > 0) await clock.sleep(w.toolFailMs)
+
+      return { isError: true as const, result: undefined, text: says.slice(says.indexOf('error-text ') + 11) }
+    }
     if (says.startsWith('fail')) {
       if (w.toolFailMs > 0) await clock.sleep(w.toolFailMs)
 
@@ -3565,6 +3582,67 @@ test('a built-in blocked call still asks the project read', WITH_READER, async (
   await $.tool.call({ tool: 'Bash', command: 'blocked-text sleep 60' })
   await clock.advance(PROJECT_DELAY_MS)
   expect(reads(w)).toBe(1)
+})
+
+// The engine's other refusals (the person's, a permission rule's, a plugin's) are denials too (0.7.2 §2).
+test('a call the person or a permission rule refused counts as a denial', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await startTurn($)
+  await runStep($, clock, { turnId: 't0', index: 0 })
+
+  let calls = 0
+  for (const text of [REJECTED, UNMATCHED, BY_PLUGIN]) {
+    await drive(clock, $.tool.call({ tool: 'Bash', command: `error-text ${text}` }))
+    calls += 1
+    const state = await readState($)
+    expect(state.stations.shell).toMatchObject({ calls, failedThisTurn: 0 })
+    expect(state.log[0]).toMatchObject({ outcome: 'denied', kind: 'error' })
+    expect(state.turn?.tools.at(-1)).toMatchObject({ failed: false })
+  }
+})
+
+// R-11: the text cannot tell a rejection at a prompt from the stand-in for an interrupted call, and the text wins; the
+// line is dim (kind `info`), as an abandoned call's.
+test('a rejection on an abandoned call reads denied, dim (R-11)', WITH_ABANDONER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  w.toolFailMs = 300
+  await $.session.start(START)
+  await clock.advance(1)
+
+  await $.tool.call({ tool: 'Bash', command: `abandon error-text ${REJECTED}` })
+  await clock.advance(400)
+  const state = await readState($)
+  expect(state.log[0]).toMatchObject({ outcome: 'denied', kind: 'info' })
+  expect(state.stations.shell.failedThisTurn).toBe(0)
+})
+
+// R-2: a call stopped while it ran (`Jbn`) ran, so it is no refusal: it keeps the abandoned line.
+test('a call stopped while running keeps the abandoned line (R-2)', WITH_ABANDONER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  w.toolFailMs = 300
+  await $.session.start(START)
+  await clock.advance(1)
+
+  await $.tool.call({ tool: 'Bash', command: `abandon error-text ${INTERRUPTED}` })
+  await clock.advance(400)
+  expect((await readState($)).log[0]).toMatchObject({ kind: 'info', outcome: '0.3s' })
+})
+
+test('a call stopped while running that nobody abandoned is a failure (R-2)', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  w.toolFailMs = 300
+  await $.session.start(START)
+  await startTurn($)
+
+  await drive(clock, $.tool.call({ tool: 'Bash', command: `error-text ${INTERRUPTED}` }))
+  const state = await readState($)
+  expect(state.stations.shell.failedThisTurn).toBe(1)
+  expect(state.log[0]?.outcome).toBe('✗ 0.3s')
 })
 
 test('an error whose text is no string is a plain failure, and the hook completes its writes', SLOW_READER,

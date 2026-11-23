@@ -4,8 +4,8 @@
 // may answer the call): a row or a field of the wrong type counts as absent, ids key Maps only, and nothing read from
 // the rows is kept but the value returned.
 import {
-  agentOutcome, endKind, engineLineText, HANDBACK_TOOL, LOG_MAX, logText, parseTaskNotification, promptKind,
-  shortType, SPAWN_TOOLS, stripFormat, tagText, TASK_END, taskFromCall, taskLine, toolLabel,
+  agentOutcome, endKind, engineLineText, HANDBACK_TOOL, isRefused, LOG_MAX, logText, parseTaskNotification,
+  promptKind, shortType, SPAWN_TOOLS, stripFormat, tagText, TASK_END, taskFromCall, taskLine, toolLabel,
 } from './stats'
 import { stationOf, zeroStationMs } from './stations'
 import type { StationId } from './stations'
@@ -97,12 +97,13 @@ export function restoreFromMessages(rows: readonly unknown[], alive: ReadonlySet
     const input = fieldsOf(use.input)
     const got = fieldsOf(use.result)
     const isError = use.isError === true
+    const isDenied = isRefused(tool, isError, use.text, use.result)
     const agentId = textOf(use.agentId)
     // The call's line: ✓ or ✗ with no time (no tool but Agent stores one), no outcome while it runs.
     const callLine = (background?: string): void => {
       const isAnswered = use.result !== undefined || use.text !== undefined
       const [kind, outcome]: [LogKind, string | undefined] = isError
-        ? ['error', '✗']
+        ? ['error', isDenied ? 'denied' : '✗']
         : background !== undefined ? ['ok', background] : isAnswered ? ['ok', '✓'] : ['info', undefined]
       lines.push(() => entry('main', logText(toolLabel(tool, input, root)), kind, outcome))
     }

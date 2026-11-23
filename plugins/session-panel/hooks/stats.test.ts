@@ -21,6 +21,7 @@ import {
   fmtTokens,
   fmtTtft,
   fmtUsd,
+  isRefused,
   LOG_MAX,
   LOG_TEXT_MAX,
   mergedLength,
@@ -2026,6 +2027,88 @@ test('engineTag is undefined for a text that is the person\'s: markup, a pasted 
     '<my-tag x="1"', '<my-tag x="1" <b>', '<x-y=z>', '<teammate-message teammate_id="lead"',
   ]
   for (const text of given) expect(engineTag(text), JSON.stringify(text)).toBeUndefined()
+})
+
+// The engine's refusal texts (0.7.2 spec §2.3, verbatim).
+const BLOCKED_LIVE = '<tool_use_error>Blocked: standalone sleep 30. To wait for a condition, use Monitor with an ' +
+  'until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use run_in_background: ' +
+  'true. Do not chain shorter sleeps to work around this block.</tool_use_error>'
+const REJECTED = 'The user doesn\'t want to proceed with this tool use. The tool use was rejected (eg. if it was a ' +
+  'file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell ' +
+  'you how to proceed.'
+const INTERRUPTED = `${REJECTED} Correction to the text above: this call was stopped while running, not refused ` +
+  'before it ran. It may have run in part or in full, and its changes may have been written.' // a head of `Jbn`
+const NO_SURFACE = 'Permission for this tool use was denied. It requires approval, and this session has no approval ' +
+  'surface'
+const SAFETY_CHECK = 'Permission for this command was denied by a built-in Claude Code safety check'
+const UNMATCHED = 'This tool call was refused and did not run: the permission answer for it could not be matched to ' +
+  'this call. Do not run it again unless the user asks you to.'
+const BY_PLUGIN = 'Permission to use Bash denied by plugin guard: no shell here'
+// `c3r`, up to and including `the file).`
+const C3R = REJECTED.slice(0, REJECTED.indexOf('the file).') + 'the file).'.length)
+const TAG_OPEN = '<tool_use_error>'
+const TAG_CLOSE = '</tool_use_error>'
+const REFUSAL_RULE_6 = [
+  'The safety classifier is temporarily unavailable, so auto mode cannot determine the safety of Bash right now. ' +
+    'Wait a moment and then try this action again.',
+  'The API told auto mode\'s safety classifier (The safety classifier) to wait 30s from now, so auto mode cannot ' +
+    'determine the safety of Bash until then.',
+  'The safety classifier gave no verdict, so auto mode cannot determine the safety of Bash.',
+  'Bash was not run: a timeout, so auto mode cannot determine the safety of Bash.',
+]
+const REFUSALS = [
+  BLOCKED_LIVE.slice(TAG_OPEN.length, -TAG_CLOSE.length),
+  'Blocked: standalone Start-Sleep 30. To wait for a condition, use Monitor with an until-loop.',
+  'Blocked: Classifier unavailable',
+  C3R, REJECTED, `${C3R} To tell you how to proceed, the user said:\nuse ls`,
+  'Permission for this action was denied by the Claude Code auto mode classifier. Reason: risky',
+  'Permission for this action has been denied. Reason: risky',
+  'Permission to use Bash has been denied.',
+  'Permission to use Bash with command rm -rf x has been denied.',
+  'Permission to use Bash has been denied: policy',
+  BY_PLUGIN, 'Permission to use Bash denied by plugins a, b: x',
+  ...REFUSAL_RULE_6,
+  NO_SURFACE,
+  'Permission for this tool use was denied: it requires interactive approval',
+  'Permission for this tool use was denied. The tool use was rejected (eg. if it was a file edit, the new_string was ' +
+    'NOT written to the file). Try a different approach or report the limitation to complete your task.',
+  'Permission for this tool use was denied. The tool use was rejected (eg. if it was a file edit, the new_string was ' +
+    'NOT written to the file). The user said:\nno',
+  SAFETY_CHECK, UNMATCHED,
+]
+
+test('isRefused takes the engine\'s refusal texts, bare, wrapped and indented, in text or in result', () => {
+  for (const refusal of REFUSALS) {
+    for (const x of [refusal, `${TAG_OPEN}${refusal}${TAG_CLOSE}`, ` \n${refusal}`]) {
+      expect(isRefused('Bash', true, x, undefined), x).toBe(true)
+      expect(isRefused('Bash', true, undefined, x), x).toBe(true)
+    }
+  }
+})
+
+test('isRefused reads only the start: a remedy after the tag, a sleep with a tail', () => {
+  expect(isRefused('Bash', true, BLOCKED_LIVE, undefined)).toBe(true)
+  expect(isRefused('Bash', true, `${BLOCKED_LIVE}Run it with run_in_background.`, undefined)).toBe(true)
+  expect(isRefused('Bash', true, 'Blocked: sleep 5 followed by: echo done. To wait for a condition.', undefined))
+    .toBe(true)
+})
+
+test('isRefused leaves output, MCP errors, successes, other types and a call stopped while running alone', () => {
+  const none = (tool: string, isError: boolean, text: unknown, result: unknown): void =>
+    expect(isRefused(tool, isError, text, result), JSON.stringify([tool, isError, text, result])).toBe(false)
+
+  none('Bash', true, 'Exit code 1\nBlocked: standalone sleep 30', undefined)
+  none('Bash', true, `Exit code 1\n${REFUSAL_RULE_6[0]}`, undefined)
+  none('Bash', true, 'Error: Blocked: x', undefined)
+  for (const refusal of REFUSALS) none('mcp__x__y', true, refusal, undefined)
+  none('Bash', false, BLOCKED_LIVE, undefined)
+  none('Bash', true, 42, undefined)
+  none('Bash', true, {}, undefined)
+  for (const x of [INTERRUPTED, `${TAG_OPEN}${INTERRUPTED}${TAG_CLOSE}`]) {
+    none('Bash', true, x, undefined)
+    none('Bash', true, undefined, x)
+  }
+  none('Bash', true, 'Permission to use the room', undefined)
 })
 
 const REMINDER = (body: string): string => `<system-reminder>${body}</system-reminder>`

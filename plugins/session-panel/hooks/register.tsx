@@ -12,9 +12,9 @@ import type {
 
 import {
   addAgentCost, addStep, addTool, agentOutcome, attributeCost, computeTurnStats, endKind, engineLineText, finishTask,
-  fmtDuration, fmtTokens, HANDBACK_TOOL, LOG_MAX, logText, MAIN_TURNS_MAX, normTurn, parseStatus, parseTaskNotification,
-  promptKind, pushLog, reviveRow, ribbonOf, shortType, SPAWN_TOOLS, stripFormat, sumNumstat, TASK_END, taskFromCall,
-  taskLine, toolLabel,
+  fmtDuration, fmtTokens, HANDBACK_TOOL, isRefused, LOG_MAX, logText, MAIN_TURNS_MAX, normTurn, parseStatus,
+  parseTaskNotification, promptKind, pushLog, reviveRow, ribbonOf, shortType, SPAWN_TOOLS, stripFormat, sumNumstat,
+  TASK_END, taskFromCall, taskLine, toolLabel,
 } from './stats'
 import type {
   AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, TaskEndStatus, TaskRow, Usage,
@@ -1154,13 +1154,9 @@ export const register: Register = (on, options) => {
     // stop did. That is no fault of the tool, so the line is no error. The signal is read at once, before any other
     // wait.
     const isAbandoned = ran.isError === true && next.signal.aborted
-    // shortcut: the engine marks a blocked call only by its text, `Blocked:`, of a built-in tool (an MCP server writes
-    // its error text freely); verify the field live and use a deny or a reason field if the engine gives one
-    const isBlocked = ran.isError === true && !e.tool.startsWith('mcp__') && (
-      (typeof ran.text === 'string' && ran.text.startsWith('Blocked:')) ||
-      (typeof ran.result === 'string' && ran.result.startsWith('Blocked:')))
-    // A call the engine blocked before it ran is a denial, not a failure (§9).
-    const isDenied = ran.deny !== undefined || isBlocked
+    // A call the engine or the person refused before it ran is a denial, not a failure (0.7.2 §2): `ran.deny`, or the
+    // engine's refusal text (isRefused).
+    const isDenied = ran.deny !== undefined || isRefused(e.tool, ran.isError === true, ran.text, ran.result)
     const t1 = await $.clock.now()
     // The call's station, its flight and its turn interval are written first, as soon as the call has returned, so
     // nothing later in the hook can skip them. A failure is one whose Log line is an error with a mark: not denied, not
@@ -1191,9 +1187,9 @@ export const register: Register = (on, options) => {
       await update($, turnAtom, acc => acc && { ...acc, toolIntervals: [...acc.toolIntervals, interval] })
     }
     // A call that may have changed a file asks for a read of the project, whatever its outcome (a command that failed
-    // may have changed some first); a denied one never ran. A blocked one asks all the same: only its text says it was
-    // blocked, and a call that printed `Blocked:` may have changed files. A call that core ran read-only (a Bash `ls`)
-    // changed no file, so it asks for none.
+    // may have changed some first); a denied one never ran. A refused one asks all the same: only its text says it was
+    // refused, and a call whose output starts with such a text may have changed files. A call that core ran read-only
+    // (a Bash `ls`) changed no file, so it asks for none.
     if (ran.deny === undefined && ran.isReadOnly !== true && WRITE_TOOLS.includes(e.tool)) requestProjectLater($, t1)
     const isFailed = isDenied || ran.isError === true
     // A subagent that reports through the hand-back tool (auto mode) says it in its `done` line: the message is kept

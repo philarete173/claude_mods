@@ -814,6 +814,42 @@ function runningTask(kind: TaskKind, id: string, texts: string[], now: number): 
   }
 }
 
+// shortcut: the engine marks a refused call only by its text, of a built-in tool (an MCP server writes its error text
+// freely); use a deny or a reason field if the engine gives one
+// The starts of the engine's refusal texts (§2.3), and the pieces that rules 2, 5 and 6 read.
+const REFUSAL_STARTS = [
+  'Blocked:', 'Permission for this action was denied', 'Permission for this action has been denied',
+  'Permission for this tool use was denied', 'Permission for this command was denied',
+  'This tool call was refused and did not run: ',
+]
+const REJECTED_START = 'The user doesn\'t want to proceed with this tool use'
+// The engine's note on a call stopped while it ran (R-2): the call ran, so it is no refusal.
+const STOPPED_NOTE = 'Correction to the text above: this call was stopped while running'
+const UNDECIDED = ', so auto mode cannot determine the safety of '
+const TOOL_ERROR = '<tool_use_error>'
+
+// Whether a text is a refusal (§2.2): a string, its leading white space and the engine's `<tool_use_error>` tag off,
+// that starts with one of the engine's refusal texts, or whose first line says so. Only the start and the first line
+// are read; a value of another type is none.
+function isRefusalText(value: unknown): boolean {
+  const bare = typeof value === 'string' ? value.trimStart() : ''
+  const text = bare.startsWith(TOOL_ERROR) ? bare.slice(TOOL_ERROR.length) : bare
+  const newline = text.indexOf('\n')
+  const line = newline < 0 ? text : text.slice(0, newline)
+
+  return REFUSAL_STARTS.some(start => text.startsWith(start)) ||
+    (text.startsWith(REJECTED_START) && !text.includes(STOPPED_NOTE)) ||
+    (line.startsWith('Permission to use ') &&
+      (line.includes(' has been denied') || line.includes(' denied by plugin'))) ||
+    (line.includes(UNDECIDED) && !line.startsWith('Exit code'))
+}
+
+// Whether a call that came back as an error is one the engine or the person refused before it ran (§2): a built-in
+// tool's, by its text or its result. The live tool.call and the restore both ask it.
+export function isRefused(tool: string, isError: boolean, text: unknown, result: unknown): boolean {
+  return isError && !tool.startsWith('mcp__') && (isRefusalText(text) || isRefusalText(result))
+}
+
 // The task that a tool call has started in the background, or null when it started none. A Bash command that runs in
 // the background has a `backgroundTaskId` in its result, whoever sent it there: its own input, its timeout or a move. A
 // Monitor and a Workflow have a `taskId`. Each is the id that the notification of the task names (`<task-id>`). Another
