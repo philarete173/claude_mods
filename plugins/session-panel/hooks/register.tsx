@@ -163,6 +163,10 @@ let logEpoch = 0
 // count, not a flag, and not the parity of logEpoch: resets that overlap are each running until their own end.
 let resetsRunning = 0
 
+// How many usage writes refreshUsage and session.measure have made (0.7.2 §8.2). An update callback runs again when
+// its write misses, so one write may raise it twice: a reader compares it with an earlier value, never counts with it.
+let usageWrites = 0
+
 // A resume has put another conversation in place of this one, and the first main turn.start restores it: session.end
 // sets it with reason `resume`, and reason `clear` clears it.
 let isRestoreDue = false
@@ -422,6 +426,7 @@ async function refreshUsage($: EngineInterface): Promise<void> {
   await update($, usageAtom, held => {
     const isCurrent = epoch === logEpoch && resetsRunning === 0
     isCompacted = isCurrent && now.context.tokens === undefined && held.contextTokens !== undefined
+    if (isCurrent) usageWrites += 1
 
     return isCurrent ? {
       ...held,
@@ -994,8 +999,12 @@ export const register: Register = (on, options) => {
       }
       isRestoreDue = e.reason === 'resume'
     }
+    const ended = await next(e)
+    // Neither /clear nor a resume raises session.start, so the model the reset cleared is read again (0.7.2 §8.3), in
+    // the background: the hook's bound is not spent. A step's model that lands first stands (readMainModel).
+    if (e.reason === 'clear' || e.reason === 'resume') inBackground($, () => readMainModel($))
 
-    return next(e)
+    return ended
   })
 
   // The command only opens. `UiPane.isShown` only ranks plugin panes, so a lone pane counts as shown even when a
@@ -1016,14 +1025,19 @@ export const register: Register = (on, options) => {
   })
 
   on('session.measure', async ($, e, next) => {
+    // The epoch at the entry, before the chain runs (0.7.2 §8.1): a measure raised before a reset (/clear, resume)
+    // and answered after it is the old conversation's, and writes nothing, as in refreshUsage.
+    const epoch = logEpoch
     const measured = await next(e)
     // A measure brings the model's window only: it stands in when none is held, and never replaces the breakdown's.
     // No tokens while some are held: a compaction the mod did not see (§8), as in refreshUsage.
     let isCompacted = false
     await update($, usageAtom, held => {
-      isCompacted = e.context.tokens === undefined && held.contextTokens !== undefined
+      const isCurrent = epoch === logEpoch && resetsRunning === 0
+      isCompacted = isCurrent && e.context.tokens === undefined && held.contextTokens !== undefined
+      if (isCurrent) usageWrites += 1
 
-      return { ...held, ...usageFields(e, held.contextWindow ?? e.context.window) }
+      return isCurrent ? { ...held, ...usageFields(e, held.contextWindow ?? e.context.window) } : held
     })
     if (isCompacted) await countHiddenCompaction($, await $.clock.now())
     // Another window than the last measure's is another model: the breakdown has the window that counts for it.
@@ -1087,6 +1101,9 @@ export const register: Register = (on, options) => {
       inBackground($, () => requestProject($))
     }
     const now = await $.clock.now()
+    // A usage write that lands while the reading is asked leaves the atom holding tokens the reading never saw, so the
+    // check skips itself and the next reading decides (0.7.2 §8.2).
+    const writes = usageWrites
     const reading = await $.session.usage()
     await update($, turnAtom, () => ({
       turnId: e.turnId, startedAt: now, costAtStart: reading.cost?.usd ?? null, steps: [], toolIntervals: [], tools: [],
@@ -1101,9 +1118,10 @@ export const register: Register = (on, options) => {
     // writes the usage only to clear them, in the update that decides. Its line comes before the prompt's, so it shows
     // under it, and the ring reads — until a fresh reading.
     let isCompacted = false
-    if (reading.context.tokens === undefined && (await read($, usageAtom)).contextTokens !== undefined) {
+    if (reading.context.tokens === undefined && usageWrites === writes &&
+      (await read($, usageAtom)).contextTokens !== undefined) {
       await update($, usageAtom, held => {
-        isCompacted = held.contextTokens !== undefined
+        isCompacted = usageWrites === writes && held.contextTokens !== undefined
 
         return isCompacted ? { ...held, contextTokens: undefined, contextPct: undefined } : held
       })

@@ -600,6 +600,7 @@ type World = {
   spawns: number
   breakdowns: number // how many usage() calls asked for the context breakdown
   usageLag: number // how long usage() takes, in mock ms
+  measureLag: number // how long the session.measure beneath takes, in mock ms
   usageFails: boolean // usage() rejects
   isStoreUnreadable: boolean // a read of the store rejects (only where `bottom` was given a store that can break)
   storeLag: number // how long each call of that store takes, in mock ms
@@ -696,6 +697,7 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
     spawns: 0,
     breakdowns: 0,
     usageLag: 0,
+    measureLag: 0,
     usageFails: false,
     isStoreUnreadable: false,
     storeLag: 0,
@@ -731,7 +733,11 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
   }
   on('session.start', () => ({ cwd: ROOT }))
   on('session.attach', (_$, e) => ({ clientId: e.clientId }))
-  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  on('session.measure', async (_$, e) => {
+    if (w.measureLag > 0) await clock.sleep(w.measureLag)
+
+    return { changed: e.changed }
+  })
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
   on('session.compact', () => w.compacted as never)
   on('prompt.submit', (_$, e) => {
@@ -6651,6 +6657,88 @@ test('a session.measure with no tokens while some are held counts', WITH_READER,
   expect(await compactedLines($)).toHaveLength(1)
 })
 
+// The inputs of the tests of §8 (0.7.2): a measure with `tokens`, and the end of a session for a `reason`.
+const MEASURE = (tokens: number | undefined) =>
+  ({ context: { tokens, window: 1_000_000, percent: 12 }, rateLimits: [], changed: ['context'] }) as never
+const END = (reason: string) => ({ reason, sessionId: 's1', resume: { id: 's1' } }) as never
+
+// A measure raised before a reset and answered after it is the old conversation's: it writes nothing.
+test('a measure raised before a /clear and answered after it writes nothing', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  w.measureLag = 1000
+  const measuring = $.session.measure(MEASURE(120_000))
+  await $.session.end(END('clear'))
+  await clock.advance(1000)
+  await measuring
+
+  const state = await readState($)
+  expect(state.usage.contextTokens).toBeUndefined()
+  expect(state.compactions ?? 0).toBe(0)
+  expect(await compactedLines($)).toHaveLength(0)
+})
+
+// A measure with tokens that lands while the check's reading is asked leaves the atom holding tokens the reading never
+// saw: the check counts nothing, and the next reading decides. The measure lands while the reading is asked, so this
+// covers the condition's guard; a measure that lands between the atom's read and the update (the callback's guard) is
+// not staged.
+test('a turn.start check skips itself when a measure wrote meanwhile', WITH_READER, async ($, on) => {
+  const { clock, w } = await holdTokens($, on)
+  w.tokens = undefined
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES })
+  await clock.advance(1)
+  expect((await readState($)).compactions).toBe(1)
+  w.usageLag = 500
+  const starting = $.turn.start({ text: 'go', turnId: 't1' })
+  await clock.advance(1)
+  await $.session.measure(MEASURE(120_000))
+  await clock.advance(500)
+  await starting
+
+  const state = await readState($)
+  expect(state.compactions).toBe(1)
+  expect(await compactedLines($)).toHaveLength(0)
+  expect(state.usage.contextTokens).toBe(120_000) // the check leaves the measure's write alone
+})
+
+test('a turn.start check with no measure meanwhile counts nothing held', WITH_READER, async ($, on) => {
+  const { clock, w } = await holdTokens($, on)
+  w.tokens = undefined
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES })
+  await clock.advance(1)
+  w.usageLag = 500
+  const starting = $.turn.start({ text: 'go', turnId: 't1' })
+  await clock.advance(501)
+  await starting
+
+  expect((await readState($)).compactions).toBe(1)
+  expect(await compactedLines($)).toHaveLength(0)
+})
+
+// The guard of the compaction too: the old measure has no tokens, the new conversation holds some, and the old one's
+// answer must not read that as a compaction.
+test('a measure with no tokens raised before a /clear counts no compaction in the next conversation', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    w.measureLag = 1000
+    const measuring = $.session.measure(MEASURE(undefined))
+    await $.session.end(END('clear'))
+    w.measureLag = 0
+    await $.session.measure(MEASURE(50_000))
+    await clock.advance(1000)
+    await measuring
+
+    const state = await readState($)
+    expect(state.compactions ?? 0).toBe(0)
+    expect(await compactedLines($)).toHaveLength(0)
+    expect(state.usage.contextTokens).toBe(50_000)
+  })
+
 test('a seen compaction counts once', WITH_READER, async ($, on) => {
   const { clock, w } = await holdTokens($, on)
   w.tokens = undefined
@@ -8213,6 +8301,61 @@ test('a model a step has written stands', SLOW_READER, async ($, on) => {
   await $.session.start(START) // a model is held: no read
   await clock.advance(10)
   expect(w.modelReads).toBe(1)
+})
+
+test('a /clear and a resume read the model again; a logout does not', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  w.model = 'claude-opus-5-5\u{202E}'
+  await $.session.start(START)
+  await clock.advance(10)
+  expect(w.modelReads).toBe(1)
+
+  w.model = 'claude-sonnet-5-5\u{202E}'
+  await $.session.end(END('clear'))
+  await clock.advance(10)
+  expect(w.modelReads).toBe(2)
+  expect((await readState($)).mainModel).toBe('claude-sonnet-5-5')
+
+  w.model = 'claude-haiku-5-5'
+  await $.session.end(END('resume'))
+  await clock.advance(10)
+  expect(w.modelReads).toBe(3)
+  expect((await readState($)).mainModel).toBe('claude-haiku-5-5')
+
+  await $.session.end(END('logout'))
+  await clock.advance(10)
+  expect(w.modelReads).toBe(3)
+})
+
+// No model is held when the logout ends (the read fails at the start), so a read it started would ask the engine.
+test('a logout reads no model', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock) // its model is null: the read fails
+  await $.session.start(START)
+  await clock.advance(10)
+  expect(w.modelReads).toBe(1)
+  expect((await readState($)).mainModel ?? null).toBeNull()
+
+  await $.session.end(END('logout'))
+  await clock.advance(10)
+  expect(w.modelReads).toBe(1)
+})
+
+test('after a /clear a step\'s model that lands first stands', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  w.model = 'claude-opus-5-5'
+  await $.session.start(START)
+  await clock.advance(10)
+  w.modelLag = 3000 // longer than a step
+  await $.session.end(END('clear'))
+  await startTurn($)
+  await runStep($, clock, { turnId: 't0', index: 0 }) // its model is written at its stop, inside the lag
+  await clock.advance(3500)
+
+  expect(w.modelReads).toBe(2)
+  expect((await readState($)).mainModel).toBe('claude-sonnet-5') // the read's write found it held
 })
 
 test('a model read that fails sets nothing', SLOW_READER, async ($, on) => {
