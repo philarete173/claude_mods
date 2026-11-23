@@ -133,11 +133,22 @@ const handbacks = new Map<string, string>()
 // The most calls in flight the state keeps: past it, the entries with the least `at` (then the first inserted) go.
 const IN_FLIGHT_MAX = 64
 
-// How many ids of calls whose tool.call has run doneCallIds keeps.
-const DONE_CALLS_MAX = 256
+// How many ids each of doneCallIds and pulsedCallIds keeps.
+const CALL_IDS_MAX = 256
 
-// The ids of the latest DONE_CALLS_MAX calls whose tool.call has run, oldest first; emptied with the hand-backs.
+// The ids of the latest CALL_IDS_MAX calls whose tool.call has run, oldest first; emptied with the hand-backs.
 const doneCallIds = new Set<string>()
+
+// The ids of the latest CALL_IDS_MAX calls that have pulsed their station, at a first chunk or at the return, oldest
+// first (0.7.2 §3). Kept over a reset (R-3): an id is unique, and the set is bounded.
+const pulsedCallIds = new Set<string>()
+
+// Notes an id in one of the two sets as its newest; past CALL_IDS_MAX the oldest goes.
+const noteCallId = (ids: Set<string>, id: string): void => {
+  ids.delete(id)
+  ids.add(id)
+  if (ids.size > CALL_IDS_MAX) ids.delete(ids.values().next().value as string)
+}
 
 // How many times a /clear or a resume has started since this module loaded. The reset raises it once, at its start,
 // before it writes any atom, and addLog takes it when it starts: a call that finds it changed when it counts began
@@ -776,11 +787,15 @@ function chargeCost($: EngineInterface, agentId: string | undefined): Promise<vo
   return charged
 }
 
-// Marks a call that the model has begun to write as in flight, at the time it runs, and pulses its station. A call
-// whose tool.call has run already stays out.
+// Marks a call that the model has begun to write as in flight, at the time it runs, and pulses its station when the
+// call has not pulsed yet (0.7.2 §3). A call whose tool.call has run already stays out.
 async function markInFlight($: EngineInterface, id: string, tool: string, agentId: string | null): Promise<void> {
   const at = await $.clock.now()
   if (doneCallIds.has(id)) return
+  // A call pulses once (0.7.2 §3): at its first chunk, or at its return when the mod saw none. Read and noted with no
+  // await between, as tool.call does, so a later chunk, or one after the return, never pulses again.
+  const isFirst = !pulsedCallIds.has(id)
+  noteCallId(pulsedCallIds, id)
   const station = stationOf(tool)
   const call: InFlightCall = { station, agentId, at, label: logText(tool) }
   await update($, inFlightAtom, held => {
@@ -792,7 +807,7 @@ async function markInFlight($: EngineInterface, id: string, tool: string, agentI
 
     return Object.fromEntries(entries.slice(-IN_FLIGHT_MAX))
   })
-  await update($, stationsAtom, held => ({ ...held, [station]: { ...held[station], lastCallAt: at } }))
+  if (isFirst) await update($, stationsAtom, held => ({ ...held, [station]: { ...held[station], lastCallAt: at } }))
 }
 
 // Pulses Model at the first chunk of a step, and drops the agent's calls in flight from before the step began: their
@@ -1158,16 +1173,20 @@ export const register: Register = (on, options) => {
     // engine's refusal text (isRefused).
     const isDenied = ran.deny !== undefined || isRefused(e.tool, ran.isError === true, ran.text, ran.result)
     const t1 = await $.clock.now()
+    const callId = e.tool_use_id
+    // A call pulses once (0.7.2 §3): one that pulsed at a chunk (markInFlight) does not again; one with no id, or one
+    // no chunk named, pulses here. Read and noted in one synchronous step with the marks of markInFlight.
+    const isUnseen = callId === undefined || !pulsedCallIds.has(callId)
+    if (callId !== undefined) {
+      noteCallId(pulsedCallIds, callId)
+      noteCallId(doneCallIds, callId)
+    }
     // The call's station, its flight and its turn interval are written first, as soon as the call has returned, so
     // nothing later in the hook can skip them. A failure is one whose Log line is an error with a mark: not denied, not
     // abandoned, not of an agent with no row (the line's kind below).
     const station = stationOf(e.tool)
     const { who, isUnknown } = await whoIs($, e.agentId)
     const isStationFailure = ran.isError === true && !isDenied && !isAbandoned && !isUnknown
-    const callId = e.tool_use_id
-    // A call with no entry in flight is one whose chunk the mod never saw (no id, or one no stream named: another
-    // plugin's $.tool.call): it pulses at its return. One with an entry pulsed at its chunk (markInFlight, §7).
-    const isUnseen = callId === undefined || !Object.hasOwn(await read($, inFlightAtom), callId)
     await update($, stationsAtom, held => ({
       ...held,
       [station]: {
@@ -1177,9 +1196,6 @@ export const register: Register = (on, options) => {
       },
     }))
     if (callId !== undefined) {
-      doneCallIds.delete(callId)
-      doneCallIds.add(callId)
-      if (doneCallIds.size > DONE_CALLS_MAX) doneCallIds.delete(doneCallIds.values().next().value as string)
       await update($, inFlightAtom, held => Object.fromEntries(Object.entries(held).filter(([key]) => key !== callId)))
     }
     if (e.agentId === undefined) {

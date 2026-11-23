@@ -3509,6 +3509,51 @@ test('a call the mod saw no chunk of pulses at its return', SLOW_READER, async (
   expect((await readState($)).stations.shell).toMatchObject({ calls: 2, lastCallAt: t1 + 300 })
 })
 
+// A call pulses its station once (0.7.2 §3), at its first chunk: the return adds no pulse when the entry is gone.
+test('a call evicted from the flight still pulses once', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await startTurn($)
+  const now0 = clock.now()
+  // The newer chunks are Files', so Shell's pulse is u1's alone.
+  w.toolChunks = [{ id: 'u1', name: 'Bash' }, ...Array.from({ length: 64 }, (_, i) => ({ id: `r${i}`, name: 'Read' }))]
+  await runStep($, clock, { turnId: 't0', index: 0 })
+  expect((await readState($)).inFlight).not.toHaveProperty('u1')
+
+  await clock.advance(5000)
+  await drive(clock, $.tool.call({ tool: 'Bash', command: 'ls', tool_use_id: 'u1' }))
+  expect((await readState($)).stations.shell).toMatchObject({ calls: 1, lastCallAt: now0 + 501 })
+})
+
+test('a call whose entry a step dropped still pulses once', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await startTurn($)
+  const now0 = clock.now()
+  await runStep($, clock, { turnId: 't0', index: 0 })
+  await runStep($, clock, { turnId: 't0', index: 1 })
+  expect((await readState($)).inFlight).toEqual({})
+
+  await drive(clock, $.tool.call({ tool: 'Bash', command: 'ls', tool_use_id: 'u1' }))
+  expect((await readState($)).stations.shell).toMatchObject({ calls: 1, lastCallAt: now0 + 501 })
+})
+
+test('a call whose entry turn.complete dropped still pulses once', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  bottom(on, clock)
+  await $.session.start(START)
+  await startTurn($)
+  const now0 = clock.now()
+  await runStep($, clock, { turnId: 't0', index: 0 })
+  await $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, turnId: 't0', reason: 'answer' })
+  expect((await readState($)).inFlight).toEqual({})
+
+  await drive(clock, $.tool.call({ tool: 'Bash', command: 'ls', tool_use_id: 'u1' }))
+  expect((await readState($)).stations.shell).toMatchObject({ calls: 1, lastCallAt: now0 + 501 })
+})
+
 // The engine refuses some calls before they run (`Blocked: standalone sleep 60`); the mod counts one as a denial.
 test('a call the engine blocked counts as a denial', SLOW_READER, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
@@ -3665,8 +3710,11 @@ test('a call whose tool.call has run is never marked in flight later', SLOW_READ
   await startTurn($)
 
   await drive(clock, $.tool.call({ tool: 'Bash', command: 'ls', tool_use_id: 'u1' }))
+  const returnedAt = clock.now()
   await runStep($, clock, { turnId: 't0', index: 0 })
   expect((await readState($)).inFlight).toEqual({})
+  // The chunk after the return does not pulse again: the pulse is the return's.
+  expect((await readState($)).stations.shell).toMatchObject({ calls: 1, lastCallAt: returnedAt })
 
   // The ids of the latest 256 calls are kept: 257 more push `u1` out, and a later step marks it again.
   for (let i = 0; i <= 256; i += 1) await $.tool.call({ tool: 'Bash', command: 'deny', tool_use_id: `c${i}` })
