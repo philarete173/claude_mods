@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.7.2 — unreleased
+
+- Fix: a call the engine or the person refused before it ran was drawn as a failure. The engine wraps a refusal in
+  `<tool_use_error>`, and 0.7.1 looked for a bare `Blocked:`. A blocked command, a rejection at a permission prompt, a
+  permission rule's denial, a plugin's `tool.check` denial and an auto-mode classifier refusal are denials now,
+  `denied` in the Log, live and after a reopen. The rule reads the engine's texts, of built-in tools only. An
+  interrupted call whose result the engine wrote as a rejection reads `denied` too, drawn dim.
+- Fix: a call could pulse twice when its in-flight entry was evicted or wiped between its first chunk and its return.
+  A call pulses once now, at its first chunk, or at its return when the mod saw no chunk. A hot reload, or a call that
+  returns after 256 newer ones, may still pulse twice.
+- Activity's tag shrinks, with `…`, to keep a description 12 cells wide (`@appsec-en…` at 54 columns), where a tag was
+  never cut and a description could get 8 cells. A cut at the end leaves no space before its `…`.
+- Fix: the bar of a background task whose notice came late ran solid to the notice, although the task had ended
+  before it. The bar is solid to the last main request the task was seen running at and faded from there to the
+  notice, all faded when that request is not known; the time keeps its `≤`. A notice with `<duration_ms>` ends the
+  bar exactly.
+- Fix: the Turn stats ribbon coloured the parallel calls of a step in the hue of the call that started first, so a
+  long wait beside a short call took the short call's hue. A step's calls are split: each stretch goes to the call
+  that runs over it and ends last. The legend sums what the bar draws, the older steps merged at the left included.
+- Fix: a prompt of images had no line in the Log. It reads `[N images]`, from the engine's image lines or from the
+  prompt's attachments, and no image path is shown. A restored one reads from its lines only.
+- Fix: a measure raised before a `/clear` could write the old usage after it, and the check at a turn's start could
+  count a compaction on a reading it never saw. Both are guarded now. After `/clear` and a resume the model is read
+  again, so the core names it before the first response. A `/rewind`, or a `session.end` that another plugin keeps from
+  the mod, may still count a compaction.
+- Fix: a cut could split a character cluster (an accent, an emoji with its modifier or joiner, a flag), the Log's
+  texts were cut by UTF-16 units, and a window that is no number drew `InfinityM`. No cut splits a cluster now, the
+  Log's texts are cut by code points, and such a window reads `—`. A subagent type of astral characters may be cut
+  short.
+- Palette P2 replaces the eight station hues: they are spaced round the wheel at two lightnesses, so that neighbours
+  differ in hue and in lightness. The band, the ribbon and the lanes take them; the light theme is built from them.
+
 ## 0.7.1 — 2026-11-18
 
 - The core breathes: a halo in the ring's colour swells and fades outside the ring, never inside it, slowly at rest and
@@ -11,8 +43,9 @@
   one. They differ from their neighbours by lightness now, and the weak pairs of 0.7.0 (Skills with MCP and Model,
   You with Agents) are apart.
 - Activity's label column is about 45 % of the pane, up to 64 cells. The tags show from 54 columns (a pane of about
-  464 px), start on one x and are never cut. Descriptions whose end cuts would read the same are cut in the middle,
-  so that the lanes tell apart (`Band check…sleep A`).
+  464 px) and start on one x; a subagent's type is cut at 14 characters, as in the Log (`@general-purpo…`).
+  Descriptions whose end cuts would read the same are cut in the middle, so that the lanes tell apart
+  (`Band check…sleep A`).
 - A subagent resumed with SendMessage keeps its earlier runs: its lane draws a bar for each run with the gaps
   between, and the current run starts at the resume. A row keeps 8 earlier runs; a ninth merges the two oldest.
 - The Turn stats legend names each station the turn used, with its swatch and its share of the bar, then the steps

@@ -6,6 +6,9 @@ Date: 2026-11-18. Status: settled with the owner; implemented in 0.7.1 (2026-11-
 down and checks them against the code. It adds no decision of its own; where the code forced a choice of detail, the
 choice is marked "detail" and the reason is given.
 
+Updated by 0.7.2: `docs/superpowers/specs/2026-11-23-session-panel-0.7.2-design.md`. The sections it changes carry
+its rules in place, each with a pointer ("0.7.2 §") into it.
+
 Origin:
 
 - the live check of 0.7.0, `docs/live-check-2026-11-18-0.7.0.md`, findings 1–9 (0.7.1 does all of them);
@@ -253,15 +256,19 @@ a tag sub-column (`labelParts`, `gen.ts:209-225`):
 
 - `tagW` = the most cells of the shown lanes' tags (main's tag is empty and counts 0). A tag is `@` + `shortType`
   (cut at 14 characters with `…`, `hooks/stats.ts:264-268`) or `@` + the task kind, so `tagW ≤ 15`.
-- `descW = L − 1 − tagW`, so `descW ≥ 8`. Every tag starts at cell `descW + 1`, on every lane.
-- Tags are never cut. 0.7.0's rule that the description gives way down to 6 cells and then the tag is cut
-  (`LABEL_MIN`, `hooks/lanes.ts:38`; `:131-132`) goes.
+- 0.7.2 §4.2: the tag column is `T = min(tagW, L − 1 − 12)` cells, and `descW = L − 1 − T`, so `descW ≥ 12`: the tag
+  shrinks, each tag cut at its end with `…` to `T` cells (`@appsec-en…`). With `T = tagW` the column is as 0.7.1 drew
+  it, `descW = L − 1 − tagW`. Every tag starts at cell `descW + 1`, on every lane.
+- 0.7.0's rule that the description gives way down to 6 cells and then the tag is cut (`LABEL_MIN`,
+  `hooks/lanes.ts:38`; `:131-132`) goes. 0.7.1's "tags are never cut" is replaced by the shrinking tag (0.7.2 §4.2).
 - Below 24 there is no tag and `descW = L`. A lane with no tag (main) draws its description alone.
 - Tags show from 54 columns (a body of 432 px, a pane of ≈ 464 px); in 0.7.0, from 80.
 
 ### 4.3 Description cuts
 
-1. Every description is cut at the end to `descW` cells with `…` (`cutCells`, `hooks/cells.ts:10-13`).
+1. Every description is cut at the end to `descW` cells with `…` (`cutCells`, `hooks/cells.ts:10-13`). 0.7.2 §4.2:
+   the kept head drops its trailing white space before `…`, and 0.7.2 §9.1: a cut never splits a character cluster
+   (an accent, an emoji with its modifier or joiner, a flag).
 2. The lanes whose description is wider than `descW` are grouped by their end-cut text. In every group of two or
    more, each description is cut in the middle instead (`middleCut`, `gen.ts:192-207`, `HEAD_MIN = 4`):
    - `room = descW − 1`;
@@ -272,7 +279,9 @@ a tag sub-column (`labelParts`, `gen.ts:209-225`):
      moves back to the word's start;
    - the text is the head (the first `room − t` code points), `…`, and the tail. The head's trailing spaces are
      dropped only while it keeps at least 4 code points; otherwise it keeps its first `room − t` code points as they
-     are. Example: `Fix the X12` and `Fix the Y12` at `descW` 8 give `Fix …X12` and `Fix …Y12`.
+     are (0.7.2 §4.2, R-6: only the end cut drops the space always). Example: `Fix the X12` and `Fix the Y12` at
+     `descW` 8 give `Fix …X12` and `Fix …Y12`. The tail starts at a word or at a code point, never inside a cluster
+     (0.7.2 §9.1).
 3. Other descriptions keep the end cut. Descriptions that read the same in whole stay the same.
 
 The live check's lanes (`gen.ts:169-177`):
@@ -307,11 +316,12 @@ Body px = cols × 8. Lane area = `svgPx(bodyPx − (L + 10) × 8)`, `A` = area �
 | 41 | 328 | 18 | descriptions | 104 / 92 | 13 / 12 | none | 12, 152, 19 |
 | 44 | 352 | 19 | descriptions | 120 / 108 | 15 / 14 | `12:00` | 13, 168, 21 |
 | 52 | 416 | 23 | descriptions | 152 / 140 | 19 / 18 | `11:55`, `12:00` | 15, 216, 27 |
-| 54 | 432 | 24 | 8 + 1 + 15 | 160 / 148 | 20 / 19 | `11:55`, `12:00` | 16, 224, 28 |
+| 54 | 432 | 24 | 12 + 1 + 11 | 160 / 148 | 20 / 19 | `11:55`, `12:00` | 16, 224, 28 |
 | 108 | 864 | 48 | 32 + 1 + 15 | 400 / 388 | 50 / 49 | every 2 m, 11:54 … 12:02 | 32, 528, 66 |
 | 200 | 1600 | 64 | 48 + 1 + 15 | 1008 / 996 | 126 / 125 | every 1 m, 11:53 … 12:03 | 32, 1264, 158 |
 
-- The label column's tag split assumes a 15-cell tag; with shorter tags `descW` is wider by the difference.
+- The label column's tag split assumes a 15-cell tag; with shorter tags `descW` is wider by the difference. 0.7.2 §4.3:
+  the tag shrinks to `T` cells, so `descW` is at least 12 and the L = 24 row reads `12 + 1 + 11` (0.7.1: `8 + 1 + 15`).
 - Knock-on: below ≈ 54 columns the lanes are shorter than in 0.7.0. At 41 columns (a 360 px pane) the area drops
   from 152 to 104 px, and the example's axis keeps only `now`: the 10 m step's `12:00` sits 33 px from `now`, under
   0.7.0 §6.3's 36 px. At 44 columns the terminal axis row shows only `now`.
@@ -338,33 +348,32 @@ dev server            ─────■          4m 00s
 
 - `laneLabelCells`: 33, 41, 44, 52, 54, 108, 200 → 14, 18, 19, 23, 24, 48, 64; 20, 0, −4 → 9; 143 and up → 64.
 - At L 48 with `@code-reviewer`, `@shell` and `@general-purpo…`: every tag starts at cell 33 in the terminal, and on
-  the desktop the description Box is 32 cells wide; tags are whole.
+  the desktop the description Box is 32 cells wide; tags are whole. At L 24 to 27 the tags are cut and every `descW`
+  is 12 (0.7.2 §4.4).
 - No tag below L 24; main has none.
 - The middle cut: the table of §4.3 at 41, 44 and 52; `Fix the X12` and `Fix the Y12` at `descW` 8 give
   `Fix …X12` and `Fix …Y12` (the head keeps its trailing space); lanes whose end cuts differ keep them; the head
   keeps ≥ 4 code points; no label is wider than L, for every L from 9 to 64.
 - The 44-column strings above (`hooks/lanes.test.ts:403`; `hooks/view.test.tsx:3975`).
-- Replaced: `hooks/lanes.test.ts:190-212` (0.7.0's label cells and the tag that gives way).
+- Replaced: `hooks/lanes.test.ts:190-212` (0.7.0's label cells and the tag that gives way); and, by 0.7.2 §4.4, the
+  cases that pin `descW` 8 or a whole 15-cell tag at L 24 to 27.
 
-## 5. Palette (D: A)
+## 5. Palette (D: A, replaced by P2)
 
-Only Skills and You change, in `STATION_HUES` (`hooks/stations.ts:27-28`). The other six stay.
+0.7.2 §10 replaces `STATION_HUES` (`hooks/stations.ts:20-29`) with the owner's palette P2, all eight hues: the table
+of 0.7.2 §10.1. Palette A's butter and lilac (Skills `#f0e07f` / `#695700`, You `#eeb6fb` / `#752f84`) are gone, and the
+six hues that 0.7.1 kept change too.
 
-| Station | Dark | Light | Name | ≈ contrast on pane bg (dark / light) |
-|---|---|---|---|---|
-| Skills | `#f0e07f` (was `#d9c95a`) | `#695700` (was `#8c7a00`) | butter / deep olive-gold | 11.3 / 6.8 |
-| You | `#eeb6fb` (was `#d48ae0`) | `#752f84` (was `#9a48b0`) | lilac / plum | 9.2 / 8.1 |
-
-- The fix is in lightness, not hue (`palettes.md`): in the dark set the two go to a light tier (OKLCH L .90 and .85),
-  in the light set to a deep one (.46 and .44). The hue order of 0.7.0 §3.3 stands (Skills ≈ 100, You ≈ 320).
-- ΔE_OK, recomputed: Shell–You 0.161 dark / 0.113 light; Model–Skills 0.134 / 0.173; Skills–MCP 0.134 / 0.121;
-  Agents–You 0.124 / 0.153. The weakest pair left is Files–Web, 0.091 dark, unchanged.
-- The minimum contrast does not change: 6.02 (Shell) dark and 3.52 (Model) light against `palettes.md`'s
-  `#1f1e1c` / `#faf9f6`; 5.5 and 3.6 against the pane bg of 0.7.0 §3.1.
-- 0.7.0 §15.1 (Skills/MCP and Model/Skills in the light theme) and §15.4 (You/Agents) are closed by this.
-- Colour-blind pairs that stay (Model–MCP under protanopia, Files–Web and Agents–Files under deuteranopia) are
-  `palettes.md`'s, unchanged; icons, labels and alts carry the station.
-- Tests: none new. No test pins the two hexes; the light rules are built from `STATION_HUES`
+- P2 is eight hues spaced round the wheel (OKLCH 60, 105, 150, 195, 240, 280, 320 and 0) at two lightnesses, ±.04
+  round the theme's mean, so that neighbours differ in hue and in lightness (0.7.2 §10.1). 0.7.0 §3.3 gives P2's hue
+  order (0.7.2 §10).
+- The numbers 0.7.1 gave here (ΔE_OK, the minimum contrasts) are replaced by 0.7.2 §10.2's: least contrast 6.26 dark
+  (You) and 4.02 light (MCP) on the pane's `#262624` / `#fbfaf7`; least CIEDE2000 12.8 dark and 14.8 light (both
+  Shell–Web).
+- 0.7.0 §15.1 (Skills/MCP and Model/Skills in the light theme) and §15.4 (You/Agents) were closed by palette A; P2
+  closes them again, on its own numbers.
+- Colour-blind pairs are not re-measured for P2; icons, labels and alts carry the station (0.7.2 §13).
+- Tests: `stations.test.ts` pins P2's table (0.7.2 §10.4); the light rules are built from `STATION_HUES`
   (`hooks/band.ts:309-311`).
 
 ## 6. Restore with `claude --resume <id> "…"` (finding 1)
@@ -398,13 +407,15 @@ itself)" (2.1.325 d.ts:4264-4265; 2.1.308 :4071-4072), so the hook's `next(e)` h
   (`markInFlight`, `hooks/register.tsx:751-766`, from `turn.step`, `:1057-1064`), or the first chunk of a model step
   for Model (`pulseModel`, `:770-775`). The pulse and the in-flight glow date from there, and a pending permission
   prompt keeps the station lit.
-- **New:** a call that reaches `tool.call` with no in-flight entry (no `tool_use_id`, or none in `inFlightAtom` when
-  it returns: no stream chunk the mod saw, for example another plugin's `$.tool.call`) sets its station's
-  `lastCallAt` to `t1`, its return time, in the stations write that counts it (`:1098-1104`). It pulses then. The
-  check reads `inFlightAtom` before that write; the entry's removal (`:1105-1111`) is unchanged.
+- **New:** a call that reaches `tool.call` that the mod has not pulsed (no `tool_use_id`, or an id with no first chunk
+  the mod saw, for example another plugin's `$.tool.call`) sets its station's `lastCallAt` to `t1`, its return time, in
+  the stations write that counts it (`:1098-1104`). It pulses then. 0.7.2 §3.2: the check is "not in `pulsedCallIds`",
+  a record of the ids that have pulsed, not "no in-flight entry", so a call pulses once, whether or not its entry was
+  evicted or wiped; the entry's removal (`:1105-1111`) is unchanged.
 
-Tests: a call whose chunk was seen keeps `lastCallAt` at the chunk's time after its `tool.call`; a call with no entry
-(no `tool_use_id`, and an id never seen) gets `lastCallAt = t1`; `calls` goes up by 1 either way.
+Tests: a call whose chunk was seen keeps `lastCallAt` at the chunk's time after its `tool.call`, also when its entry
+was evicted or wiped before the return (0.7.2 §3.3); a call with no chunk (no `tool_use_id`, and an id never seen)
+gets `lastCallAt = t1`; `calls` goes up by 1 either way.
 
 ## 8. A compaction another plugin hid (finding 5)
 
@@ -422,9 +433,11 @@ compaction the mod did not see.
 
 - `refreshUsage` (`:374-396`, its write `:386-390`), whatever asked for it: the 60 s tick (`:833-835`), the pane's
   start (`:827`), a model change (`:952`), a compaction found at `turn.start`;
-- `session.measure`'s write (`:946-956`, the write `:949`);
+- `session.measure`'s write (`:946-956`, the write `:949`), guarded as `refreshUsage` is (0.7.2 §8.1): it captures
+  `logEpoch` at its entry, and a measure raised before a reset and landing after it writes nothing and counts nothing;
 - main `turn.start`'s light `$.session.usage()` read (`:1001`), which today reads only the cost. It writes `usageAtom`
-  only to clear the held tokens when it finds a compaction.
+  only to clear the held tokens when it finds a compaction. 0.7.2 §8.2: it counts nothing, writes nothing and asks no
+  refresh when a `refreshUsage` or a measure wrote usage while it waited (`usageWrites`); the next reading decides.
 
 **One update.** The decision and the clearing of the held `contextTokens` and `contextPct` are one `update` of
 `usageAtom`: its callback sees the held tokens and returns them cleared. The callback sets a flag on every run, as
@@ -452,7 +465,7 @@ No `messages()` read.
   A `refreshUsage` whose read straddles the reset (asked before it, answered after its clear) is guarded only in
   part: it keeps `logEpoch` from before its read, and when a reset has run since, or one runs at its write
   (`resetsRunning !== 0`), it skips the usage write, the MCP write and the count, as `restorePane` guards its writes.
-  The two readings it does not catch are the third race below.
+  0.7.2 §8.1 guards `session.measure` the same way. The two readings neither guard catches are the third race below.
 - **Still missed, a limit:** a compaction whose next response lands before any reading. In practice that is an
   auto-compaction inside a running turn: the turn's next response brings the tokens back before a reading sees them
   absent. The code carries `// shortcut: a compaction answered before any usage reading is not seen (an
@@ -481,41 +494,48 @@ Tests:
   nothing and counts nothing;
 - a fresh session: nothing;
 - a subagent's `turn.start`: nothing;
-- tokens present on both sides: nothing.
+- tokens present on both sides: nothing;
+- 0.7.2 §8.5 adds: a `session.measure` held across a `/clear` writes nothing and counts nothing; a `turn.start` whose
+  usage read is held while a measure with tokens lands counts nothing and writes no line.
 
 ## 9. A call the engine blocked (finding 6a)
 
 Engine 2.1.325 refuses some calls before they run (`Blocked: standalone sleep 60`). The mod sees an error and draws a
 red `✗` and a failed Shell. 0.7.1 counts it as a denial.
 
+0.7.2 §2 changes the rule: the engine wraps a refused input in `<tool_use_error>…</tool_use_error>`, so 0.7.1's test
+for a text that starts `Blocked:` never matched the live text. And it is not the only refusal: the person's rejection,
+a permission rule, a plugin's `tool.check` and the auto-mode classifier refuse before a run too.
+
 In `tool.call` (`hooks/register.tsx:1084-1164`):
 
 ```text
-isBlocked = ran.isError === true && !e.tool.startsWith('mcp__') && (
-  (typeof ran.text === 'string' && ran.text.startsWith('Blocked:')) ||
-  (typeof ran.result === 'string' && ran.result.startsWith('Blocked:')))
-isDenied  = ran.deny !== undefined || isBlocked
+isDenied = ran.deny !== undefined || isRefused(e.tool, ran.isError === true, ran.text, ran.result)
 ```
 
-- Built-in tools only: an MCP tool (`mcp__…`) never counts as blocked, since its server writes its error text freely.
-  A `text` that is no string is no `Blocked:` text, so the check cannot throw.
+`isRefused` is one pure function in `hooks/stats.ts`, used by the live hook and the restore (0.7.2 §2.2): it applies
+to an error of a built-in tool, unwraps `<tool_use_error>` from `text` and `result`, each only when it is a string, and
+reads the engine's texts (0.7.2 §2.3), `Blocked:` among them.
+
+- Built-in tools only: an MCP tool (`mcp__…`) never counts as refused, since its server writes its error text freely.
+  A `text` that is no string is no refusal text, so the check cannot throw.
 - The tests of `ran.deny` in the hook read `isDenied`: `isStationFailure` (`:1097`) is false, so the station has no
   failure and main's segment is not failed (`:1155-1158`); the Log outcome is `denied` (`:1147`), with a deny's kind.
-- The project read (`:1119`) still reads `ran.deny === undefined`, as in 0.7.0: a blocked call asks it, since a call
-  that printed `Blocked:` may still have changed files; a real block costs one cheap read.
+- The project read (`:1119`) still reads `ran.deny === undefined`, as in 0.7.0: a refused call asks it, since a call
+  that printed `Blocked:` may still have changed files; a real refusal costs one cheap read.
 - `isFailed` (`:1120`) stays true, as it is for any error: no task, no hand-back.
 - The fields: on an error, `result` is "the error text, or undefined", `text` is "the error as the model reads it"
-  (2.1.325 d.ts:14738-14746; 2.1.308 :13609-13614). Which one carries `Blocked:`, and whether it starts the text, is
-  to be verified live (§14).
-- A heuristic, marked in the code: `// shortcut: the engine marks a blocked call only by its text, \`Blocked:\`, of a
-  built-in tool (an MCP server writes its error text freely); verify the field live and use a deny or a reason field
-  if the engine gives one`.
+  (2.1.325 d.ts:14738-14746; 2.1.308 :13609-13614). The live check showed that `text` carries the refusal and starts
+  with `<tool_use_error>` (0.7.2 §2.1).
+- A heuristic, marked in the code on `isRefused` (0.7.2 §2.2): `// shortcut: the engine marks a refused call only by
+  its text, of a built-in tool (an MCP server writes its error text freely); use a deny or a reason field if the
+  engine gives one`.
 
-Tests: `isError` with `text: 'Blocked: standalone sleep 60'` → Shell `calls` + 1, `failedThisTurn` 0, Log outcome
-`denied`, segment not failed; the same with `result: 'Blocked: …'` and no `text`; `'Error: Blocked: x'` and a plain
-error stay failures; an `mcp__x__y` call whose error text starts `Blocked:` stays a failure (Log `✗`, MCP failed); a
-built-in blocked call still asks the project read; an error whose `text` is no string is a plain failure, and the hook
-completes its writes.
+Tests (0.7.2 §2.5, with the engine's wrapped text as `BLOCKED_LIVE`): `isError` with `text: BLOCKED_LIVE` → Shell
+`calls` + 1, `failedThisTurn` 0, Log outcome `denied`, segment not failed; the same with `result: 'Blocked: …'` and no
+`text`; `'Error: Blocked: x'` and a plain error stay failures; an `mcp__x__y` call whose error text starts `Blocked:`
+stays a failure (Log `✗`, MCP failed); a refused call still asks the project read; an error whose `text` is no string is
+a plain failure, and the hook completes its writes.
 
 ## 10. A resumed subagent's runs (finding 6b)
 
@@ -574,12 +594,15 @@ reopen the core shows no model until the first response.
   :2843). Both run in the background (`inBackground`), after `askRestore`; a read that fails sets nothing.
 - The value goes through `logText`, as a step's model does (`:1071`), and is written with `held ?? value`, so a
   step's model that landed first stands. The first main step's model overwrites it as today (`:780`).
+- 0.7.2 §8.3: after `/clear` or an in-process resume, no `session.start` follows, so the reset clears the model and
+  nothing read it again until the first response. `session.end` now starts the same read in the background for `clear`
+  and `resume` (not for `logout`), after `next(e)`, with the same guard.
 - `coreModel` and `shortModel` (`hooks/band.ts:136-139`, `hooks/stations.ts:141-149`) draw it: a value with no
   version shows the family alone until the first step. The format is to be verified live (§14).
 
 Tests: atom null and `model()` = `claude-opus-5-5` → the core reads `opus 5.5`; a held model is not overwritten; a
 rejecting `model()` leaves null; a step's model then replaces the read one; a control character in the value is
-removed.
+removed; after `session.end` with `clear` or `resume` the model is asked once more and read (0.7.2 §8.5).
 
 ## 12. The base spec's old meter lines (finding 6d)
 
@@ -646,9 +669,12 @@ The other stale Context passages keep their text, and each gets a one-line note 
   reading taken after the engine drops the tokens, landing before `session.compact`'s own clear, counts it as hidden
   before `session.compact` counts it. A reading whose epoch changed, or one written while the reset
   runs, is guarded: it writes nothing. Two other readings that straddle a `/clear` or a resume still write the old
-  tokens back (§8, the third race).
-- **The `Blocked:` heuristic** (§9) depends on the engine's text, for built-in tools only. A call that printed
-  `Blocked:` without being blocked still gets its project read; its Log line and station read as a denial.
+  tokens back (§8, the third race). 0.7.2 §8.4: a `/rewind`, or a `session.end` another plugin keeps from the mod, may
+  still count a compaction, since the engine drops the tokens and no signal tells it from one.
+- **The refusal heuristic** (§9; 0.7.2 §2.2) reads the engine's texts, for built-in tools only. A new or changed
+  engine text reads as a failure again, and a built-in tool's own error that starts with one of them reads as a
+  denial; such a call still gets its project read. Other auto-mode texts that lack the pinned phrase stay failures
+  (0.7.2 §13).
 - **Narrow panes lose lane length** (§4.5): at 360 px the lane area drops from 152 to 104 px and the axis shows only
   `now`.
 
@@ -656,7 +682,8 @@ The other stale Context passages keep their text, and each gets a one-line note 
 
 - `markInFlight` writes `lastCallAt` after its in-flight write whether or not the call is done (`:765`). A chunk
   whose `markInFlight` lands after the call's `tool.call` can pulse the station a second time. Rare: a tool runs only
-  after its step's stream has sent the whole call.
+  after its step's stream has sent the whole call. Closed by 0.7.2 §3.2: `markInFlight` writes `lastCallAt` only for
+  an id that has not pulsed.
 - The ribbon's `bar` and the lanes' `fade0` ids repeat across Svgs (the live check's mobile-web note); the band's new
   `pulse-{station}` ids are unique within the band but not across panes.
 - The base spec's other stale Context passages keep their text under a note (§12); rewriting them is not in 0.7.1.
@@ -680,24 +707,29 @@ The choice: "E: V1, в строку", from `.superpowers/design/2026-11-18-0.7.1
 A station's time is the time the bar draws in its hue, summed over the parts of `rowsOf` (`hooks/ribbon.ts:95-129`)
 with every stored step in detail, that is `piecesOf(head, rows, 0, live)` (`:135-143`):
 
-- `head`: the turn's `earlier` (steps folded past the 60 stored, `addStep`, `hooks/stats.ts:198-220`) plus the calls
-  before the first stored step, each call to its own station: the bar's merged earlier block;
-- each stored step: its model part to Model; its tool group, one part from the first call's start to the last call's
-  end, to the station of the call that started first (`:110-119`), as the bar colours it;
+- `head`: the turn's `earlier` (steps folded past the 60 stored, `addStep`, `hooks/stats.ts:198-220`; 0.7.2 §6.2: a
+  leaving step's calls are folded as split pieces) plus the calls before the first stored step, each call to its own
+  station: the bar's merged earlier block;
+- each stored step: its model part to Model; its calls, split into pieces (0.7.2 §6.2, `splitCalls`): each stretch of
+  the step goes to the station of the call running over it that ends last, a gap to the piece before it, as the bar
+  colours it. In 0.7.1 the group was one part, from the first call's start to the last call's end, in the station of
+  the call that started first (`:110-119`);
 - the running part (`live`, `ribbonFromAcc`, `:43-54`) to its station, as `withLive` (`:57-67`) counts it.
 
-Detail: `ribbonSegments` (`:226-240`) and `ribbonTerminal` (`:333-375`) merge more steps into the earlier block when
-the bar is short (`addSpent`, `:131-133`, counts each call to its own station). The legend does not follow that merge,
-so it does not change with the pane's width. The two differ only in the parallel calls of the merged steps.
+`ribbonSegments` (`:226-240`) and `ribbonTerminal` (`:333-375`) merge more steps into the earlier block when the bar
+is short (`addSpent`, `:131-133`). The legend does not follow that merge, so it does not change with the pane's
+width. 0.7.2 §6.2 (R-5): `addSpent` takes a merged step's pieces, as the legend does, so the two are equal in every
+path. 0.7.1 had a "detail" here: the two differed in the parallel calls of the merged steps.
 
 **The total.** Today's shares (`pctOf`, `:242-245`) are of `modelMs + toolMs` after `withLive`. The station times do
 not always sum to that:
 
 - Model's time is the same: every step is in `earlier.model` or a stored step's part.
 - `toolMs` is the union of main's call intervals (`mergedLength`, `hooks/stats.ts:108`, `:170`). The parts' tool time
-  is never less: a step's group spans the gaps between its calls, and the folded and pre-step calls count each call
-  whole, overlaps twice. They are equal when each step's calls make one unbroken interval and no overlapping calls are
-  folded: one call a step, or parallel calls that run together (the usual case, and §2.3's example).
+  is never less: a step's pieces cover the gaps between its calls (0.7.2 §6.2, R-4), and the calls before the first
+  stored step count each call whole, overlaps twice. They are equal when each step's calls make one unbroken interval
+  and no overlapping calls come before the first stored step: one call a step, or parallel calls that run together
+  (the usual case, and §2.3's example).
 
 By the rule that the legend explains the bar, **the shares are of the sum of the station times** (the parts' total).
 They then add up to 100 but for rounding, and each matches its colour in the bar. `pctOf` stays for the fallback
@@ -821,9 +853,10 @@ The mockup's Turn 2 (`gen.ts:61`: Model 4 s, 6 s, 5 s; Files 0.3 s and 1.2 s; TT
 
 - Items and order: Model first; only stations with time; station order; then steps and TTFT; no TTFT when unknown.
 - `<1%` for a share above 0 that rounds to 0; `0%` never printed for a shown tool station.
-- Station times against the bar's parts: a turn past 60 steps (its `earlier`), a step with parallel calls in two
-  stations (the first-started one's hue), a step with sequential calls and a gap, and a running turn's live part in
-  Model and in a tool station; the shares are of their sum.
+- Station times against the bar's parts: a turn past 60 steps (its `earlier`), a step with sequential calls and a
+  gap, and a running turn's live part in Model and in a tool station; the shares are of their sum. 0.7.2 §6.3
+  replaces "a step with parallel calls in two stations (the first-started one's hue)" with the split's cases (the
+  live case, overlaps, three calls, ties, a gap, failure) and adds "legend = bar" for the merged earlier block.
 - Wrapping: §17.10's rows; no row starts or ends with ` · `; no terminal row wider than `cols` at 0, 8, 20, 39, 44
   and 80; an item wider than the row cut with `…`.
 - Desktop: one swatch per station item, its alt the station's label; one swatch source per station, the same string

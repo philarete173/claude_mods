@@ -424,7 +424,8 @@ A pure function splits one step's calls into pieces; `rowsOf` uses it in place o
   station.
 - **A gap** (no call runs over `[a, b]`: calls one after another within a step) goes to the piece before it (R-4).
   So the pieces still cover the step's span from the least `t0` to the greatest `t1`, as the group did, and the bar
-  keeps no hole within a step.
+  keeps no hole within a step. A gap before which no piece exists goes to the running best's station, as 0.7.1's
+  group did: a zero-length first call, with the next call starting later, is an example.
 - **Merge**: adjacent pieces of one station become one.
 - **Failure marks**: a piece is failed when its owner failed. A failed call that owns no piece marks the piece in
   which it ends (the piece whose `[a, b]` holds its `t1`, `a < t1 ≤ b`). Merged pieces keep a mark if any part had
@@ -437,9 +438,9 @@ A pure function splits one step's calls into pieces; `rowsOf` uses it in place o
   them the same way. The split function lives in `hooks/stats.ts` (ribbon.ts imports from stats.ts, not the other
   way). Then the legend equals the bar in every path, and 0.7.1 §17.2's "detail" (the two differ in the parallel
   calls of merged steps) goes. `head`, the calls before the first stored step (`:108-110`), keeps each call whole.
-- **Bounds**: a step of `k` calls makes at most `2k − 1` pieces; the work is `O(k²)` over a step's calls, which are
-  few. More pieces per step make `place` (`:194-235`) and the terminal's merge (`:395-402`) merge older steps sooner on
-  a narrow bar; both already handle that.
+- **Bounds**: a step of `k` calls makes at most `2k − 1` pieces; the work is `O(k log k)`: a running best over the
+  step's calls sorted by `t0`. More pieces per step make `place` (`:194-235`) and the terminal's merge (`:395-402`)
+  merge older steps sooner on a narrow bar; both already handle that.
 
 ### 6.3 Tests (`ribbon.test.ts`)
 
@@ -700,7 +701,7 @@ Files: `hooks/cells.ts`, `hooks/stats.ts`, their tests, `band.test.ts`.
 
 The design: OKLCH hues model 60, skills 105, mcp 150, files 195, web 240, shell 280, you 320, agents 0. L sits at each
 theme's mean (dark .780, light .532), ±.04 alternating round the wheel, the sign flipped in the light theme. C is the
-mean of the seven (.112 dark, .128 light); Web keeps its low chroma (.046 / .059). Chroma was cut to fit sRGB on dark
+mean of the seven (.112 dark, .128 light); Web keeps its low chroma (.046 / .060). Chroma was cut to fit sRGB on dark
 Shell (.092), light Skills (.105) and light Files (.084). The table's values are measured from the hexes with
 `mockup-src/color.ts` (`lchOf`).
 
@@ -716,6 +717,8 @@ Re-computed with `color.ts` (`contrast`, `de2000`, `hueGap`) on 2026-11-23:
 | Model–Skills | 22.9 at 45° | 22.9 at 45° |
 | Shell–You | 16.6 at 40° | 16.3 at 41° |
 | least CIEDE2000 to the failure red `#e5484d` | 25.3 (Agents) | 21.4 (Agents) |
+| MCP to the done mark `#2ea043` | 12.9 | 7.9 |
+| MCP to the `success` key (`#5bb56c` / `#2e8540`; terminal `#6cc36c` 5.5) | 4.8 | 3.2 |
 | palette A: least pairwise; Model–Skills; Shell–You | 11.5; 17.7; 16.8 | 13.2; 22.1; 13.6 |
 | palette A: least contrast on `#262624` / `#fbfaf7` | 5.48 (Shell) | 3.55 (Model) |
 
@@ -723,6 +726,13 @@ The mockup's numbers stand. The pane is drawn on 0.7.0 §3.1's background, `#262
 it, and 0.7.1 §5's `#1f1e1c` / `#faf9f6` were the palette notes' (`palettes.md`). Every hue is above 3:1 (WCAG 1.4.11)
 on both; light MCP is the lowest, under 4:1 on `#faf9f6`. Light-theme rules stay built from `STATION_HUES`
 (`hooks/band.ts:344`, `themeStyle`), so no drawing code changes.
+
+MCP's hue (150) sits by the greens of the pane: the done mark `GREEN #2ea043` (hue 146.2, the lanes' `✓`) and the
+`success` key of 0.7.0 §3.1 (hue about 144–148), which colours the Log's and the terminal's `✓`, the MCP section's
+server dots, the `+N` lines and Cache ≥ 50 %. Under 0.7.1 MCP was 17.2 and 12.1 from the done mark and 11.2, 8.4 and 8.6
+(terminal) from the `success` key. The two meet in the MCP section's dots, where the match reads as one idea. The lanes
+are never MCP-hued, so the lanes' `✓` stands by Model, Agents and Shell only. A done mark keeps its meaning by its shape
+and its place. The owner chose P2 for its even spacing, with this closeness.
 
 ### 10.3 Every place that names the old colours
 
@@ -815,7 +825,8 @@ Files: `hooks/stations.ts`, the tests above.
 - **The Log's heads in code points** (§9.2): `TEXT_HEAD_MAX` and `LOG_TEXT_MAX` now count code points, so a text of
   astral characters passes up to twice as many units (8192) to the passes that are slow on long texts (`redact`,
   `plainText`). That is far under the measured slow inputs (128 KB, 224 KB, `hooks/stats.ts:725-733`).
-- **Palette** (§10): light MCP is 3.98:1 on `#faf9f6` (4.02 on the pane's `#fbfaf7`); colour-blind pairs are not
+- **Palette** (§10): light MCP is 3.98:1 on `#faf9f6` (4.02 on the pane's `#fbfaf7`); MCP's green sits by the success
+  green (12.9 and 7.9 from the done mark, 4.8 and 3.2 from the `success` key, §10.2); colour-blind pairs are not
   re-measured, and icons, labels and alts still carry the station.
 - **A resumed subagent whose row still runs** when the resume comes keeps its old start (§12).
 

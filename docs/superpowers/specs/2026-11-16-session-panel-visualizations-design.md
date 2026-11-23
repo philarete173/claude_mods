@@ -9,6 +9,9 @@ Whatever the record leaves open is in §15.
 Updated by 0.7.1: `docs/superpowers/specs/2026-11-18-session-panel-0.7.1-design.md`. The sections it changes carry
 its rules in place, each with a pointer ("0.7.1 §") into it.
 
+Updated by 0.7.2: `docs/superpowers/specs/2026-11-23-session-panel-0.7.2-design.md`. The sections it changes carry
+its rules in place, each with a pointer ("0.7.2 §") into it.
+
 The record, in rising precedence: the first visual spec, the r3 and r4 addenda, the rulings (a later R over an earlier
 one), the technical decisions. The rulings and the technical decisions live in this spec as R1–R19 and T1–T6.
 Round 6 settled the first draft's open questions (R16 a–j, folded into their sections) and left three open (R17,
@@ -55,7 +58,8 @@ Code references are into `plugins/session-panel/` as of main 453c46d (0.6.1).
 ### 1.4 Credits
 
 The station idea and the Agents, Skills and You icons are adapted from **lot-map** by Aleksei Volodin (MIT). The
-Model hue (`#e1ac6e` / `#b8762a`) is lot-map's warm accent. THIRD_PARTY_NOTICES.md gains lot-map's MIT notice (§13).
+Model hue (`#e1ac6e` / `#b8762a`) was lot-map's warm accent until palette P2 (0.7.2 §10) replaced it; it is no longer
+lot-map's, and the icons and the station idea stay credited. THIRD_PARTY_NOTICES.md gains lot-map's MIT notice (§13).
 
 ## 2. The pane after 0.7.0
 
@@ -185,31 +189,39 @@ The first spec's `accent` is the Model hue (§3.3). Its `hot` colour is gone: R5
 ### 3.3 Station hues
 
 One hue per station, shared by the band, the ribbon and the lanes. The band draws each station's icon in its hue, so
-the band is the ribbon's and the lanes' colour key. Red, green and the context blue are reserved for failure, done
-and the context meter and are not station hues.
+the band is the ribbon's and the lanes' colour key. Red and the context blue are reserved for failure and the
+context meter and are not station hues. Green is the colour of the done and success marks (`GREEN #2ea043`, the lanes'
+`✓`; the `success` key of §3.1), and since 0.7.2 MCP's hue sits by it: MCP is 12.9 (dark) and 7.9 (light) CIEDE2000
+from the done mark, and 4.8, 3.2 and 5.5 (terminal) from the `success` key (0.7.2 §10.2). A mark keeps its meaning by
+its shape and its place.
 
-| Station | Dark | Light | Name | ≈ contrast on pane bg (dark / light) |
+| Station | Dark | Light | OKLCH hue | ≈ contrast on pane bg (dark / light) |
 |---|---|---|---|---|
-| Model | `#e1ac6e` | `#b8762a` | amber (lot-map's accent) | 7.5 / 3.6 |
-| Files | `#5fc2b5` | `#1c8c81` | teal | 7.3 / 4.0 |
-| Shell | `#a48cf0` | `#6c4fc0` | violet | 5.6 / 5.9 |
-| Web | `#93aac4` | `#4f6b8a` | slate | 6.4 / 5.3 |
-| MCP | `#a3c47a` | `#5b822f` | sage | 7.6 / 4.2 |
-| Agents | `#e58fae` | `#b44a74` | rose | 6.3 / 4.8 |
-| Skills | `#f0e07f` | `#695700` | butter / deep olive-gold | 11.3 / 6.8 |
-| You | `#eeb6fb` | `#752f84` | lilac / plum | 9.2 / 8.1 |
+| Model | `#df995e` | `#ad6313` | 60 | 6.4 / 4.4 |
+| Files | `#5adbda` | `#007070` | 195 | 9.1 / 5.7 |
+| Shell | `#b8beff` | `#5456a7` | 280 | 8.6 / 6.2 |
+| Web | `#91afc5` | `#577d98` | 240 | 6.6 / 4.2 |
+| MCP | `#74bf85` | `#348c4e` | 150 | 6.9 / 4.0 |
+| Agents | `#ffa6c1` | `#983c5e` | 0 | 8.3 / 6.4 |
+| Skills | `#cfc86f` | `#6a6400` | 105 | 8.8 / 5.9 |
+| You | `#ca93d7` | `#995da6` | 320 | 6.3 / 4.5 |
 
-- All are at least 3:1 (WCAG 1.4.11 for graphics). Colour is never the only cue: each station has its icon and label,
-  each segment and lane has an alt, each status has a shape.
-- Approximate OKLCH hue order, reserved colours in brackets: `[red 22] · Model 70 · Skills 100 · MCP 128 ·
-  [green 148] · Files 185 · Web (slate, low chroma) · [blue 258] · Shell 295 · You 325 ·
-  Agents 355`. Neighbours sit ≈ 25–45° apart.
-- Web is slate, not sky: sky sat ≈ 13° from the context blue, and Files and Web segments often sit side by side.
-  Slate keeps a blue hue at about a third of the blue's chroma, so it never reads as "context".
-- The weakest pairs are listed in §15.
-- Skills and You are 0.7.1's palette A (0.7.1 §5); they were lemon `#d9c95a` / `#8c7a00` and orchid `#d48ae0` /
-  `#9a48b0`. The change is in lightness, not hue, so the hue order above stands; it closes §15.1 and §15.4. The
-  minimum contrast does not change.
+The table is palette P2 (0.7.2 §10.1), which replaced 0.7.0's table (amber `#e1ac6e` / `#b8762a` for Model, teal,
+violet, slate, sage and rose for the rest) and 0.7.1's palette A for Skills and You.
+
+- Every hue is above 3:1 (WCAG 1.4.11 for graphics) on the pane's background; the least contrast is 6.26 (You) dark
+  and 4.02 (MCP) light (0.7.2 §10.2). Colour is never the only cue: each station has its icon and label, each segment
+  and lane has an alt, each status has a shape.
+- The eight hues are spaced round the wheel at two lightnesses, so that neighbours differ in hue and in lightness
+  (0.7.2 §10.1). OKLCH hue order, reserved colours in brackets: `Agents 0 · [red 22] · Model 60 · Skills 105 ·
+  [green 146] · MCP 150 · Files 195 · Web 240 · [blue 258] · Shell 280 · You 320`. The green is measured from
+  `#2ea043`, and MCP sits about 4° from it. Among the stations, neighbours sit 40–60° apart.
+- Web keeps a low chroma (.046 dark, .060 light), not a sky blue: sky sat ≈ 13° from the context blue, and Files and
+  Web segments often sit side by side. Web keeps a blue hue at about a third of the blue's chroma, so it never reads
+  as "context".
+- The weakest pairs are listed in §15. The least pairwise CIEDE2000 is 12.8 dark and 14.8 light (Shell–Web); the
+  tables and the other checks are 0.7.2 §10.2's. MCP to the done mark `#2ea043` is 12.9 dark and 7.9 light (0.7.1:
+  17.2 and 12.1); MCP to the `success` key is 4.8 dark, 3.2 light and 5.5 in a terminal (0.7.1: 11.2, 8.4 and 8.6).
 
 ### 3.4 Station order
 
@@ -304,7 +316,10 @@ slack, so an over-estimate of `W` never clips the outer label.
 | Tokens | `112k / 200k`, centred, baseline `cy0 + 39` | 10px `ash`, tabular |
 
 The model is the first main step's. After a reopen, with none held, it is read from `$.session.model()` at the start
-and drawn until the first step's model replaces it (0.7.1 §11).
+and drawn until the first step's model replaces it (0.7.1 §11). After `/clear` and an in-process resume it is read
+again at the end of the old conversation (0.7.2 §8.3); a logout reads nothing. A window that is no number (an
+infinite one) reads `—`: the tokens line is `50k / —`, never `/ InfinityM` (0.7.2 §9.3). No cut in the band, the
+model's name included, splits a character cluster (0.7.2 §9.1).
 
 The ring's outer edge is at `Xc ± 26`. Two rows: the ticks' top is at 16.5 and the tokens' descender at ≈ 88.7,
 inside 95. One row: 2 … 74.
@@ -471,7 +486,8 @@ inside a running turn whose next response comes first is missed (§10).
 
 ### 4.8 Pulses
 
-A pulse runs from the core to a station when the station gets a call (a model step for Model).
+A pulse runs from the core to a station when the station gets a call (a model step for Model). A call pulses once
+(0.7.2 §3): at its first chunk in the model's stream, or at its return when the mod saw no chunk of it.
 
 - **One `animateMotion` per pulse** along trunk → (rounded junction) → fork → branch → rail. It ends at the
   circle's edge (`cx ∓ 11`). With one row per side the path is the straight rail from the ring's edge.
@@ -594,8 +610,10 @@ The rows of 0.7.1 §17.8: rule · header · bar row · the legend's rows · deta
   is its own elapsed time: the bar fills the area, and "full" reads as "done".
 - **Bar:** y 3–13 (10 px) at every width; outer ends rounded rx 3 (one `clipPath` rect around the whole bar; the
   segments inside are square).
-- **Segments:** one per model call and one per tool call. Parallel tool calls of one step are one segment in the hue
-  of the first one's station.
+- **Segments:** one per model call and one per tool call. Parallel tool calls of one step are split (0.7.2 §6.2):
+  each stretch of the step goes to the station of the call that runs over it and ends last, adjacent stretches of one
+  station are one segment, and a gap between calls goes to the segment before it. In 0.7.0 the parallel calls were one
+  segment in the hue of the first one's station.
   - model: the `Model` hue, solid. There is no waiting-for-the-first-token part; the legend's TTFT carries it (R5);
   - tool: the station's hue, at least 2 px wide (§5.3's layout makes the room);
   - a **1 px gap** (the pane bg shows through) between any two segments.
@@ -611,7 +629,8 @@ The rows of 0.7.1 §17.8: rule · header · bar row · the legend's rows · deta
   drawn in detail, about one step per 20 px, so the bar never turns into a barcode. A step is one model call (R1); it
   draws as its model segment and the tool segment after it.
 - **Earlier steps** merge into one leftmost "earlier" block: one part per station, each in its hue, joined with no
-  gaps, in station order (§3.4), then the usual 1 px gap.
+  gaps, in station order (§3.4), then the usual 1 px gap. A merged step's calls enter the block as the split's pieces,
+  each piece's station and time, not each call whole (0.7.2 §6.2, R-5).
 - **Layout** (`ribbonSegments` in `hooks/ribbon.ts`), on the scale's px:
   - forward: each detailed part starts 1 px after the one before (the first 1 px after the block) and ends at the
     greater of its own end and its start + its minimum, 2 px for a tool part and 1 px otherwise; the last part ends
@@ -644,13 +663,13 @@ The rows of 0.7.1 §17.8: rule · header · bar row · the legend's rows · deta
 - **`<title>` per segment** (only with §11.3's interactive mode): the labels of §2.3, e.g.
   `Bash tsc --noEmit · Shell · 31s · failed`. Not drawn in 0.7.0 (§11.3, ruling C-no).
 - **Legend rows** (0.7.1 §17.1-§17.3, §17.5): Model first, then each tool station with time in the shown turn, in
-  station order, each as `[swatch][gap 1]` + dim label + primary ` NN%` (`<1%` for a share above 0 that rounds to
-  0); then primary `6 steps` and dim `TTFT` primary `1.2s`. Separators ` · ` dim. A swatch is an Svg 8 × 8 rect rx 1.5
-  in its station's hue, one fixed source per station, in a FIXED 2-cell slot (its cell and the gap), alt the station's
-  label. The shares are of the sum of the station times, the time the bar draws in each hue (0.7.1 §17.2). Whole items
-  wrap over rows, one Box row each; an item wider than a row is cut with `…`. Every item shows: the narrow rules are
-  gone. In the example, at 360 px: `■ Model 58% · ■ Files <1% · ■ Shell 23%`, `■ Agents 17% · ■ MCP 2% · ■ You <1%`,
-  `6 steps · TTFT 1.2s`.
+  station order, each as `[swatch][gap 1]` + dim label + primary ` NN%` (`<1%` for a share above 0 that rounds to 0);
+  then primary `6 steps` and dim `TTFT` primary `1.2s`. Separators ` · ` dim. A swatch is an Svg 8 × 8 rect rx 1.5 in
+  its station's hue, one fixed source per station, in a FIXED 2-cell slot (its cell and the gap), alt the station's
+  label. The shares are of the sum of the station times, the time the bar draws in each hue (0.7.1 §17.2), the split's
+  pieces included: the legend sums what the bar draws, in every path (0.7.2 §6.2). Whole items wrap over rows, one Box
+  row each; an item wider than a row is cut with `…`. Every item shows: the narrow rules are gone. In the example, at
+  360 px: `■ Model 58% · ■ Files <1% · ■ Shell 23%`, `■ Agents 17% · ■ MCP 2% · ■ You <1%`, `6 steps · TTFT 1.2s`.
 - **The fallback** (0.7.1 §17.6): a last turn with no ribbon (one of 0.6.1, kept over a hot reload) draws `Model`
   (with the Model swatch) and `Tools`, by the shares of `modelMs + toolMs`, then the steps and TTFT, and the alt
   `Turn 2m 14s: model 58%, tools 42%, 6 steps, 1 failed call`.
@@ -801,12 +820,17 @@ A lane row, one row, `alignItems="center"`:
 | running, unknown start (restored) | the dashed line | the live cap |
 | started before the axis | left end square, an 8 px fade-in at the left edge (`linearGradient` 0 → the hue) | — |
 | a resumed subagent's earlier runs (0.7.1 §10) | a 3 px bar each, the time between runs a gap | — |
+| a bounded task, ended by its notice (0.7.2 §5.4) | a 3 px bar, solid to K, then at 0.35 opacity | its mark |
 
 The dashed line is 2 px, from 0 to A at y 9.5, in full hue, `stroke-dasharray="3 3"`. Any lane but `main` with no
 known start draws it (`spansOf` and `drawLane` in `hooks/lanes.ts`). A restored lane whose end was seen live keeps
 that end: it sorts by it (§6.1) and draws its status mark at A + 6; a lane with neither time sorts as an unknown one.
 A resumed subagent's spans are its closed runs (`runs`, §8.4), then its current one; the current run draws as its
 status shows, and the status mark follows the last span. A run with no known start draws nothing.
+A task whose time is a bound (`≤`) is drawn solid to K, the start of the last main model request at which it was
+seen running, and faded from K to the notice, where the end mark stands; with no K the whole bar is faded, and a K
+outside `(start, end)` counts as none. A notice with `<duration_ms>` ends the bar exactly, at `min(notice, start +
+duration)`, with no tail (0.7.2 §5.2-§5.4); the tail draws no animation, so `motion: reduced` changes nothing there.
 Status marks keep the pane's status colours: `✓` success green, `✗` red, `■` and `○` neutral.
 
 **Svg alt:** `<description> (@type), <status>, <value>` at every width (R16 d, §6.4); for example
@@ -849,15 +873,18 @@ Status marks keep the pane's status colours: `✓` success green, `✗` red, `�
   plugin prefix dropped, cut at 14 characters with `…`, so `@general-purpo…`); a task's tag is its kind, `@shell`,
   `@monitor` or `@workflow` (`TaskKind`). That holds from 54 columns (a body of 432 px, a pane of ≈ 464 px; 0.7.1
   §4.2). Below that, the tag is not drawn.
-- **Two sub-columns** (0.7.1 §4.2): from 24 cells the column is a description sub-column of `descW = L − 1 − tagW`
-  cells, a gap cell and a tag sub-column, `tagW` the most cells of the shown lanes' tags (main's counts 0). Every tag
-  starts at cell `descW + 1` and is never cut.
+- **Two sub-columns** (0.7.1 §4.2, 0.7.2 §4.2): from 24 cells the column is a description sub-column of
+  `descW = L − 1 − T` cells, a gap cell and a tag sub-column of `T = min(tagW, L − 1 − 12)` cells, `tagW` the most
+  cells of the shown lanes' tags (main's counts 0). Every tag starts at cell `descW + 1`; a tag wider than `T` is cut
+  at its end with `…`, so a description keeps 12 cells at least (0.7.1: tags never cut).
 - **Description cuts** (0.7.1 §4.3): a description is cut at the end to `descW` cells with `…`. Where two or more of
   the shown descriptions wider than `descW` have the same end cut, each is cut in the middle instead: a head of at
   least 4 code points, `…`, and a tail long enough to tell them apart (a third of the room at least, moved back to its
   word's start when that costs at most 3). The head drops its trailing spaces, or keeps them all when dropping them
   would leave it under 4 code points: `Fix the X12` and `Fix the Y12` at 8 cells give `Fix …X12` and `Fix …Y12`. A
-  description that fits is never cut; descriptions that read the same in whole stay the same.
+  description that fits is never cut; descriptions that read the same in whole stay the same. The end cut drops its
+  head's trailing white space before `…` (`Review the…`; 0.7.2 §4.2), and no cut, end or middle, splits a character
+  cluster: an accent, an emoji with its modifier or joiner, a flag (0.7.2 §9.1).
 - **The alt always carries the tag** (R16 d): `<description> (@type), <status>, <value>`.
 - **`+N more`:** lanes past 8, dim, at column 0.
 - **Hidden** when there are no subagents and no tasks (§6.1).
@@ -865,13 +892,15 @@ Status marks keep the pane's status colours: `✓` success green, `✗` red, `�
 ### 6.5 Terminal
 
 Row = `label(L) space bar space value(8, right)`; the label is the description (padded to `descW` when a tag
-follows), a space and the dim tag (0.7.1 §4.4). The bar is `cols − L − 10` cells: the axis is `bar − 1` cells, the
-last cell is the gutter. In the example the axis is 14 cells at 44 columns, 51 s a cell (0.7.1 §4.5).
+follows), a space and the dim tag, cut to `T` cells (0.7.1 §4.4, 0.7.2 §4.2). The bar is `cols − L − 10` cells: the
+axis is `bar − 1` cells, the last cell is the gutter. In the example the axis is 14 cells at 44 columns, 51 s a cell
+(0.7.1 §4.5).
 
 | Char | Meaning | Colour |
 |---|---|---|
 | `━` | running span | lane hue |
 | `─` | finished span | lane hue |
+| `─` | a bounded task's faded tail, K to its end (0.7.2 §5.4) | lane hue, dim |
 | `┄` | unknown span | lane hue |
 | `◐` | running, in the gutter | lane hue |
 | `✓` `✗` `■` `○` | house marks after the span's end (`○` in the gutter) | success / error / dim / dim |
@@ -924,11 +953,12 @@ axis labels are the example's (span 12 min, §6.3). The widths of 0.7.1 §4.5:
 | 41 | 328 | 18 | descriptions | 104 / 92 | 13 / 12 | none | 12, 152, 19 |
 | 44 | 352 | 19 | descriptions | 120 / 108 | 15 / 14 | `12:00` | 13, 168, 21 |
 | 52 | 416 | 23 | descriptions | 152 / 140 | 19 / 18 | `11:55`, `12:00` | 15, 216, 27 |
-| 54 | 432 | 24 | 8 + 1 + 15 | 160 / 148 | 20 / 19 | `11:55`, `12:00` | 16, 224, 28 |
+| 54 | 432 | 24 | 12 + 1 + 11 | 160 / 148 | 20 / 19 | `11:55`, `12:00` | 16, 224, 28 |
 | 108 | 864 | 48 | 32 + 1 + 15 | 400 / 388 | 50 / 49 | every 2 m, 11:54 … 12:02 | 32, 528, 66 |
 | 200 | 1600 | 64 | 48 + 1 + 15 | 1008 / 996 | 126 / 125 | every 1 m, 11:53 … 12:03 | 32, 1264, 158 |
 
-- The label column's split assumes a 15-cell tag; with shorter tags `descW` is wider by the difference.
+- The label column's split assumes a 15-cell tag; with shorter tags `descW` is wider by the difference. The tag
+  shrinks to `T` cells, so `descW` is at least 12, and the L = 24 row reads `12 + 1 + 11` (0.7.2 §4.3).
 - The "0.7.0: L, area, bar" column is recomputed on this table's basis (body = cols × 8), so at 33 columns it reads
   112 where the old 300 px table, measured from the pane's W of 268 px, read 116.
 - Lane bars stay 6 px (running), 3 px (finished) and 2 px (dashed) at every width; only their lengths scale. The
@@ -1008,14 +1038,17 @@ unknown tool goes to Shell.
   subagents'.
 - **`failedThisTurn`:** counted since main's current `turn.start`, and reset there. A failure is a call whose Log line
   is an error with a ✗ mark: `ran.isError === true`, not denied, not abandoned, and not by an agent with no row
-  (`hooks/register.tsx:1023-1030`). A denied call is not a failure, and neither is a call the engine blocked before it
-  ran: a built-in tool's error (not `mcp__…`) whose `text`, or whose `result` string, starts `Blocked:` counts as a
-  denial (`isDenied`; its Log outcome is `denied`). It still asks the project read, which reads `ran.deny` alone: a
-  call that printed `Blocked:` may have changed files. As any error, it starts no task and hands nothing back
-  (0.7.1 §9).
+  (`hooks/register.tsx:1023-1030`). A denied call is not a failure, and neither is a call the engine or the person
+  refused before it ran: a built-in tool's error (not `mcp__…`) whose `text`, or whose `result` string, reads as one
+  of the engine's refusal texts (a blocked command, a rejection at a permission prompt, a permission rule, a plugin's
+  denial, the auto-mode classifier: `isRefused`, 0.7.2 §2.2) counts as a denial (`isDenied`; its Log outcome is
+  `denied`). An interrupted call whose result the engine wrote as a rejection reads `denied` too, drawn dim (0.7.2
+  §2.4, R-11). It still asks the project read, which reads `ran.deny` alone: a call that printed `Blocked:` may have
+  changed files. As any error, it starts no task and hands nothing back (0.7.1 §9).
 - **`lastCallAt`** (0.7.1 §7): the time the mod saw the call's first chunk in the model's stream, or the first chunk
-  of a model step for Model. A call that reaches `tool.call` with no in-flight entry (no `tool_use_id`, or one no
-  chunk named) sets it to its return time, `t1`, in the write that counts it. A pulse's age is `now − lastCallAt`.
+  of a model step for Model. A call that reaches `tool.call` and has not pulsed (no `tool_use_id`, or one no chunk
+  named) sets it to its return time, `t1`, in the write that counts it. A call pulses once, tracked by id and not by
+  its in-flight entry (0.7.2 §3.2). A pulse's age is `now − lastCallAt`.
 - **Running:**
   - Model: the agents now in a model step, that is, running agents (main while its turn runs, plus subagents with a
     running row) that have no call in flight. This needs an in-flight count per agent id.
@@ -1030,7 +1063,7 @@ unknown tool goes to Shell.
   `{t0, t1, station, label, failed}`. A segment is written when its call returns, so `t1` is a number; the running
   call is the live part, drawn from `inFlight`. Its `steps: StepTiming[]` stays as it is.
 - Storage keeps the latest 60 steps in detail. Older steps fold into per-station duration sums (`earlier`, Model
-  included). The drawing then merges down to R14's N (§5.3).
+  included). The drawing then merges down to R14's N (§5.3). A step's calls fold in as the split's pieces (0.7.2 §6.2).
 - `PaneData` gains `turn`, and the render reads it, so step and call writes redraw the pane and the ribbon draws the
   running turn live. Today the render never reads `turn` (`hooks/register.tsx:1195-1207`), and the pane shows only
   `lastTurn`.
@@ -1046,6 +1079,10 @@ unknown tool goes to Shell.
   first, 8 at most. A revive of an ended row pushes `{ start: startedAt, end: endedAt }` and starts the current run at
   the resume time; a ninth run merges the two oldest. A row whose end is unknown pushes nothing and keeps its start; a
   row whose start is unknown pushes no run, and its current run starts at the resume time.
+- A task row gains `seenRunningAt?: number` (0.7.2 §5.3): the start of the latest main model request at which the row
+  was still running, written by a main `turn.step`. It draws the solid part of a bounded task's bar (§6.2). When the
+  notice gives `<duration_ms>`, the row's `endedAt` is `min(arrival, start + duration)` and the time is exact
+  (0.7.2 §5.2).
 - New: `mainTurns`, the latest 6 main turns as `{start, end | null}`, written at main's `turn.start` and
   `turn.complete`.
 
@@ -1055,16 +1092,18 @@ A new counter, plus one for each main `session.compact` (`hooks/register.tsx:116
 another plugin can keep the event from the mod, as cc-plugin-sec-default does.
 
 **A compaction the mod did not see** (0.7.1 §8). The engine drops `context.tokens` after a compaction, until the next
-response. A usage reading with no tokens while `usageAtom` holds some is a compaction the mod did not see. Every
-reading checks it: `refreshUsage` (the 60 s tick, the pane's start, a model change, a compaction found at a turn),
-`session.measure`, and main `turn.start`'s light `$.session.usage()` read. The decision and the clearing of the held
-tokens are one `update` of `usageAtom`, so of two readings that race, only the one whose update cleared them counts:
-the tick, and a Log line `compacted` with no token numbers (who `main`, kind `info`). At `turn.start` the line is at
-the turn's time, under the prompt's, and a refresh follows. A seen `session.compact` clears the held tokens itself
-and asks no refresh: the engine may drop the tokens only after the hook's chain returns, so a reading then could put
-the old ones back; the tick reads the rest. `/clear` and a resume clear them first in their reset, so a reading that
-lands during the reset counts nothing, and a `refreshUsage` asked before the reset and answered after it writes
-nothing.
+response. A usage reading with no tokens while `usageAtom` holds some is a compaction the mod did not see. Every reading
+checks it: `refreshUsage` (the 60 s tick, the pane's start, a model change, a compaction found at a turn),
+`session.measure` (guarded as `refreshUsage` is: a measure raised before a reset writes nothing, 0.7.2 §8.1), and main
+`turn.start`'s light `$.session.usage()` read (which counts nothing when usage was written while it waited, 0.7.2 §8.2).
+The decision and the clearing of the held tokens are one `update` of `usageAtom`, so of two readings that race, only the
+one whose update cleared them counts: the tick, and a Log line `compacted` with no token numbers (who `main`, kind
+`info`). At `turn.start` the line is at the turn's time, under the prompt's, and a refresh follows. A seen
+`session.compact` clears the held tokens itself and asks no refresh: the engine may drop the tokens only after the
+hook's chain returns, so a reading then could put the old ones back; the tick reads the rest. `/clear` and a resume
+clear them first in their reset, so a reading that lands during the reset counts nothing, and a `refreshUsage` asked
+before the reset and answered after it writes nothing. A `/rewind`, or a `session.end` another plugin keeps from the
+mod, may still count a compaction: the engine drops the tokens and no signal tells them from one (0.7.2 §8.4).
 
 ### 8.6 Restore after a reopen
 
@@ -1075,12 +1114,15 @@ nothing.
 - Model's count, from the assistant rows after that cut;
 - `compactions`, as the number of summary rows in the whole history.
 
+A call whose error text is one of the engine's refusals is restored as `denied`, as live (0.7.2 §2.4).
+
 It cannot rebuild `running`, failures, `lastCallAt`, `turn`, `lastTurn` or `mainTurns`: the rows carry no timestamps
 (`hooks/restore.ts:47-49`). Restored agents and tasks keep null starts, so their lanes are dashed.
 
 ### 8.7 Types
 
-New atoms are declared in `types/index.d.ts` (`PluginState`), as today.
+New atoms are declared in `types/index.d.ts` (`PluginState`), as today. `TaskRow.seenRunningAt` (0.7.2 §5.3) is
+declared there, with its mirror in `hooks/stats.ts`.
 
 ## 9. Rendering (T2)
 
@@ -1166,9 +1208,9 @@ pulses, the ripples, the beat rings and the core's breath and makes the caps sta
     Two races are accepted: a reading taken before a seen compaction and written after its clear puts the old tokens
     back, so a later reading can count that compaction again; and a tick's reading taken after the engine drops the
     tokens can land before `session.compact`'s own clear, so the two count it twice. This is documented;
-  - a call the engine blocked (a built-in tool's error that starts `Blocked:`) is a denial, not a failure (§8.2), and
-    still asks the project read. The rule reads the engine's text: a heuristic, carried as a `shortcut:` until the
-    engine gives a field for it.
+  - a call the engine or the person refused (one of the engine's refusal texts, built-in tools only; 0.7.2 §2.2) is a
+    denial, not a failure (§8.2), and still asks the project read. The rule reads the engine's text: a heuristic,
+    carried as a `shortcut:` until the engine gives a field for it.
 
 ## 11. Engine facts, risks and the first task (T4)
 
@@ -1267,7 +1309,8 @@ The results and the owner's rulings (the live check with the owner, desktop 2.1.
 
 `docs/design/session-panel-visualizations.html` is the approved mockup (R2, R6, R12 as narrowed by R13): two
 columns, Today | A2 in the stretched layout, each with its terminal pane under it. It draws the worked example of
-§2.3. The page itself, not the pane, has:
+§2.3. It draws 0.7.0's station hues, which palette P2 replaced (0.7.2 §10); the page is left as it was. The
+page itself, not the pane, has:
 
 - controls for the pane width (`300 | 360 | 450 | 900 | Full`), the terminal width (`40 | 44 | 60 | 120`) and the
   theme;
@@ -1309,7 +1352,10 @@ R17 leaves these for the live check:
 
 1. **Weak light-theme hue pairs.** Skills/MCP (olive-gold against olive-green) and Model/Skills in the light theme.
    The fallback on record is a greener MCP (`#3f8a3a`), at the cost of moving closer to the success green. Closed by
-   0.7.1 §5: Skills moved to a light tier in the dark set and a deep one in the light set.
+   0.7.1 §5 for Skills, and again by palette P2 (0.7.2 §10): the eight hues sit round the wheel at two lightnesses,
+   Model and Skills 45° apart (CIEDE2000 22.9) and neighbours differ in lightness. P2 takes the cost that the old
+   fallback was rejected for: MCP sits by the success green (§3.3), by the owner's choice of P2 (0.7.2 §10). The note
+   stays closed.
 2. **Estimated label widths.** The label rule (§4.2) uses per-character estimates. The live pane may need them tuned;
    the 2 px slot margin is the buffer.
 3. **Fine-tuning the 464 px breakpoint.** One row per side starts at `W ≥ 464` (the one-row pitch reaching 48).
@@ -1318,4 +1364,5 @@ R17 leaves these for the live check:
 Not covered by R16 or R17:
 
 4. **You/Agents.** r3 also names You/Agents, in both themes, among the weakest pairs; R17 lists only the light-theme
-   pairs above. Closed by 0.7.1 §5: You moved to a lighter tier in the dark set and a deeper one in the light set.
+   pairs above. Closed by 0.7.1 §5 for You, and again by palette P2 (0.7.2 §10): You is at hue 320 and Agents at 0,
+   40° apart, and they differ in lightness (dark L .739 and .820).
