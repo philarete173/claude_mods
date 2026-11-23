@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.2 — unreleased
+## 0.7.2 — 2026-11-23
 
 - Fix: a call the engine or the person refused before it ran was drawn as a failure. The engine wraps a refusal in
   `<tool_use_error>`, and 0.7.1 looked for a bare `Blocked:`. A blocked command, a rejection at a permission prompt, a
