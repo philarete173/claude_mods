@@ -1,5 +1,5 @@
 import { test, expect } from 'claude-code/testing'
-import { cells, cutCells, middleCut, padEnd, padStart, spansCells } from './cells'
+import { cells, cutCells, fitRow, middleCut, padEnd, padStart, spansCells } from './cells'
 
 test('cells counts code points', () => {
   expect(cells('中a')).toBe(2)
@@ -13,6 +13,28 @@ test('cutCells cuts with an ellipsis', () => {
   expect(cutCells('Plan critique', 0)).toBe('')
   expect(cutCells('Plan critique', -3)).toBe('')
   expect(cutCells('ab', 1)).toBe('…')
+})
+
+test('cutCells drops the white space before its ellipsis', () => {
+  expect(cutCells('Review the 0.7.1 diff', 12)).toBe('Review the…')
+  expect(cutCells('Review the diff', 13)).toBe('Review the d…')
+  expect(cutCells('a   b', 3)).toBe('a…')
+  expect(cutCells('    x', 3)).toBe('…')
+})
+
+test('cutCells never splits a cluster', () => {
+  expect(/\p{M}/u.test('\u{301}')).toBe(true)
+  const results = [
+    [cutCells('cafe\u{301} au lait', 5), 'caf…'],
+    [cutCells('ab\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}cd', 5), 'ab…'],
+    [cutCells('ab\u{1F1FA}\u{1F1E6}cd', 4), 'ab…'],
+    [cutCells('ab\u{1F1FA}\u{1F1E6}cd', 5), 'ab\u{1F1FA}\u{1F1E6}…'],
+    [cutCells('ab\u{1F44D}\u{1F3FD}cd', 4), 'ab…'],
+  ]
+  for (const [got, want] of results) {
+    expect(got).toBe(want)
+    expect(got?.endsWith('\u{200D}…')).toBe(false)
+  }
 })
 
 test('padStart and padEnd pad in cells and never cut', () => {
@@ -55,4 +77,26 @@ test('middleCut gives back a text that fits in n and cuts the others in the midd
   expect(middleCut(['Band check', ...BAND_CHECK.slice(0, 2)], 18))
     .toEqual(['Band check', 'Band check…sleep A', 'Band check…sleep B'])
   expect(middleCut(BAND_CHECK, 64)).toEqual(BAND_CHECK)
+})
+
+test('middleCut\'s tail never starts inside a cluster', () => {
+  const marks = ['abcdefghijklmnopqre\u{301}1', 'abcdefghijklmnopqre\u{301}2']
+  const flags = ['abcdefghijklmn\u{1F1FA}\u{1F1E6}x1', 'abcdefghijklmn\u{1F1FA}\u{1F1E6}x2']
+  expect(middleCut(marks, 8)).toEqual(['abcde…1', 'abcde…2'])
+  expect(middleCut(flags, 11)).toEqual(['abcdefg…x1', 'abcdefg…x2'])
+  for (let n = 6; n <= 20; n += 1) {
+    for (const text of [...middleCut(marks, n), ...middleCut(flags, n)]) {
+      expect(cells(text), `${n}: ${text}`).toBeLessThanOrEqual(n)
+    }
+  }
+})
+
+test('the middle cut at 12 cells tells the live lanes apart', () => {
+  const lanes = ['A', 'B'].map((x) => `Label check: background sleep with a long description, lane ${x}`)
+  expect(middleCut(lanes, 12)).toEqual(['Label…lane A', 'Label…lane B'])
+  expect(middleCut(BAND_CHECK, 12)).toEqual(['A', 'B', 'C', 'D'].map((x) => `Band che…p ${x}`))
+})
+
+test('fitRow puts nothing after a cut span', () => {
+  expect(fitRow([{ text: 'ab cd' }, { text: 'X' }], 4)).toEqual([{ text: 'ab…' }])
 })

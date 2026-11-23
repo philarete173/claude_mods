@@ -105,6 +105,16 @@ test('the label rule picks 10, then 9, then none', () => {
   expect(svg).not.toContain('>Model<')
 })
 
+test('a window that is no number draws —, never Infinity', () => {
+  const input: BandInput = { ...EXAMPLE, pct: 0, tokens: 50_000, window: Infinity }
+  const band = drawBand(input, 328, FULL)
+  expect(band.svg).toContain('>50k / —<')
+  expect(band.alt).toContain('50k of —')
+  expect(band.svg).not.toContain('Infinity')
+  expect(band.alt).not.toContain('Infinity')
+  expect(textOf(bandTerminal(input, 80)).join('\n')).toContain('50k / —')
+})
+
 test('the paths of §4.3 at 328 and 868', () => {
   const at328 = drawBand(EXAMPLE, 328, FULL).svg
   for (const d of [

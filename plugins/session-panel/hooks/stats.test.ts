@@ -24,6 +24,7 @@ import {
   isRefused,
   LOG_MAX,
   LOG_TEXT_MAX,
+  logText,
   mergedLength,
   normTurn,
   parseStatus,
@@ -304,9 +305,9 @@ test('shortType', () => {
   }
 })
 
-test('shortType never splits a surrogate pair', () => {
-  // 12 letters and an astral emoji take 14 units: the cut at 13 would keep the emoji's high half alone.
-  expect(shortType('abcdefghijkl\u{1F600}xyz')).toBe('abcdefghijkl…')
+test('shortType cuts at 13 code points and keeps a pair whole', () => {
+  // 12 letters and an astral emoji are 13 code points: the emoji stays, as a pair is one code point.
+  expect(shortType('abcdefghijkl\u{1F600}xyz')).toBe('abcdefghijkl\u{1F600}…')
 })
 
 test('shorten', () => {
@@ -927,11 +928,11 @@ test('shorten takes the format characters out before it cuts', () => {
   expect(shorten('\u202E\u200B', 5)).toBe('')
 })
 
-test('shorten does not cut a surrogate pair in two: the ellipsis follows a whole emoji, never a lone surrogate', () => {
-  const rockets = ROCKET.repeat(10) // 20 UTF-16 units
-  // The cut of max 6 is 5 units: two rockets and the first unit of a third, which goes too.
-  expect(shorten(rockets, 6)).toBe(`${ROCKET}${ROCKET}…`)
-  expect(shorten(rockets, 5)).toBe(`${ROCKET}${ROCKET}…`) // 4 units: the pair stands whole
+test('shorten cuts in code points and never leaves a lone surrogate', () => {
+  const rockets = ROCKET.repeat(10) // 10 code points
+  // The cut of max 6 keeps 5 code points and the ellipsis.
+  expect(shorten(rockets, 6)).toBe(`${ROCKET.repeat(5)}…`)
+  expect(shorten(rockets, 5)).toBe(`${ROCKET.repeat(4)}…`)
   // A lone surrogate is what `\p{Cs}` matches with the `u` flag: none at any cut.
   for (let max = 2; max < 20; max += 1) expect(/\p{Cs}/u.test(shorten(rockets, max)), `max ${max}`).toBe(false)
   expect(shorten(ROCKET.repeat(3), 6)).toBe(ROCKET.repeat(3)) // a text that fits is not cut
@@ -1023,25 +1024,39 @@ test('plainText leaves `__`, a lone `**`, one beside a space or an ASCII word, a
   expect(plainText('**fixed `__init__.py`** and x ** 2')).toBe('fixed __init__.py and x ** 2')
 })
 
-test('textHead is the first `max` UTF-16 units of a text; one of `max` units or fewer comes back as it is', () => {
+test('textHead is the first `max` code points of a text; one of `max` code points or fewer comes back as it is', () => {
   expect(textHead('abcdef', 4)).toBe('abcd')
   expect(textHead('abcdef', 6)).toBe('abcdef')
   expect(textHead('abc', 6)).toBe('abc')
   expect(textHead('abcdef', 0)).toBe('')
 })
 
-test('textHead does not split a surrogate pair: the high surrogate that the cut leaves alone goes too', () => {
-  // A rocket is two UTF-16 units, a high surrogate and a low one.
-  expect(textHead(`ab${ROCKET}c`, 3)).toBe('ab') // the cut falls between the two units of the rocket
-  expect(textHead(`ab${ROCKET}c`, 4)).toBe(`ab${ROCKET}`) // here the pair is whole
-  expect(textHead(`${ROCKET}${ROCKET}`, 1)).toBe('')
-  // The high surrogates are U+D800 to U+DBFF, both ends included; a low surrogate (U+DC00 on) at the cut stays.
-  expect(textHead('a\uD800b', 2)).toBe('a')
-  expect(textHead('a\uDBFFb', 2)).toBe('a')
-  expect(textHead('a\uDC00b', 2)).toBe('a\uDC00')
-  // A text of `max` units or fewer is not cut, whatever it ends in: here a high surrogate that nothing follows.
+test('textHead cuts by code point: a pair stands whole, and the cut never makes a lone surrogate', () => {
+  // A rocket is two UTF-16 units but one code point.
+  expect(textHead(`ab${ROCKET}c`, 3)).toBe(`ab${ROCKET}`)
+  expect(textHead(`ab${ROCKET}c`, 4)).toBe(`ab${ROCKET}c`) // a text that fits in code points comes back whole
+  expect(textHead(`${ROCKET}${ROCKET}`, 1)).toBe(ROCKET)
+  // A lone surrogate of the input is a code point of its own: the cut keeps it, never makes one.
+  expect(textHead('a\u{D800}b', 2)).toBe('a\u{D800}')
+  expect(textHead('a\u{DBFF}b', 2)).toBe('a\u{DBFF}')
+  expect(textHead('a\u{DC00}b', 2)).toBe('a\u{DC00}')
+  // A text of `max` code points or fewer is not cut, whatever it ends in: here a high surrogate that nothing follows.
   const lone = ROCKET.slice(0, 1)
   expect(textHead(`a${lone}`, 2)).toBe(`a${lone}`)
+})
+
+test('textHead and shorten count code points and keep clusters whole', () => {
+  expect(shorten('abcd\u{1F600}efg', 6)).toBe('abcd\u{1F600}…')
+  for (let k = 0; k < 9; k += 1) {
+    const text = `${'x'.repeat(k)}\u{1F600}${'x'.repeat(8 - k)}`
+    const cut = shorten(text, 6)
+    expect(/\p{Cs}/u.test(cut), `k ${k}`).toBe(false)
+    expect([...cut].length, `k ${k}`).toBeLessThanOrEqual(6)
+  }
+  expect(shorten('abcd\u{1F44D}\u{1F3FD}ef', 6)).toBe('abcd…')
+  expect(shorten('ab\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}cd', 4)).toBe('ab…')
+  expect(textHead('ab\u{1F600}', 3)).toBe('ab\u{1F600}')
+  expect(textHead('abcde\u{301}f', 5)).toBe('abcd')
 })
 
 test('wordHead is the head of a text less a short word the cut goes through; one of `max` units or fewer is not cut',
@@ -1085,12 +1100,22 @@ test('wordHead takes whitespace as `\\s` does: a no-break space and a wide space
 })
 
 test('wordHead drops a word that the cut splits a surrogate pair of, and keeps a pair that stands whole', () => {
-  // The cut falls between the two units of the rocket: textHead drops the high unit, and the word goes with it.
+  // The cut falls inside the word `c\u{1F680}d`, which goes; a text that fits in code points comes back whole.
   expect(wordHead(`ab c${ROCKET}d`, 5)).toBe('ab ')
-  expect(wordHead(`ab c${ROCKET}d`, 6)).toBe('ab ') // a pair that is whole at the cut is part of the word too
-  expect(wordHead(`${ROCKET} ${ROCKET}`, 3)).toBe(`${ROCKET} `)
-  // A head with no whitespace is textHead's: the high surrogate at the cut goes, the pair before it stays.
-  expect(wordHead(`${ROCKET}${ROCKET}`, 3)).toBe(ROCKET)
+  expect(wordHead(`ab c${ROCKET}d`, 6)).toBe(`ab c${ROCKET}d`)
+  expect(wordHead(`${ROCKET} ${ROCKET}`, 3)).toBe(`${ROCKET} ${ROCKET}`)
+  expect(wordHead(`${ROCKET}${ROCKET}`, 3)).toBe(`${ROCKET}${ROCKET}`)
+})
+
+test('wordHead keeps a text of 4096 code points whole', () => {
+  const text = `${'x'.repeat(4000)}${ROCKET.repeat(96)}` // 4096 code points, 4192 units
+  expect(wordHead(text, 4096)).toBe(text)
+})
+
+test('logText never leaves a lone surrogate', () => {
+  const text = logText(`${'m'.repeat(511)}${ROCKET}tail`)
+  expect(/\p{Cs}/u.test(text)).toBe(false)
+  expect([...text].length).toBeLessThanOrEqual(512)
 })
 
 // The head of the Log's texts is 4096 units, and the scan back from its end stops after CUT_WORD_MAX units of a run.
@@ -2334,6 +2359,10 @@ test('fmtTokens', () => {
     [128400, '128k'], [999400, '999k'], [999600, '1M'], [1240000, '1.2M'], [12000000, '12M'],
   ]
   for (const [n, want] of cases) expect(fmtTokens(n), `fmtTokens(${n})`).toBe(want)
+})
+
+test('fmtTokens of a value that is no finite number is —', () => {
+  for (const n of [Infinity, -Infinity, NaN]) expect(fmtTokens(n), `fmtTokens(${n})`).toBe('—')
 })
 
 test('fmtDuration', () => {

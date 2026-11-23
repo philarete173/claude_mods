@@ -2,6 +2,7 @@
 // tasks, redaction and display formats. It imports nothing from the engine and never takes `$`, so every function can
 // be tested on its own.
 
+import { headEnd } from './cells'
 import { zeroStationMs } from './stations'
 import type { StationMs, ToolStationId } from './stations'
 
@@ -673,24 +674,29 @@ export function plainText(s: string): string {
   return s.replace(pair, '$1').replace(/`/g, '').replace(/^#+ /gm, '')
 }
 
-// Takes out the format and control characters (stripFormat), collapses whitespace runs and cuts to `max` characters,
-// the last one being an ellipsis. A cut that would leave one unit of a surrogate pair alone drops that unit too
-// (textHead), so the text may come out one unit under `max`.
+// Takes out the format and control characters (stripFormat), collapses whitespace runs and cuts to `max` code points,
+// the last one being an ellipsis. The cut never splits a cluster (§9.1) and never leaves a lone surrogate (textHead),
+// so the text may come out some code points under `max`.
 export function shorten(s: string, max: number): string {
   const flat = stripFormat(s).replace(/\s+/g, ' ').trim()
-  return flat.length > max ? `${textHead(flat, max - 1)}…` : flat
+
+  return textHead(flat, max) === flat ? flat : `${textHead(flat, max - 1)}…`
 }
 
-// The first `max` UTF-16 units of a text, for the passes that read a text whole (the pair pattern of plainText takes
-// quadratic time on some long inputs) when a Log line keeps LOG_TEXT_MAX characters of it at most. A cut between the
-// two units of a surrogate pair would leave the high one alone, and a lone surrogate is no character, so that unit goes
-// too. A text of `max` units or fewer comes back as it is.
+// The first `max` code points of a text, for the passes that read a text whole (the pair pattern of plainText takes
+// quadratic time on some long inputs) when a Log line keeps LOG_TEXT_MAX code points of it at most. The cut never
+// splits a cluster (§9.1) and never leaves a lone surrogate: a pair is one code point, and a lone surrogate of the
+// input is a code point of its own, which the cut keeps. A text of `max` code points or fewer comes back as it is.
 export function textHead(s: string, max: number): string {
-  if (s.length <= max) return s
-  const head = s.slice(0, max)
-  const last = head.charCodeAt(max - 1)
+  // At most max + 1 code points are walked, never the whole text: the head is for the passes that are slow on long
+  // texts (TEXT_HEAD_MAX).
+  const points: string[] = []
+  for (const point of s) {
+    points.push(point)
+    if (points.length > max) break
+  }
 
-  return last >= 0xd800 && last <= 0xdbff ? head.slice(0, -1) : head
+  return points.length <= max ? s : points.slice(0, headEnd(points, max)).join('')
 }
 
 // The longest run of non-whitespace characters, in UTF-16 units, that wordHead takes off the end of a head. The run
@@ -703,17 +709,18 @@ export function textHead(s: string, max: number): string {
 // paragraph) whose start the pane should show, so it stays and the head is cut through it.
 export const CUT_WORD_MAX = 256
 
-// The head of a text (textHead) less the run of characters at its end that are no whitespace, for the texts that the
-// Log reads: a word cut in two can be a secret that the patterns of redact no longer match (a URL with a password that
-// loses its `@`), and a Log line keeps LOG_TEXT_MAX characters of the text at most anyway. The run goes only when it
-// has CUT_WORD_MAX units or fewer: a longer one stays, and so does a head with no whitespace at all, which is the head
-// as textHead gives it. The whitespace is what `\s` says, as in those patterns, so the no-break space counts. The run
-// is found by a scan back from the end, one character at a time, which stops once it has passed CUT_WORD_MAX units: a
-// pattern such as `\S+$` takes quadratic time on a long word that whitespace follows. A text of `max` units or fewer
-// comes back as it is.
+// The head of a text (textHead, `max` code points) less the run of characters at its end that are no whitespace, for
+// the texts that the Log reads: a word cut in two can be a secret that the patterns of redact no longer match (a URL
+// with a password that loses its `@`), and a Log line keeps LOG_TEXT_MAX code points of the text at most anyway. The
+// run goes only when it has CUT_WORD_MAX units or fewer: a longer one stays, and so does a head with no whitespace at
+// all, which is the head as textHead gives it. The whitespace is what `\s` says, as in those patterns, so the
+// no-break space counts. The run is found by a scan back from the end, one character at a time, which stops once it
+// has passed CUT_WORD_MAX units: a pattern such as `\S+$` takes quadratic time on a long word that whitespace follows.
+// A text of `max` code points or fewer comes back as it is; the head is cut in code points, the scan back and
+// CUT_WORD_MAX stay in units.
 export function wordHead(s: string, max: number): string {
-  if (s.length <= max) return s
   const head = textHead(s, max)
+  if (head === s) return s
   const floor = Math.max(0, head.length - CUT_WORD_MAX - 1)
   let end = head.length
   while (end > floor && !/\s/.test(head.charAt(end - 1))) end -= 1
@@ -722,7 +729,7 @@ export function wordHead(s: string, max: number): string {
   return end > floor ? head.slice(0, end) : head
 }
 
-// How much of a text the Log reads, in UTF-16 units: a prompt, a tool call's label, a subagent's description and
+// How much of a text the Log reads, in code points: a prompt, a tool call's label, a subagent's description and
 // answer, a task description. A Log line keeps LOG_TEXT_MAX of each at most, and two passes take quadratic time on some
 // long inputs: the pair pattern of plainText (224 KB of ` **x**y` took 4.1 s in Node 22) and the URL pattern of redact
 // (128 KB of `a.` took 5.5 s in Node 22). These texts come from the agents (a Bash command can be steered by a prompt
@@ -733,7 +740,7 @@ export function wordHead(s: string, max: number): string {
 // a longer run is text, and the head is cut through it.
 const TEXT_HEAD_MAX = 4096
 
-// The most of a text that a Log line keeps, in UTF-16 units: more than a line of a pane maximized on a 21:9 monitor
+// The most of a text that a Log line keeps, in code points: more than a line of a pane maximized on a 21:9 monitor
 // shows (about 400 characters). The pane cuts each line to its room, with an ellipsis of its own (`wrap="truncate"`),
 // so a narrow pane shows what it showed before.
 export const LOG_TEXT_MAX = 512
@@ -1125,6 +1132,8 @@ export function fmtPct(x: number, digits: 0 | 1): string {
 // Number() drops a trailing ".0" ('1.0' -> 1). The thousands branch is decided after rounding,
 // so 999.6k becomes 1M instead of '1000k'.
 export function fmtTokens(n: number): string {
+  // A window of Infinity drew `InfinityM` (§9.3).
+  if (!Number.isFinite(n)) return '—'
   if (n < 1000) return String(n)
   if (n < 10000) return `${Number((n / 1000).toFixed(1))}k`
   if (Math.round(n / 1000) < 1000) return `${Math.round(n / 1000)}k`
