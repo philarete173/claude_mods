@@ -698,3 +698,58 @@ test('laneBar draws the runs too', () => {
   const row = [...joined(lanesTerminal(m, 44)[1] ?? [])].slice(20, 35).join('')
   expect(row).toBe('──   ──  ━━━━━◐')
 })
+
+// 0.7.2 §5.4: a bounded task's bar is solid to K, then faded to the notice (V1).
+const BOUNDED = { ...task('b', 'sleep 240', 'done', ago(600), ago(120), 480_000), durationAtMost: true as const }
+const fadeOf = (row: TaskRow): number | undefined =>
+  laneOf(model({ tasks: { b: row }, agents: {} }), 'sleep 240').fadeFrom
+
+test('a bounded task\'s lane fades from K', () => {
+  expect(fadeOf({ ...BOUNDED, seenRunningAt: ago(300) })).toBe(ago(300))
+  expect(fadeOf(BOUNDED)).toBe(ago(600))
+  // The K guard: a K outside the start and the end is taken as none.
+  expect(fadeOf({ ...BOUNDED, seenRunningAt: ago(600) })).toBe(ago(600))
+  expect(fadeOf({ ...BOUNDED, seenRunningAt: ago(120) })).toBe(ago(600))
+  const none = (row: TaskRow): void => {
+    expect(laneOf(model({ tasks: { b: row }, agents: {} }), 'sleep 240')).not.toHaveProperty('fadeFrom')
+  }
+  none({ ...task('b', 'sleep 240', 'done', ago(600), ago(120), 480_000), seenRunningAt: ago(300) })
+  none(task('b', 'sleep 240', 'running', ago(600), null, null))
+  none({ ...BOUNDED, startedAt: null })
+})
+
+test('drawLane draws the bar to K and the faded tail after it', () => {
+  const hue = STATION_HUES.shell.dark
+  const withK = laneOf(model({ tasks: { b: { ...BOUNDED, seenRunningAt: ago(300) } }, agents: {} }), 'sleep 240')
+  const noK = laneOf(model({ tasks: { b: BOUNDED }, agents: {} }), 'sleep 240')
+  const svgOf = (lane: Lane, look: typeof FULL | typeof REDUCED): string => drawLane(lane, AXIS_360, 360, look).svg
+  const source = svgOf(withK, FULL)
+  expect(source).toContain(
+    `<rect data-part="bar" x="58" y="8" width="145" height="3" rx="1.5" fill="${hue}"/>` +
+    `<rect data-part="tail" x="203" y="8" width="87" height="3" fill="${hue}" opacity="0.35"/>`)
+  expect(source).toContain('<g data-part="mark" transform="translate(296 9.5)">')
+  const plain = svgOf(noK, FULL)
+  expect(plain).toContain(`<rect data-part="tail" x="58" y="8" width="232" height="3" fill="${hue}" opacity="0.35"/>`)
+  expect(plain).not.toContain('data-part="bar"')
+  for (const k of [ago(600), ago(120)]) {
+    const guarded = laneOf(model({ tasks: { b: { ...BOUNDED, seenRunningAt: k } }, agents: {} }), 'sleep 240')
+    expect(svgOf(guarded, FULL)).toBe(plain)
+  }
+  const exact = laneOf(model({ tasks: { b: task('b', 'sleep 240', 'done', ago(600), ago(120), 480_000) }, agents: {} }),
+    'sleep 240')
+  expect(svgOf(exact, FULL)).not.toContain('data-part="tail"')
+  for (const lane of [withK, noK, exact]) expect(svgOf(lane, REDUCED)).toBe(svgOf(lane, FULL))
+})
+
+test('lanesTerminal draws the tail dim, one span', () => {
+  const hue = STATION_HUES.shell.dark
+  const m = model({ tasks: { b: { ...BOUNDED, seenRunningAt: ago(300) } }, agents: {} })
+  const row = lanesTerminal(m, 80)[1] ?? []
+  const bar = row.slice(row.findIndex((span) => span.text.startsWith('sleep 240')) + 1)
+  const dashes = bar.filter((span) => span.text.startsWith('\u{2500}'))
+  expect(dashes.map((span) => /^\u{2500}+$/u.test(span.text))).toEqual([true, true])
+  expect(dashes[0]).toMatchObject({ color: hue })
+  expect(dashes[0]).not.toHaveProperty('dimColor')
+  expect(dashes[1]).toMatchObject({ color: hue, dimColor: true })
+  expect(bar.find((span) => span.text === '\u{2713}')).toMatchObject({ text: '\u{2713}', color: OK })
+})

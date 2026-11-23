@@ -110,6 +110,10 @@ export type TaskRow = {
   // True when `durationMs` is a bound: it ran from the start to the arrival of the task's notice, which can come later
   // than the end of the task, so the task ran at most that long. Absent when the time is exact.
   durationAtMost?: true
+  // The start of the latest main model request at which the row was still running (0.7.2 §5.3): the engine takes
+  // queued notices in before each such request, so the task had not ended before it. The lane reads it only when it
+  // lies between the start and the end; absent until a main request starts while the row runs.
+  seenRunningAt?: number
 }
 // What the notification of a task says: its id, how it ended in the engine's words, and how long it ran, if it says.
 export type TaskEnd = { id: string; status: 'completed' | 'failed' | 'killed' | 'stopped'; durationMs: number | null }
@@ -1073,8 +1077,23 @@ export function finishTask(
 ): TaskRow {
   const ran = row.startedAt === null ? null : Math.max(0, at - row.startedAt)
   const isBound = atMost && durationMs === null && ran !== null
+  // The notice's duration ends the row, at or before its arrival (0.7.2 §5.2): the mod's start can be later than the
+  // engine's.
+  const endedAt = durationMs !== null && row.startedAt !== null ? Math.min(at, row.startedAt + durationMs) : at
 
-  return { ...row, status, endedAt: at, durationMs: durationMs ?? ran, ...(isBound ? { durationAtMost: true } : {}) }
+  return { ...row, status, endedAt, durationMs: durationMs ?? ran, ...(isBound ? { durationAtMost: true } : {}) }
+}
+
+// Notes K (0.7.2 §5.3) on each running row of known start: `at` is the start of a main model request. The rows come
+// back as given when none qualifies, so that a step with nothing to mark writes nothing.
+export function markSeenRunning(rows: Record<string, TaskRow>, at: number): Record<string, TaskRow> {
+  const marks = (row: TaskRow): boolean => row.status === 'running' && row.startedAt !== null
+
+  // fromEntries defines each id as an own property, so a row named `__proto__` is a plain row.
+  return Object.values(rows).some(marks)
+    ? Object.fromEntries(
+      Object.entries(rows).map(([id, row]) => [id, marks(row) ? { ...row, seenRunningAt: at } : row]))
+    : rows
 }
 
 // The entries of `git status --porcelain -z`: `XY path`, the two status letters, a space and the path, each ended by a

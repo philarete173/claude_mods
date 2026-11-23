@@ -5792,6 +5792,74 @@ test('a notice delivered into a running turn gives a time that is at most: the r
     }
   })
 
+// §5.3: a main model request starts while the task runs, so the task had not ended before it: K is that start. The
+// notice that comes into the running turn closes the row bounded, and K stays on it for the lane to read.
+test('a main step notes K on a running task; the notice into a running turn closes it bounded', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    await endTurn($)
+    const startedAt = await runFor($, clock, w, 'b1', 5000)
+    await startTurn($, 't1')
+    const k = clock.now()
+    await runStep($, clock, { turnId: 't1', index: 1 })
+    await clock.advance(10)
+    const at = clock.now()
+
+    await submitNotice($, notice('b1', 'completed'), undefined, 't1')
+
+    expect((await taskRows($)).b1).toMatchObject({ seenRunningAt: k, durationAtMost: true, endedAt: at, startedAt })
+  })
+
+test('a subagent\'s step notes no K', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  await endTurn($)
+  await runFor($, clock, w, 'b1', 5000)
+  await startTurn($, 't1')
+  await runStep($, clock, { turnId: 't1', index: 1, agentId: 'a1' })
+  await clock.advance(10)
+
+  expect((await taskRows($)).b1).not.toHaveProperty('seenRunningAt')
+})
+
+test('a main step after the close changes nothing', SLOW_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(1)
+  await endTurn($)
+  await runFor($, clock, w, 'b1', 5000)
+  await startTurn($, 't1')
+  await submitNotice($, notice('b1', 'completed'), undefined, 't1')
+  const closed = (await taskRows($)).b1
+
+  await runStep($, clock, { turnId: 't1', index: 1 })
+  await clock.advance(10)
+
+  expect((await taskRows($)).b1).toEqual(closed)
+})
+
+// §5.2: the notice's duration ends the row at the start plus that time, when it is shorter than the clock's.
+test('a notice whose duration is shorter than the clock\'s time ends the row at start + duration', SLOW_READER,
+  async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(1)
+    const startedAt = await runFor($, clock, w, 'w1', 5000, workflow())
+
+    await submitNotice($, notice('w1', 'completed', usageBlock(2000)))
+
+    const row = (await taskRows($)).w1
+    expect(row).toMatchObject({ endedAt: startedAt + 2000, durationMs: 2000 })
+    expect(row).not.toHaveProperty('durationAtMost')
+  })
+
 // A notice that comes with no turn running was taken in when the session went idle, or later. One taken in as it goes
 // idle comes at once, and may have waited for the turn to end; only one that comes after the loop has been idle a while
 // is at the end of its task. IDLE_GAP_MS is 3000 ms: 2999 ms after the turn ended is a bound, 3000 ms after is exact.

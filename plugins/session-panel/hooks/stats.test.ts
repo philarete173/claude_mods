@@ -25,6 +25,7 @@ import {
   LOG_MAX,
   LOG_TEXT_MAX,
   logText,
+  markSeenRunning,
   mergedLength,
   normTurn,
   parseStatus,
@@ -2253,7 +2254,7 @@ test('agentOutcome with no time gives a mark or nothing, and a restored charged 
 test('finishTask ends the row: the status, the end time, and a duration from the notification or the clock', () => {
   const running = task('running', 1000)
   expect(finishTask(running, 'done', 4500, 3000)).toEqual({
-    ...running, status: 'done', endedAt: 4500, durationMs: 3000,
+    ...running, status: 'done', endedAt: 4000, durationMs: 3000,
   })
   expect(finishTask(running, 'failed', 4500, null)).toEqual({
     ...running, status: 'failed', endedAt: 4500, durationMs: 3500,
@@ -2271,6 +2272,29 @@ test('finishTask: a task whose start is not known has no duration of its own, on
     ...unknown, status: 'ended', endedAt: 4500, durationMs: null,
   })
   expect(finishTask(unknown, 'done', 4500, 2000).durationMs).toBe(2000)
+})
+
+// §5.2: the notice's duration ends the row, at or before its arrival (the mod's start can be later than the engine's).
+test('finishTask ends a row at its start plus the notice\'s duration, never after the notice', () => {
+  const running = task('running', 1000)
+  expect(finishTask(running, 'done', 9000, 5000))
+    .toEqual({ ...running, status: 'done', endedAt: 6000, durationMs: 5000 })
+  expect(finishTask(running, 'done', 9000, 5000)).not.toHaveProperty('durationAtMost')
+  expect(finishTask(running, 'done', 9000, 9999).endedAt).toBe(9000)
+  expect(finishTask(task('running', null), 'done', 9000, 5000).endedAt).toBe(9000)
+})
+
+// §5.3: K is noted on the running rows of known start only.
+test('markSeenRunning marks the running rows of known start', () => {
+  const r = task('running', 1000, 'r')
+  const d = task('done', 1000, 'd')
+  const u = task('running', null, 'u')
+  const marked = markSeenRunning({ r, d, u }, 7000)
+  expect(marked.r).toEqual({ ...r, seenRunningAt: 7000 })
+  expect(marked.d).toBe(d)
+  expect(marked.u).toBe(u)
+  const rows = { d, u }
+  expect(markSeenRunning(rows, 7000)).toBe(rows)
 })
 
 // A time from the clock runs to the arrival of the notice, which can come later than the end of the task: with `atMost`

@@ -19,6 +19,7 @@ export type Lane = {
   station: StationId // main: model, a subagent: agents, a task: shell
   spans: { start: number | null; end: number | null }[] // end null: running; start null: not known
   value: string | null
+  fadeFrom?: number // a bounded task's faded tail starts here (0.7.2 §5.4)
 }
 export type LaneAxis = { startMs: number; nowMs: number }
 export type LaneModel = { lanes: Lane[]; more: number; axis: LaneAxis; summary: string }
@@ -38,6 +39,7 @@ const TAG_FROM = 24 // the label cells from which the type tag shows (R15)
 const DESC_MIN = 12 // the cells a description keeps beside the tags (0.7.2 §4.2)
 const STEPS_MIN = [1, 2, 5, 10, 15, 30, 60, 120, 240, 480, 720, 1440]
 const CAP_MS = 1600
+const TAIL_OPACITY = 0.35 // the faded tail of a bounded task (0.7.2 §5.4)
 const EASE = '.45 0 .55 1'
 const TABULAR = ' style="font-variant-numeric:tabular-nums"'
 // The marks after a finished span, centred on (0, 0): the house check, a cross, a stop square, a ring.
@@ -99,10 +101,20 @@ export function laneModel(input: {
       spans: [...(a.runs ?? []), ...spansOf(a.startedAt, a.status === 'running' ? null : a.endedAt)],
       value: a.costUsd === null ? null : `${fmtUsd(a.costUsd)}${a.restored === true ? '+' : ''}`,
     })),
-    ...Object.entries(input.tasks).map(([key, t]): Lane => ({
-      key, kind: 'task', label: t.description, tag: `@${t.kind}`, status: t.status, station: 'shell',
-      spans: spansOf(t.startedAt, t.status === 'running' ? null : t.endedAt), value: taskTime(t, nowMs),
-    })),
+    ...Object.entries(input.tasks).map(([key, t]): Lane => {
+      // A bounded task fades after K, the last request it was seen running at; a K outside the span is none (§5.3).
+      const { startedAt, endedAt, seenRunningAt: k } = t
+      let fadeFrom: number | undefined
+      if (t.status !== 'running' && t.durationAtMost === true && startedAt !== null && endedAt !== null) {
+        fadeFrom = k !== undefined && startedAt < k && k < endedAt ? k : startedAt
+      }
+
+      return {
+        key, kind: 'task', label: t.description, tag: `@${t.kind}`, status: t.status, station: 'shell',
+        spans: spansOf(t.startedAt, t.status === 'running' ? null : t.endedAt), value: taskTime(t, nowMs),
+        ...(fadeFrom === undefined ? {} : { fadeFrom }),
+      }
+    }),
   ]
   if (rows.length === 0) return null
   rows.sort((a, b) => {
@@ -201,9 +213,16 @@ export function drawLane(lane: Lane, axis: LaneAxis, areaPx: number, look: Look)
       fill = `url(#fade${i})`
     }
     const rect = `<rect data-part="bar" x="${num(x0)}"`
-    body += s.end === null
-      ? `${rect} y="6.5" width="${num(x1 - x0)}" height="6" rx="3" fill="${fill}"/>${cap}`
-      : `${rect} y="8" width="${num(x1 - x0)}" height="3" rx="1.5" fill="${fill}"/>`
+    if (s.end === null) body += `${rect} y="6.5" width="${num(x1 - x0)}" height="6" rx="3" fill="${fill}"/>${cap}`
+    else if (lane.fadeFrom === undefined) {
+      body += `${rect} y="8" width="${num(x1 - x0)}" height="3" rx="1.5" fill="${fill}"/>`
+    } else {
+      // A bounded task: solid to K, then the faded tail to the notice (0.7.2 §5.4).
+      const xK = xOf(lane.fadeFrom)
+      if (xK > x0) body += `${rect} y="8" width="${num(xK - x0)}" height="3" rx="1.5" fill="${fill}"/>`
+      body += `<rect data-part="tail" x="${num(xK)}" y="8" width="${num(x1 - xK)}" height="3" fill="${fill}"` +
+        ` opacity="${TAIL_OPACITY}"/>`
+    }
   })
   const last = known[known.length - 1]
   if (last !== undefined && lane.kind !== 'main' && lane.status !== 'running') {
@@ -262,6 +281,7 @@ export function drawAxis(axis: LaneAxis, areaPx: number, look: Look): { svg: str
 function laneBar(lane: Lane, axis: LaneAxis, axisCells: number): Span[] {
   if (axisCells < 1) return [{ text: ' '.repeat(Math.max(0, axisCells + 1)) }]
   const hue: Partial<Span> = { color: STATION_HUES[lane.station].dark }
+  const faded: Partial<Span> = { ...hue, dimColor: true } // the tail of a bounded task: one style object, one span
   const cellMs = (axis.nowMs - axis.startMs) / axisCells
   const at = (t: number): number => Math.round((t - axis.startMs) / cellMs)
   // A cell's character and its style; a run of one style object is one span.
@@ -281,7 +301,9 @@ function laneBar(lane: Lane, axis: LaneAxis, axisCells: number): Span[] {
   for (const s of known) {
     const from = Math.min(axisCells - 1, Math.max(0, at(s.start)))
     const to = s.end === null ? axisCells : Math.min(axisCells, Math.max(from + 1, at(s.end)))
-    for (let i = from; i < to; i += 1) put(i, s.end === null ? '━' : '─', hue)
+    // A bounded task: the cells from K on are the faded tail.
+    const mid = s.end === null || lane.fadeFrom === undefined ? to : Math.min(to, Math.max(from, at(lane.fadeFrom)))
+    for (let i = from; i < to; i += 1) put(i, s.end === null ? '━' : '─', i < mid ? hue : faded)
     if (s.end === null) put(axisCells, '◐', hue)
     lastEnd = to
   }

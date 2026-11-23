@@ -12,9 +12,9 @@ import type {
 
 import {
   addAgentCost, addStep, addTool, agentOutcome, attributeCost, computeTurnStats, endKind, engineLineText, finishTask,
-  fmtDuration, fmtTokens, HANDBACK_TOOL, isRefused, LOG_MAX, logText, MAIN_TURNS_MAX, normTurn, parseStatus,
-  parseTaskNotification, promptKind, pushLog, reviveRow, ribbonOf, shortType, SPAWN_TOOLS, stripFormat, sumNumstat,
-  TASK_END, taskFromCall, taskLine, toolLabel,
+  fmtDuration, fmtTokens, HANDBACK_TOOL, isRefused, LOG_MAX, logText, MAIN_TURNS_MAX, markSeenRunning, normTurn,
+  parseStatus, parseTaskNotification, promptKind, pushLog, reviveRow, ribbonOf, shortType, SPAWN_TOOLS, stripFormat,
+  sumNumstat, TASK_END, taskFromCall, taskLine, toolLabel,
 } from './stats'
 import type {
   AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, TaskEndStatus, TaskRow, Usage,
@@ -777,6 +777,13 @@ async function closeTask(
   }
 }
 
+// Notes K (0.7.2 §5.3) on the main agent's running tasks of known start: `at` is the start of a main model request.
+// A step with no such row writes nothing; the update maps the rows as they stand when it runs.
+async function noteSeenRunning($: EngineInterface, at: number): Promise<void> {
+  const rows = await read($, tasksAtom)
+  if (markSeenRunning(rows, at) !== rows) await update($, tasksAtom, held => markSeenRunning(held, at))
+}
+
 // Takes a cost reading, shows it as Total, and charges what is new since the last reading to the agent whose request
 // has just stopped. The main loop's share is not kept anywhere: Session is Total less the subagents. The engine books
 // a request as it stops, so a timer takes the reading, off the stream.
@@ -1125,6 +1132,12 @@ export const register: Register = (on, options) => {
     const { agentId } = e
     if (agentId !== undefined) inBackground($, () => reviveAgent($, agentId))
     const stream = next(e)
+    // A main request starts: each task still running had not ended before it (0.7.2 §5.3). Off the stream.
+    if (e.agentId === undefined) {
+      $.clock.after(1, () => {
+        noteSeenRunning($, tStart).catch(() => undefined)
+      })
+    }
     for await (const chunk of stream) {
       // The first chunk of any kind is the start of the response, the engine's own chunks included. Model's pulse
       // starts there, off the stream; the agent's calls of its step before are over by now (it sends a request only

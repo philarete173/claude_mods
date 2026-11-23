@@ -84,6 +84,10 @@ export type TaskRow = {
   // True when `durationMs` is a bound: it ran from the start to the arrival of the task's notice, which can come later
   // than the end of the task, so the task ran at most that long. Absent when the time is exact.
   durationAtMost?: true
+  // The start of the latest main model request at which the row was still running (0.7.2 §5.3): the engine takes
+  // queued notices in before each such request, so the task had not ended before it. The lane reads it only when it
+  // lies between the start and the end; absent until a main request starts while the row runs.
+  seenRunningAt?: number
 }
 export type LogKind = 'info' | 'ok' | 'error'
 // `at` is null for a line whose time is not known (a restored line).
