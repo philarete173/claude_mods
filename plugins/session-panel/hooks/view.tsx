@@ -708,7 +708,8 @@ function activitySection(d: Draw): Block {
     </Box>
   )
   // §4.4: with a tag, a FIXED Box of the description's cells (a spanLine, which never wraps where the proportional font
-  // overruns them; the Box clips it), then the whole tag after a no-break space. The wrapper is a cell of a row: FIXED.
+  // overruns them; the Box clips it), then the tag, cut to its column (0.7.2 §4.2), after a no-break space. The wrapper
+  // is a cell of a row: FIXED.
   const labelCell = (label: LaneLabel): RenderElement => {
     const desc = spanLine(d, [{ text: label.desc, ...(label.isDim ? { dimColor: true } : {}) }])
     if (label.tag === '') return desc

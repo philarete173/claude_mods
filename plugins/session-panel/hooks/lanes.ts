@@ -35,6 +35,7 @@ const LANES_MAX = 8
 const AXIS_MIN_MS = 120_000
 const GUTTER_PX = 12
 const TAG_FROM = 24 // the label cells from which the type tag shows (R15)
+const DESC_MIN = 12 // the cells a description keeps beside the tags (0.7.2 §4.2)
 const STEPS_MIN = [1, 2, 5, 10, 15, 30, 60, 120, 240, 480, 720, 1440]
 const CAP_MS = 1600
 const EASE = '.45 0 .55 1'
@@ -125,15 +126,20 @@ export function laneModel(input: {
   }
 }
 
-/** One shown lane's label (§4.2-§4.4): the description as drawn, the tag ('' when none shows) and the
- * description's cells (descW; L below TAG_FROM or with no tag column). `isDim`: an ended lane's description. */
+/** One shown lane's label (§4.2-§4.4): the description as drawn, the tag as cut to the tag column ('' when none shows)
+ * and the description's cells (L − 1 − the tag column; L below TAG_FROM or with no tag column). `isDim`: an ended
+ * lane's description. */
 export type LaneLabel = { desc: string; tag: string; descCells: number; isDim: boolean }
 
-/** The shown lanes' labels in `labelCells`, one per lane in order: tags whole in a column as wide as the widest, the
- * descriptions cut at the end, or in the middle where their end cuts read the same (§4.2, §4.3). */
+/** The shown lanes' labels in `labelCells`, one per lane in order: tags cut to a column as wide as the widest, less
+ * what a 12-cell description needs, the descriptions cut at the end, or in the middle where their end cuts read the
+ * same (§4.2, §4.3). */
 export function laneLabels(lanes: Lane[], labelCells: number): LaneLabel[] {
   const tagW = labelCells >= TAG_FROM ? Math.max(0, ...lanes.map((lane) => cells(lane.tag))) : 0
-  const descCells = tagW > 0 ? labelCells - 1 - tagW : labelCells
+  // §4.2: the tag column gives way so that a description keeps DESC_MIN cells. From TAG_FROM it is 11 cells at least
+  // (24 − 1 − 12), so no floor is needed.
+  const tagCells = Math.min(tagW, labelCells - 1 - DESC_MIN)
+  const descCells = tagCells > 0 ? labelCells - 1 - tagCells : labelCells
   const descs = lanes.map((lane) => cutCells(lane.label, descCells))
   const groups = new Map<string, number[]>() // an end cut to the lanes that cut to it
   descs.forEach((desc, i) => {
@@ -149,7 +155,7 @@ export function laneLabels(lanes: Lane[], labelCells: number): LaneLabel[] {
     })
   }
   return lanes.map((lane, i) => ({
-    desc: descs[i] ?? '', tag: tagW > 0 ? lane.tag : '', descCells,
+    desc: descs[i] ?? '', tag: tagCells > 0 ? cutCells(lane.tag, tagCells) : '', descCells,
     isDim: !(lane.kind === 'main' || lane.status === 'running'),
   }))
 }

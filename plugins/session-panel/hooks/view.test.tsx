@@ -1333,14 +1333,14 @@ test('the texts that can overrun a row carry the truncation props; the values ne
     const label = textNode(tree, cutCells(AGENTS[0]?.description ?? '', 20))
     expect(label, surface).toBeDefined()
     expect(label?.node.props?.wrap, surface).toBeUndefined()
-    // The type tag shows from a label column of 24 cells (54 columns), dim and cut by shortType, not by the layout.
+    // The type tag shows from a label column of 24 cells (54 columns), dim and cut to its column (0.7.2 §4.2).
     const tagsAt = (bodyColumns: number): Node[] => flat(draw(onSurface(FULL, surface), bodyColumns))
       .map(({ node }) => node)
       .filter(node => node.type === 'Text' && isType((textsOf(node)[0] ?? '').replace(/^[\s\u{a0}]+/u, '')))
     expect(tagsAt(53), surface).toEqual([])
     const tags = tagsAt(54)
     expect(tags.map(node => (textsOf(node)[0] ?? '').trim()), surface).toEqual([
-      '@code-reviewer', '@minimal-chang…', ...Array(5).fill('@code-reviewer'),
+      '@code-revi…', '@minimal-c…', ...Array(5).fill('@code-revi…'),
     ])
     expect(tags.every(node => node.props?.dimColor === true && node.props.wrap === undefined), surface).toBe(true)
   }
@@ -1433,7 +1433,9 @@ test('a lane keeps its `@type` from a label column of 24 cells (54 columns), and
       const tree = draw(withAgents(TYPED, surface), bodyColumns)
       expect(rowProblems(tree), where).toEqual([])
       const tags = textsOf(activityOf(tree)).map(text => text.trim()).filter(isType)
-      expect(tags, where).toEqual(bodyColumns >= 54 ? ['@code-reviewer', '@ui-designer', '@frontend-deve…'] : [])
+      const shown = bodyColumns === 54 ? ['@code-revi…', '@ui-design…', '@frontend-…']
+        : ['@code-reviewer', '@ui-designer', '@frontend-deve…']
+      expect(tags, where).toEqual(bodyColumns >= 54 ? shown : [])
     }
     // The line that counts the rest does not move: of nine subagents seven have a lane, and `+2 more` is at column 0.
     const nine = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => agent(n, 'running', { type: 'ui-designer' }))

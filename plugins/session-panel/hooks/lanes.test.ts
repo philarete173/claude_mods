@@ -216,6 +216,35 @@ test('no tag below L 24; main has none', () => {
   ])
 })
 
+// 0.7.2 §4.2-§4.4: two running subagents with long types; the tag column gives way for a 12-cell description.
+const LONG = model({
+  agents: {
+    s: agent('s', 'Security review of the 0.7.2 branch', 'appsec-engineer', 'running', ago(100), null, 0.1),
+    g: agent('g', 'Review the 0.7.1 diff', 'general-purpose', 'running', ago(90), null, 0.1),
+  },
+  tasks: {},
+})
+
+test('the tag column shrinks so that a description keeps 12 cells', () => {
+  const at = (l: number): [number[], string[]] => {
+    const labels = laneLabels(LONG.lanes, l)
+    return [labels.map((label) => label.descCells), labels.map((label) => label.tag)]
+  }
+  expect(at(24)).toEqual([Array(3).fill(12), ['', '@appsec-en…', '@general-p…']])
+  expect(at(25)).toEqual([Array(3).fill(12), ['', '@appsec-eng…', '@general-pu…']])
+  expect(at(28)).toEqual([Array(3).fill(12), ['', '@appsec-engine…', '@general-purpo…']])
+  expect(at(29)).toEqual([Array(3).fill(13), ['', '@appsec-engine…', '@general-purpo…']])
+})
+
+test('at 54 columns every tag starts at cell 13', () => {
+  const rows = lanesTerminal(LONG, 54)
+  const labels = laneLabels(LONG.lanes, 24)
+  rows.slice(0, 3).forEach((row, i) => {
+    expect(cellsOf(joined(row)), `${i}`).toBeLessThanOrEqual(54)
+    if (i > 0) expect([...joined(row)].slice(13).join('').startsWith(labels[i]?.tag ?? ''), `${i}`).toBe(true)
+  })
+})
+
 // The live check's lanes (the mockup's, gen.ts:166-180): four `Band check` lanes, two `Write the …` ones, one more.
 const MIN = 60_000
 const minAgent = (id: string, description: string, type: string, status: AgentRow['status'], start: number,
@@ -522,7 +551,7 @@ test('no terminal row is longer than its width', () => {
   for (const cols of [40, 44, 60, 80, 120, 200]) {
     for (const row of lanesTerminal(m, cols).slice(0, 8)) expect(cellsOf(joined(row)), `${cols}`).toBe(cols)
   }
-  const tagged = (cols: number): boolean => joined(lanesTerminal(m, cols)[1] ?? []).includes('@code-reviewer')
+  const tagged = (cols: number): boolean => joined(lanesTerminal(m, cols)[1] ?? []).includes('@code-revi')
   expect([52, 54, 60, 120].map(tagged)).toEqual([false, true, true, true])
 })
 
