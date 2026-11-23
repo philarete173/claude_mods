@@ -734,7 +734,12 @@ const bottom = (on: On, clock: MockClock, store?: Record<string, unknown>, isSto
   on('session.measure', (_$, e) => ({ changed: e.changed }))
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
   on('session.compact', () => w.compacted as never)
-  on('prompt.submit', (_$, e) => ({ text: e.text, origin: e.origin }))
+  on('prompt.submit', (_$, e) => {
+    // The engine's own end of the chain can reject: a prompt that starts with `throw`.
+    if (e.text.startsWith('throw')) throw new Error('the prompt cannot be taken')
+
+    return { text: e.text, origin: e.origin }
+  })
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('agent.spawn', (_$, e) => {
@@ -6928,6 +6933,189 @@ test('a message of the person that is a reminder block alone has no line', WITH_
 
   expect(await logRows($)).toEqual([])
 })
+
+// A prompt of images (0.7.2 §7): the engine's image lines read as `[N images]`, and a prompt typed with no text but
+// with attachments gets its line at its turn.start from the note that prompt.submit left (pendingImages).
+const TWO_LINES = '[Image: source: /tmp/a.png]\n[Image: source: /tmp/b.png]'
+const IMAGES = [{ type: 'image' }, { type: 'image' }] as const
+const submitImages = ($: Engine, text: string, extra: object = {}, attachments: readonly object[] = IMAGES) =>
+  $.prompt.submit({ text, wait: false, origin: { kind: 'composer' }, attachments, ...extra } as never)
+const TWO_IMAGES_ROW = [['you', '[2 images]', 'info', undefined]]
+
+test('a turn of image lines logs [2 images], live and mid-turn', WITH_READER, async ($, on) => {
+  bottom(on, mock.clock(on))
+  await $.session.start(START)
+
+  await $.turn.start({ text: TWO_LINES, turnId: 't1' })
+  expect(await logRows($)).toEqual(TWO_IMAGES_ROW)
+  await typeOver($, TWO_LINES)
+  expect(await logRows($)).toEqual([...TWO_IMAGES_ROW, ...TWO_IMAGES_ROW])
+  await $.turn.start({ text: ' \n ', turnId: 't2' })
+
+  expect(await logRows($)).toEqual([...TWO_IMAGES_ROW, ...TWO_IMAGES_ROW])
+})
+
+test('an idle prompt of two images with no text logs [2 images] at its turn', WITH_READER, async ($, on) => {
+  bottom(on, mock.clock(on))
+  await $.session.start(START)
+  await submitImages($, '')
+
+  await $.turn.start({ text: '', turnId: 't1' })
+
+  expect(await logRows($)).toEqual(TWO_IMAGES_ROW)
+})
+
+test('an idle prompt of images whose turn has text, image lines or a reminder block alone shows what the text says',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    const reminder = '<system-reminder>\nnote\n</system-reminder>\n'
+    const cases: [string, string, readonly object[]][] = [
+      ['Look at this', 'Look at this', IMAGES],
+      ['[Image: source: /tmp/a.png]\n'.repeat(3).trim(), '[3 images]', IMAGES],
+      [reminder, '[2 images]', IMAGES], ['', '[1 image]', [{ type: 'image' }]],
+    ]
+    for (const [text, shown, attachments] of cases) {
+      await submitImages($, '', {}, attachments)
+      await $.turn.start({ text, turnId: 't1' })
+      expect(await logRows($), text).toEqual([['you', shown, 'info', undefined]])
+      await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+    }
+  })
+
+test('the note of images is cleared at its turn.start: the next turn of no text has no line', WITH_READER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await submitImages($, '')
+    await $.turn.start({ text: '', turnId: 't1' })
+    await endTurn($, 't1')
+
+    await $.turn.start({ text: '', turnId: 't2' })
+
+    expect(await logRows($)).toEqual(TWO_IMAGES_ROW)
+  })
+
+test('a prompt with no image among its attachments gives its turn no line', WITH_READER, async ($, on) => {
+  bottom(on, mock.clock(on))
+  await $.session.start(START)
+  await submitImages($, '', {}, [{ type: 'document' }])
+
+  await $.turn.start({ text: '', turnId: 't1' })
+
+  expect(await logRows($)).toEqual([])
+})
+
+test('a prompt of images that a hook beneath dropped gives its turn no line', WITH_PROMPT_ANSWERER,
+  async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    await submitImages($, 'drop it')
+
+    await $.turn.start({ text: '', turnId: 't1' })
+
+    expect(await logRows($)).toEqual([])
+  })
+
+test('a prompt of images typed over a running turn leaves no note for the next turn', WITH_READER, async ($, on) => {
+  bottom(on, mock.clock(on))
+  await $.session.start(START)
+  await submitImages($, '', { turnId: 't0' })
+
+  await $.turn.start({ text: '', turnId: 't1' })
+
+  expect(await logRows($)).toEqual([])
+})
+
+test('a note of images does not outlive its conversation: a /clear drops it', WITH_READER, async ($, on) => {
+  bottom(on, mock.clock(on))
+  await $.session.start(START)
+  await submitImages($, '')
+  await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+
+  await $.turn.start({ text: '', turnId: 't1' })
+
+  expect(await logRows($)).toEqual([])
+})
+
+test('a prompt of images of the engine\'s own origin leaves no note', WITH_READER, async ($, on) => {
+  bottom(on, mock.clock(on))
+  await $.session.start(START)
+  await submitImages($, '', { origin: { kind: 'task-notification' } })
+
+  await $.turn.start({ text: '', turnId: 't1' })
+
+  expect(await logRows($)).toEqual([])
+})
+
+test('a resumed conversation\'s first prompt of images shows one [2 images] line', WITH_READER, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = bottom(on, clock)
+  await $.session.start(START)
+  await clock.advance(10)
+  w.messages = [
+    { role: 'user', text: 'what is this?', toolUses: [] }, { role: 'assistant', text: 'A cat.', toolUses: [] },
+    { role: 'user', text: '', toolUses: [] }, { role: 'user', text: TWO_LINES, toolUses: [] },
+  ]
+  await $.session.end({ reason: 'resume', sessionId: 's1', resume: { id: 's1' } })
+  await submitImages($, '')
+
+  await $.turn.start({ text: '', turnId: 't1' })
+  await clock.advance(10) // the restore runs
+
+  // The earlier prompt is restored, older than the live line; the rows of the turn itself are cut, so no second
+  // [2 images].
+  expect((await youLines($)).map(line => line.text)).toEqual(['what is this?', '[2 images]'])
+})
+
+test('a resumed first prompt of images whose turn text is a reminder block alone shows one [2 images] line',
+  WITH_READER, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const w = bottom(on, clock)
+    await $.session.start(START)
+    await clock.advance(10)
+    w.messages = [
+      { role: 'user', text: 'what is this?', toolUses: [] }, { role: 'assistant', text: 'A cat.', toolUses: [] },
+      { role: 'user', text: TWO_LINES, toolUses: [] },
+    ]
+    await $.session.end({ reason: 'resume', sessionId: 's1', resume: { id: 's1' } })
+    await submitImages($, '')
+
+    await $.turn.start({ text: '<system-reminder>\nnote\n</system-reminder>\n', turnId: 't1' })
+    await clock.advance(10)
+
+    expect((await youLines($)).map(line => line.text)).toEqual(['what is this?', '[2 images]'])
+  })
+
+// The mod must never block a prompt: attachments that are no array, or hold a null, are counted without a throw, and
+// the prompt reaches the engine with the answer as it came.
+test('a prompt whose attachments are no array or hold a null still reaches the engine; the note counts the images',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+    const origin = { kind: 'composer' }
+    const cases: [unknown, unknown[][]][] = [
+      ['x', []], [[null, { type: 'image' }], [['you', '[1 image]', 'info', undefined]]],
+    ]
+    for (const [attachments, shown] of cases) {
+      expect(await submitImages($, '', {}, attachments as never)).toEqual({ text: '', origin })
+      await $.turn.start({ text: '', turnId: 't1' })
+      expect(await logRows($), JSON.stringify(attachments)).toEqual(shown)
+      await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+    }
+  })
+
+// A chain that rejects leaves no note behind, and the rejection reaches the caller as it was.
+test('a prompt whose chain rejects leaves no note of images, and the rejection reaches the caller',
+  WITH_READER, async ($, on) => {
+    bottom(on, mock.clock(on))
+    await $.session.start(START)
+
+    await expect(submitImages($, 'throw it')).rejects.toThrow('no implementation for prompt.submit')
+    await $.turn.start({ text: '', turnId: 't1' })
+
+    expect(await logRows($)).toEqual([])
+  })
 
 // The turn that drains a message skips its line by the text, whatever the label of that line would be: a text with an
 // engine tag at its head would be an `engine` line, and the message has its line already.

@@ -9,7 +9,7 @@ import {
 } from './stats'
 import { stationOf, zeroStationMs } from './stations'
 import type { StationId } from './stations'
-import type { AgentRow, LogEntry, LogKind, TaskEndStatus, TaskRow } from './stats'
+import type { AgentRow, LogEntry, LogKind, PromptKind, TaskEndStatus, TaskRow } from './stats'
 
 // The shape the walk reads from each row; the engine's SessionMessage fits it. Rows are untrusted: anything else is
 // skipped field by field.
@@ -47,6 +47,16 @@ const answerOf = (text: string): string => (NO_ANSWER_NOTES.some(note => text.in
 const fieldsOf = (v: unknown): Record<string, unknown> =>
   typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : {}
 const textOf = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
+
+// The engine writes a prompt's image lines in a row of their own after the prompt's (0.7.2 §7.2); live, the prompt's
+// line stands for them, so a row of image lines alone after a typed prompt's row is no line of its own.
+const IMAGES_ONLY = /^\[\d+ images?\]$/
+const isCompanion = (shown: PromptKind, before: unknown): boolean => {
+  const { role, text, toolResults } = fieldsOf(before)
+
+  return shown.kind === 'prompt' && IMAGES_ONLY.test(shown.text) && role === 'user' &&
+    !Array.isArray(toolResults) && typeof text === 'string' && promptKind(text).kind === 'prompt'
+}
 
 // A restored Log line: no time is known.
 const entry = (who: string, text: string, kind: LogKind, outcome?: string): LogEntry =>
@@ -165,7 +175,9 @@ export function restoreFromMessages(rows: readonly unknown[], alive: ReadonlySet
         compactions += 1
       } else if (shown.kind === 'prompt') {
         // A prompt right after tool results is one of the engine's mid-turn rows (a skill body or note), not typed.
-        if (!isAfterResults) lines.push(() => entry('you', logText(shown.text), 'info'))
+        if (!isAfterResults && !isCompanion(shown, rows[i - 1])) {
+          lines.push(() => entry('you', logText(shown.text), 'info'))
+        }
       } else if (shown.kind === 'tag') {
         // A notice closes its task or agent wherever it stands: live, prompt.submit closes it as it arrives. The
         // close line comes first, then the engine's: live, prompt.submit closes the task before turn.start writes.
@@ -220,7 +232,7 @@ export function cutAtTurn(rows: readonly unknown[], text: string): readonly unkn
       const shown = promptKind(said)
       const before = fieldsOf(rows[i - 1])
       const isMidTurn = shown.kind === 'prompt' && before.role === 'user' && Array.isArray(before.toolResults)
-      if (!isMidTurn && (shown.kind === 'prompt' || shown.kind === 'tag')) {
+      if (!isMidTurn && !isCompanion(shown, rows[i - 1]) && (shown.kind === 'prompt' || shown.kind === 'tag')) {
         const isTurn = (wanted.kind === 'prompt' || wanted.kind === 'tag') && wanted.text === shown.text
 
         return isTurn ? rows.slice(0, i) : rows

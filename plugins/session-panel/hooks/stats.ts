@@ -1014,12 +1014,13 @@ export function engineTag(text: string): string | undefined {
 // quoted, and the tail of a block cannot be told from a prompt with a reminder after it (a block, a prompt and a block
 // after it is `service` too: a known cost, for the tail may hold what a reminder holds). With no block before it, a
 // reminder after the prompt is cut off, not drawn; a closing tag with no opening one before it is a tail again. The
-// notes that the engine puts in the person's turn (an image's source, a skill's folder, an interrupt) are `service`;
-// the engine's frame of a message from another session or agent (`Another Claude session sent a message:`, or `… while
-// you were working:`, each whole) is the tag `peer`. The engine keeps that frame on meta rows, which neither turn.start
-// nor `messages()` gives (2.1.321: a hand-back opens its turn with `<agent-message from="…">`), so the rule is a
-// fail-safe that keeps such a text from reading as the person's. The `text` of the other kinds is the remainder, which
-// the caller cleans and masks as any text it draws.
+// engine's image lines are read out of the text, whole: a text of them alone is the prompt `[N images]`, any other
+// text is read without them (a path is never shown). The notes that the engine puts in the person's turn (a skill's
+// folder, an interrupt) are `service`; the engine's frame of a message from another session or agent (`Another Claude
+// session sent a message:`, or `… while you were working:`, each whole) is the tag `peer`. The engine keeps that frame
+// on meta rows, which neither turn.start nor `messages()` gives (2.1.321: a hand-back opens its turn with
+// `<agent-message from="…">`), so the rule is a fail-safe that keeps such a text from reading as the person's. The
+// `text` of the other kinds is the remainder, which the caller cleans and masks as any text it draws.
 export type PromptKind =
   | { kind: 'prompt'; text: string }
   | { kind: 'tag'; tag: string; text: string }
@@ -1032,7 +1033,13 @@ const SUMMARY_START = 'This session is being continued from a previous conversat
 const PEER_STARTS = [
   'Another Claude session sent a message:', 'Another Claude session sent a message while you were working:',
 ]
-const SERVICE_STARTS = ['[Image: source: ', 'Base directory for this skill: ', '[Request interrupted by user']
+const SERVICE_STARTS = ['Base directory for this skill: ', '[Request interrupted by user']
+// The engine's image lines (`yhe`, a `[Image: source: <path>]` line, and `idn`, its `[Image source: <path>]` and
+// `[Image: original <w>x<h>, …]` forms): each is a line of its own, and a line that starts so is dropped whole.
+const IMAGE_STARTS = ['[Image: source: ', '[Image source: ', '[Image: original ']
+
+// The Log text of a prompt of `n` images (n >= 1).
+export const imagesText = (n: number): string => (n === 1 ? '[1 image]' : `[${n} images]`)
 
 // The Log text of a turn that the engine opened: the tag's name, masked (a lowercase token in brackets has a tag's
 // shape) and cut, live (turn.start) and restored.
@@ -1062,13 +1069,20 @@ export function promptKind(text: string): PromptKind {
   if (hasBlock ? open >= 0 || close >= 0 : close >= 0 && (open < 0 || close < open)) return { kind: 'service' }
 
   const rest = open < 0 ? clean.slice(at) : clean.slice(at, open)
-  if (rest.trim() === '') return { kind: 'service' }
-  const tag = engineTag(rest)
-  if (tag !== undefined) return { kind: 'tag', tag, text: rest }
-  if (rest.startsWith(SUMMARY_START)) return { kind: 'summary', text: rest }
-  if (PEER_STARTS.some(start => rest.startsWith(start))) return { kind: 'tag', tag: 'peer', text: rest }
+  // §7.3(a): the engine's image lines go whole, so no path is shown; a text of image lines alone is `[N images]`, and
+  // any other text is read without them. One split and one filter: linear.
+  const lines = rest.split('\n')
+  const kept = lines.filter(line => !IMAGE_STARTS.some(start => line.startsWith(start)))
+  const images = lines.length - kept.length
+  const left = images === 0 ? rest : kept.join('\n')
+  if (images > 0 && left.trim() === '') return { kind: 'prompt', text: imagesText(images) }
+  if (left.trim() === '') return { kind: 'service' }
+  const tag = engineTag(left)
+  if (tag !== undefined) return { kind: 'tag', tag, text: left }
+  if (left.startsWith(SUMMARY_START)) return { kind: 'summary', text: left }
+  if (PEER_STARTS.some(start => left.startsWith(start))) return { kind: 'tag', tag: 'peer', text: left }
 
-  return SERVICE_STARTS.some(start => rest.startsWith(start)) ? { kind: 'service' } : { kind: 'prompt', text: rest }
+  return SERVICE_STARTS.some(start => left.startsWith(start)) ? { kind: 'service' } : { kind: 'prompt', text: left }
 }
 
 // The statuses that the row of a task takes when it ends.

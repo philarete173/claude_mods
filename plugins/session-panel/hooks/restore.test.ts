@@ -241,6 +241,13 @@ test('only typed prompts give `you` lines; a notice and a peer give their `engin
   for (const [name, rows, lines] of cases) expect(said(restore(rows)), name).toEqual(lines)
 })
 
+const TWO_LINES = '[Image: source: /tmp/a.png]\n[Image: source: /tmp/b.png]'
+
+test('a row of image lines restores [2 images]; an empty row restores none', () => {
+  expect(said(restore([assistant(), user(TWO_LINES)]))).toEqual(['you: [2 images]'])
+  expect(said(restore([assistant(), user('')]))).toEqual([])
+})
+
 test('a tag row gets the engine line when the assistant answers it and no tool results come before it', () => {
   const token = `ghp_${'a1'.repeat(18)}`
   const cases: [string, Fields[], string[]][] = [
@@ -623,6 +630,17 @@ test('cutAtTurn drops the turn that the text opened, from its row on', () => {
   const opened = [...rows, user(notice('b1', 'completed', 'done')), assistant()]
   expect(cutAtTurn(opened, notice('b1', 'completed', 'done'))).toEqual(rows)
   expect(cutAtTurn([], 'second')).toEqual([])
+})
+
+test('cutAtTurn cuts at a row of image lines', () => {
+  const rows = [assistant(), user(TWO_LINES), assistant()]
+  expect(cutAtTurn(rows, TWO_LINES)).toEqual(rows.slice(0, 1))
+})
+
+test('the image companion of a typed prompt adds no line, and cutAtTurn passes over it', () => {
+  expect(said(restore([user('what is this?'), user('[Image: source: /tmp/shot.png]')]))).toEqual(['you: what is this?'])
+  const rows = [assistant(), user('what is this?'), user('[Image: source: /tmp/shot.png]'), assistant()]
+  expect(cutAtTurn(rows, 'what is this?')).toEqual(rows.slice(0, 1))
 })
 
 test('cutAtTurn passes over a mid-turn row: a prompt kind right after tool results opens no turn', () => {

@@ -12,9 +12,9 @@ import type {
 
 import {
   addAgentCost, addStep, addTool, agentOutcome, attributeCost, computeTurnStats, endKind, engineLineText, finishTask,
-  fmtDuration, fmtTokens, HANDBACK_TOOL, isRefused, LOG_MAX, logText, MAIN_TURNS_MAX, markSeenRunning, normTurn,
-  parseStatus, parseTaskNotification, promptKind, pushLog, reviveRow, ribbonOf, shortType, SPAWN_TOOLS, stripFormat,
-  sumNumstat, TASK_END, taskFromCall, taskLine, toolLabel,
+  fmtDuration, fmtTokens, HANDBACK_TOOL, imagesText, isRefused, LOG_MAX, logText, MAIN_TURNS_MAX, markSeenRunning,
+  normTurn, parseStatus, parseTaskNotification, promptKind, pushLog, reviveRow, ribbonOf, shortType, SPAWN_TOOLS,
+  stripFormat, sumNumstat, TASK_END, taskFromCall, taskLine, toolLabel,
 } from './stats'
 import type {
   AgentRow, AgentStatus, Interval, LogEntry, LogKind, StepTiming, TaskEndStatus, TaskRow, Usage,
@@ -238,6 +238,11 @@ const PERSON_ORIGINS = new Set<PromptOrigin['kind']>(['composer', 'bridge', 'sdk
 // as a turn of its own, with the text of the last queued one, and that message has its line already: turn.start takes
 // the list at its entry and writes no line for a text that is in it.
 let unfolded: string[] = []
+
+// The images of the person's prompt that starts the next main turn (0.7.2 §7.3(b)). prompt.submit sets it at its
+// entry, before the chain runs, for an idle prompt's turn.start runs inside its next(e); the next main turn.start
+// takes it and sets it to 0, whether it uses it or not. A prompt typed over a running turn sets none.
+let pendingImages = 0
 
 // For each root, how many reads in a row had a status, or a diff against HEAD, that threw. A throw is a timeout or a
 // git that cannot be started; a non-zero exit, as outside a repository, is none. The count of a root rises by one for
@@ -963,6 +968,8 @@ export const register: Register = (on, options) => {
       doneCallIds.clear()
       // A message that waits (unfolded) must not hide the `you` line of the next conversation.
       unfolded = []
+      // A note of the old conversation must not name the new one's first turn.
+      pendingImages = 0
       // No turn that starts while the reset runs finds a restore due; a resume leaves one when its reset is over.
       isRestoreDue = false
       logEpoch += 1
@@ -1034,6 +1041,7 @@ export const register: Register = (on, options) => {
     // 2.1.288 types have no agentId on this event, hence the `in` check.
     const isMain = !('agentId' in e) || e.agentId === undefined
     let queued: string[] = []
+    let images = 0
     if (isMain) {
       // A main turn starts, and the loop is not idle. Both are noted before the chain runs: the read of a turn.complete
       // that is still on its way must find the turn (turn.complete), and a notice that arrives from now on must find
@@ -1044,15 +1052,23 @@ export const register: Register = (on, options) => {
       // runs: a message that comes while the chain holds the start is for the next request, not for this start.
       queued = unfolded
       unfolded = []
+      images = pendingImages
+      pendingImages = 0
     }
     const started = await next(e)
     if (!isMain) return started
+    // The text that cuts the turn's own rows from a restore: a prompt of images whose text gives no line (`""`, or a
+    // reminder block alone) cuts at its row of image lines, which restores as `[N images]` (0.7.2 §7.3; cutAtTurn('')
+    // would cut nothing).
+    const shown = e.text.trim() === '' ? null : promptKind(e.text)
+    const isImagesOnly = images > 0 && (shown === null || shown.kind === 'service')
+    const turnText = isImagesOnly ? imagesText(images) : e.text
     // A start that never came (session.start sent past this module): the first main turn starts the pane and restores
     // the conversation less its own rows. The reads are asked in this frame; the rest runs in the background.
     if (!isStarted) {
       isStarted = true
       isRestoreDue = false
-      askRestore($, e.text)
+      askRestore($, turnText)
       inBackground($, () => readMainModel($))
       inBackground($, () => startPane($))
     }
@@ -1063,7 +1079,7 @@ export const register: Register = (on, options) => {
       const epoch = logEpoch
       const wasResetting = resetsRunning > 0
       const asked = $.session.messages().catch(() => null)
-      inBackground($, () => restorePane($, asked, Promise.resolve(true), e.text, epoch, wasResetting))
+      inBackground($, () => restorePane($, asked, Promise.resolve(true), turnText, epoch, wasResetting))
     }
     // The first turn of the main agent opens the tree to the reads (hasMainTurn), and asks for one.
     if (!hasMainTurn) {
@@ -1101,14 +1117,14 @@ export const register: Register = (on, options) => {
     // that is only such blocks, or a compaction summary, has no line. Any other prompt is the person's, one that opens
     // with a pasted `<token…` or `<div class=…>` too, and its line is its head. Either line is masked: a tag can be a
     // lowercase token. A turn with no text (a continuation) is no line of the log, and nor is one with the text of a
-    // message that has its line already (queued).
-    if (e.text.trim() !== '' && !queued.includes(e.text)) {
-      const shown = promptKind(e.text)
-      if (shown.kind === 'tag' || shown.kind === 'prompt') {
-        const [who, text] =
-          shown.kind === 'tag' ? ['engine', engineLineText(shown.tag)] : ['you', logText(shown.text)]
-        await addLog($, now, who, text, 'info')
-      }
+    // message that has its line already (queued). A prompt of images whose text gives no line (`""`, or a reminder
+    // block alone) has the line `[N images]` from its attachments (the note of prompt.submit).
+    if (shown !== null && !queued.includes(e.text) && (shown.kind === 'tag' || shown.kind === 'prompt')) {
+      const [who, text] =
+        shown.kind === 'tag' ? ['engine', engineLineText(shown.tag)] : ['you', logText(shown.text)]
+      await addLog($, now, who, text, 'info')
+    } else if (isImagesOnly) {
+      await addLog($, now, 'you', imagesText(images), 'info')
     }
 
     return started
@@ -1373,7 +1389,25 @@ export const register: Register = (on, options) => {
     // a notice nor a message typed over a turn) never rejects unhandled.
     const idleAt = idleSince
     const arrival = $.clock.now().catch(() => null)
-    const submitted = await next(e)
+    // Before the chain runs, and so before any state: an idle prompt's turn.start runs inside next(e) (§7.3(b)).
+    const isNoted = e.turnId === undefined && PERSON_ORIGINS.has(e.origin?.kind)
+    // The count cannot throw: the attachments come from a hook above, and a mod must never block the prompt.
+    if (isNoted) {
+      const { attachments } = e
+      pendingImages = !Array.isArray(attachments) ? 0 : attachments.filter(
+        item => typeof item === 'object' && item !== null && item.type === 'image',
+      ).length
+    }
+    let submitted: Awaited<ReturnType<typeof next>>
+    try {
+      submitted = await next(e)
+    } catch (error) {
+      // A prompt that never entered starts no turn: its note goes, and the rejection goes on as it was.
+      if (isNoted) pendingImages = 0
+      throw error
+    }
+    // The prompt that a hook beneath dropped starts no turn, so its note goes.
+    if (isNoted && submitted.drop !== undefined) pendingImages = 0
     // A message that the person types over a running turn (`turnId` set) waits in the queue for the next model request,
     // and no turn.start comes for it yet, so its line is written here, at its arrival; one typed while the loop is idle
     // starts a turn of its own, and that turn.start writes it. What entered counts: a prompt that a hook beneath

@@ -2188,13 +2188,35 @@ test('promptKind names the engine\'s frame of a session\'s message `peer`, and d
   const handBack = '<agent-message from="scout">\n[Subagent hand-back] done\n</agent-message>'
   expect(promptKind(handBack)).toEqual({ kind: 'tag', tag: 'agent-message', text: handBack })
   for (const text of [
-    '[Image: source: /tmp/a.png]', 'Base directory for this skill: /x/y', '[Request interrupted by user]',
-    '[Request interrupted by user for tool use]', `${REMINDER('a')}\n[Image: source: /tmp/a.png]`,
+    'Base directory for this skill: /x/y', '[Request interrupted by user]',
+    '[Request interrupted by user for tool use]',
   ]) expect(promptKind(text), JSON.stringify(text)).toEqual({ kind: 'service' })
+  for (const text of ['[Image: source: /tmp/a.png]', `${REMINDER('a')}\n[Image: source: /tmp/a.png]`]) {
+    expect(promptKind(text), JSON.stringify(text)).toEqual({ kind: 'prompt', text: '[1 image]' })
+  }
   // A typed prompt that only looks like one of them is a prompt.
   for (const text of ['[Image 1] what is this', '[Image: a cat]', 'Base directory is /x', '[Request failed]']) {
     expect(promptKind(text), JSON.stringify(text)).toEqual({ kind: 'prompt', text })
   }
+})
+
+test('promptKind reads the engine\'s image lines as [N images] and never shows a path', () => {
+  const two = '[Image: source: /tmp/a.png]\n[Image: source: /tmp/b.png]'
+  const original =
+    '[Image: original 3000x2000, displayed at 1500x1000. Multiply coordinates by 2.00 to map to original image.]'
+  const results = [
+    promptKind(two), promptKind(`${REMINDER('a')}\n${two}`), promptKind('[Image: source: /tmp/a.png]'),
+    promptKind('[Image source: /tmp/a.png]'), promptKind(original),
+    promptKind(`[Image: source: /tmp/a.png, ${original.slice('[Image: '.length)}`),
+    promptKind('Look at this\n[Image: source: /tmp/a.png]'), promptKind('[Image: source: /tmp/a.png]\nLook at this'),
+  ]
+  expect(results).toEqual([
+    { kind: 'prompt', text: '[2 images]' }, { kind: 'prompt', text: '[2 images]' },
+    { kind: 'prompt', text: '[1 image]' }, { kind: 'prompt', text: '[1 image]' }, { kind: 'prompt', text: '[1 image]' },
+    { kind: 'prompt', text: '[1 image]' },
+    { kind: 'prompt', text: 'Look at this' }, { kind: 'prompt', text: 'Look at this' },
+  ])
+  for (const result of results) expect(JSON.stringify(result)).not.toContain('/tmp/')
 })
 
 test('promptKind draws nothing for no remainder, an unclosed block, and a block that quoted its closing tag', () => {
