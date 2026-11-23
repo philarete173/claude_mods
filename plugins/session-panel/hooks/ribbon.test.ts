@@ -246,13 +246,79 @@ test('the block gives way to a crowded live end and keeps 1 px a part', () => {
   }
 })
 
-test('a tool belongs to the step before it; parallel calls of one step are one part in the first call\'s hue', () => {
+test('a tool belongs to the step before it; parallel calls split by the call that ends last', () => {
   expect(ribbonSegments(EXAMPLE, 264)[1]).toMatchObject({ kind: 'tool', station: 'files', ms: 400 })
-  // The call that started first gives the hue, whatever order the calls returned in.
+  // Web ends at 9.2 and Files at 9.3: Web owns [9.0, 9.1], Files the rest.
   const input: RibbonInput = {
     ...FINISHED, tools: [tool(9.1, 9.3, 'files', 'Read a'), tool(9.0, 9.2, 'web', 'WebFetch')],
   }
-  expect(ribbonSegments(input, 264)[1]).toMatchObject({ kind: 'tool', station: 'web', ms: 300 })
+  expect(ribbonSegments(input, 264)[1]).toMatchObject({ kind: 'tool', station: 'web', ms: 100 })
+  expect(ribbonSegments(input, 264)[2]).toMatchObject({ kind: 'tool', station: 'files', ms: 200 })
+})
+
+// One step [0, 1] s with calls after it: [station, t0, t1, failed?] in seconds from its stop, in completion order.
+type Call = [ToolStationId, number, number, boolean?]
+const oneStep = (...calls: Call[]): RibbonInput => {
+  const tools = calls.map(([station, a, b, failed = false]) => tool(1 + a, 1 + b, station, 'x', failed))
+  return {
+    startedAt: T0, endMs: Math.max(...tools.map((t) => t.t1)), isLive: false, steps: [{ tStart: s(0), tEnd: s(1) }],
+    tools, earlier: zeroStationMs(), live: null,
+  }
+}
+const toolParts = (input: RibbonInput): [string, number, boolean][] =>
+  ribbonSegments(input, 264).filter((p) => p.kind === 'tool').map((p) => [p.station, p.ms, p.failed])
+
+test('the live case: a held Bash beside a short Read is Shell\'s', () => {
+  const input = oneStep(['files', 0, 0.3], ['shell', 0, 70])
+  expect(toolParts(input)).toEqual([['shell', 70_000, false]])
+  const times = stationTimes(input)
+  expect([times.shell, times.files]).toEqual([70_000, 0])
+  const rows = legendRows(STATS, times, 80, 'terminal').flat()
+  expect(rows.some((item) => joined(item.spans).startsWith('Files'))).toBe(false)
+})
+
+test('overlapping calls: the one that ends last owns the overlap', () => {
+  expect(toolParts(oneStep(['files', 0, 5], ['shell', 4, 6])))
+    .toEqual([['files', 4000, false], ['shell', 2000, false]])
+  const three = oneStep(['files', 0, 3], ['web', 2, 4], ['shell', 1, 5])
+  expect(toolParts(three)).toEqual([['files', 1000, false], ['shell', 4000, false]])
+  expect(stationTimes(three).web).toBe(0)
+})
+
+test('ties: the earlier start, then the first to complete', () => {
+  expect(toolParts(oneStep(['files', 0, 4], ['shell', 1, 4]))).toEqual([['files', 4000, false]])
+  expect(toolParts(oneStep(['files', 0, 2], ['web', 0, 2]))).toEqual([['files', 2000, false]])
+})
+
+test('a gap joins the piece before it (R-4)', () => {
+  expect(toolParts(oneStep(['files', 0, 1], ['shell', 2, 3]))).toEqual([['files', 2000, false], ['shell', 1000, false]])
+})
+
+test('failure marks', () => {
+  expect(toolParts(oneStep(['files', 0, 0.3, true], ['shell', 0, 70]))).toEqual([['shell', 70_000, true]])
+  const marked = oneStep(['files', 0, 5, true], ['shell', 4, 6])
+  expect(toolParts(marked)).toEqual([['files', 4000, true], ['shell', 2000, false]])
+  expect(drawRibbon(marked, 264, FULL, STATS, stationTimes(marked)).alt).toContain('1 failed call')
+})
+
+test('the legend equals the bar (R-5)', () => {
+  const steps: { tStart: number; tEnd: number }[] = []
+  const tools: ToolSegment[] = []
+  for (let i = 0; i < 12; i += 1) {
+    steps.push({ tStart: s(i * 3), tEnd: s(i * 3 + 1) })
+    tools.push(tool(i * 3 + 1, i * 3 + 1.3, 'files', 'Read'), tool(i * 3 + 1, i * 3 + 3, 'shell', 'Bash'))
+  }
+  const input: RibbonInput = {
+    startedAt: T0, endMs: s(36), isLive: false, steps, tools, earlier: zeroStationMs(), live: null,
+  }
+  const times = stationTimes(input)
+  for (const [px, detailed] of [[264, 12], [60, 6]] as const) {
+    const parts = ribbonSegments(input, px)
+    expect(detailedSteps(parts)).toBe(detailed)
+    for (const id of Object.keys(times) as (keyof typeof times)[]) {
+      expect(parts.filter((p) => p.station === id).reduce((sum, p) => sum + p.ms, 0), `${id} at ${px}`).toBe(times[id])
+    }
+  }
 })
 
 test('the source holds no <title', () => {
@@ -363,12 +429,12 @@ test('stationTimes counts earlier and the calls before the first step', () => {
   expect([times.model, times.files, times.web]).toEqual([65_000, 1100, 1000])
 })
 
-test('parallel calls give their group to the first-started call\'s station', () => {
+test('parallel calls split by the call that ends last', () => {
   const times = stationTimes({
     ...FINISHED, steps: [{ tStart: s(0), tEnd: s(9) }, { tStart: s(9.4), tEnd: s(10) }], endMs: s(10),
     tools: [tool(9.1, 9.3, 'files', 'Read a'), tool(9.0, 9.2, 'web', 'WebFetch')],
   })
-  expect([times.web, times.files]).toEqual([300, 0])
+  expect([times.web, times.files]).toEqual([100, 200])
 })
 
 test('sequential calls count the gap between them', () => {

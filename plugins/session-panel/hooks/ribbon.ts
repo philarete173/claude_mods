@@ -1,12 +1,12 @@
-// The turn ribbon (spec §5): one bar per turn against a ceiling, a part per model call and per step's tool calls, the
-// older steps merged into one part per station, a live end that grows, the legend by station (spec 0.7.1 §17) and the
-// terminal's bar. Pure: no `$`, no engine.
+// The turn ribbon (spec §5): one bar per turn against a ceiling, a part per model call and per piece of a step's tool
+// calls, the older steps merged into one part per station, a live end that grows, the legend by station (spec 0.7.1
+// §17) and the terminal's bar. Pure: no `$`, no engine.
 
 import { fitRow, padStart, spansCells } from './cells'
 import type { Span } from './cells'
 import { STATION_HUES, STATION_LABELS, STATION_ORDER, zeroStationMs } from './stations'
 import type { InFlightCall, StationId, StationMs } from './stations'
-import { fmtDuration, fmtTtft, ribbonOf } from './stats'
+import { fmtDuration, fmtTtft, ribbonOf, splitCalls } from './stats'
 import type { RibbonTurn, ToolSegment, TurnAcc, TurnStats } from './stats'
 import { altText, BAD, fitSvg, loopBegin, SURFACE, svgPx, themeStyle } from './svg'
 import type { Look } from './svg'
@@ -25,7 +25,7 @@ export type RibbonPart = {
 
 // A part before it is placed: its times, and the room it needs.
 type Piece = { kind: RibbonPart['kind']; station: StationId; start: number; end: number; ms: number; failed: boolean }
-// A step's model part and its tool group, and what it adds to `earlier` once merged.
+// A step's model part and its tool pieces, and what it adds to `earlier` once merged.
 type Row = { pieces: Piece[]; spent: [StationId, number][] }
 
 const EASE = '.45 0 .55 1'
@@ -101,28 +101,17 @@ function rowsOf(input: RibbonInput): { head: StationMs; rows: Row[]; live: Piece
     pieces: [{ kind: 'model', station: 'model', start: tStart, end: tEnd, ms: tEnd - tStart, failed: false }],
     spent: [['model', tEnd - tStart]],
   }))
-  const groups: (Piece | undefined)[] = []
+  const calls: ToolSegment[][] = rows.map(() => [])
   for (const tool of input.tools) {
     const i = stepBefore(input.steps, tool.t0)
-    const row = rows[i]
-    if (row === undefined) {
-      head[tool.station] += tool.t1 - tool.t0
-      continue
-    }
-    row.spent.push([tool.station, tool.t1 - tool.t0])
-    const g = groups[i]
-    if (g === undefined) {
-      groups[i] = { kind: 'tool', station: tool.station, start: tool.t0, end: tool.t1, ms: 0, failed: tool.failed }
-    } else {
-      // The call that started first gives the hue.
-      if (tool.t0 < g.start) g.station = tool.station
-      g.start = Math.min(g.start, tool.t0)
-      g.end = Math.max(g.end, tool.t1)
-      g.failed ||= tool.failed
-    }
+    if (calls[i] === undefined) head[tool.station] += tool.t1 - tool.t0
+    else calls[i]?.push(tool)
   }
-  groups.forEach((g, i) => {
-    if (g !== undefined) rows[i]?.pieces.push({ ...g, ms: g.end - g.start })
+  calls.forEach((list, i) => {
+    for (const { station, t0, t1, failed } of splitCalls(list)) {
+      rows[i]?.pieces.push({ kind: 'tool', station, start: t0, end: t1, ms: t1 - t0, failed })
+      rows[i]?.spent.push([station, t1 - t0])
+    }
   })
   const l = input.live
   const live: Piece | null = l === null

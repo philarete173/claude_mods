@@ -232,6 +232,19 @@ test('addStep keeps the tools of the latest 60 steps and folds the older ones in
   expect(acc.tools.some(tool => tool.t0 < 2000)).toBe(false) // 2000: the tStart of steps[1]
 })
 
+test('addStep folds a leaving step\'s parallel calls as their pieces', () => {
+  let acc: TurnAcc = { ...A, steps: [], toolIntervals: [], tools: [], earlier: zeroStationMs() }
+  for (let i = 0; i < 61; i += 1) {
+    acc = addStep(acc, stepAt(i))
+    if (i === 0) {
+      const base = stepAt(0).tEnd
+      const read: ToolSegment = { ...toolAt(0), t0: base, t1: base + 300 }
+      acc = addTool(addTool(acc, read), { ...toolAt(1), t0: base, t1: base + 70_000 })
+    }
+  }
+  expect([acc.earlier.shell, acc.earlier.files]).toEqual([70_000, 0])
+})
+
 test('normTurn fills an accumulator of 0.6.1', () => {
   const filled = normTurn(OLD)
   expect(filled).toEqual({ ...OLD, tools: [], earlier: zeroStationMs() })

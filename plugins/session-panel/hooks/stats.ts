@@ -233,10 +233,14 @@ export function addStep(acc: TurnAcc, step: StepTiming): TurnAcc {
   if (gone !== undefined && from !== undefined) {
     const earlier = { ...held.earlier, model: held.earlier.model + gone.tEnd - gone.tStart }
     const tools: ToolSegment[] = []
+    const leaving: ToolSegment[] = []
     for (const tool of held.tools) {
-      if (tool.t0 < from.tStart) earlier[tool.station] += tool.t1 - tool.t0
-      else tools.push(tool)
+      if (tool.t0 >= from.tStart) tools.push(tool)
+      else if (tool.t0 < gone.tStart) earlier[tool.station] += tool.t1 - tool.t0 // before the first step: whole
+      else leaving.push(tool)
     }
+    // The leaving step's calls fold as their pieces, as `rowsOf` counts them (0.7.2 §6.2, R-5).
+    for (const piece of splitCalls(leaving)) earlier[piece.station] += piece.t1 - piece.t0
     out = { ...out, tools, earlier }
   }
 
@@ -247,6 +251,61 @@ export function addTool(acc: TurnAcc, segment: ToolSegment): TurnAcc {
   const held = normTurn(acc)
 
   return { ...held, tools: [...held.tools, segment] }
+}
+
+// A piece of one step's calls (0.7.2 §6.2): its owner's station, its span, and whether it is marked failed.
+export type CallPiece = { station: ToolStationId; t0: number; t1: number; failed: boolean }
+
+// The call that would own the stretch: the greater `t1`, then the lesser `t0`, then the earlier in completion order.
+type Ranked = ToolSegment & { i: number }
+const outranks = (c: Ranked, best: Ranked): boolean => (c.t1 - best.t1 || best.t0 - c.t0 || best.i - c.i) > 0
+
+/**
+ * One step's calls, in completion order, as pieces in time order covering the least `t0` to the greatest `t1`: each
+ * piece goes to the station of the running call that ends last, a gap to the piece before it (0.7.2 §6.2).
+ */
+export function splitCalls(calls: readonly ToolSegment[]): CallPiece[] {
+  const ranked: Ranked[] = calls.map((c, i) => ({ ...c, i }))
+  const byStart = [...ranked].sort((x, y) => x.t0 - y.t0 || x.i - y.i)
+  const cuts = [...new Set(calls.flatMap((c) => [c.t0, c.t1]))].sort((x, y) => x - y)
+  if (cuts.length === 0) return []
+  const pieces: CallPiece[] = []
+  const owners = new Set<number>()
+  let best: Ranked | undefined
+  let next = 0
+  // One instant: a single cut, and a single piece of 0 ms.
+  for (let j = 0; j < Math.max(1, cuts.length - 1); j += 1) {
+    const a = cuts[j] ?? 0
+    const b = cuts[j + 1] ?? a
+    // The running best is among the calls that started by `a`.
+    for (let c = byStart[next]; c !== undefined && c.t0 <= a; c = byStart[++next]) {
+      if (best === undefined || outranks(c, best)) best = c
+    }
+    const last = pieces[pieces.length - 1]
+    if (best !== undefined && best.t1 >= b) {
+      owners.add(best.i)
+      if (last?.station === best.station) {
+        last.t1 = b
+        last.failed ||= best.failed
+      } else pieces.push({ station: best.station, t0: a, t1: b, failed: best.failed })
+    } else if (last !== undefined) last.t1 = b // a gap joins the piece before it (R-4)
+    else if (best !== undefined) pieces.push({ station: best.station, t0: a, t1: b, failed: false })
+  }
+  // A failed call that owns no piece marks the piece it ends in; the ends are sorted, so a binary search: O(k log k).
+  for (const c of ranked) {
+    if (!c.failed || owners.has(c.i)) continue
+    let lo = 0
+    let hi = pieces.length - 1
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if ((pieces[mid]?.t1 ?? Infinity) >= c.t1) hi = mid
+      else lo = mid + 1
+    }
+    const mark = pieces[lo]
+    if (mark !== undefined) mark.failed = true
+  }
+
+  return pieces
 }
 
 export function ribbonOf(acc: TurnAcc, endedAt: number): RibbonTurn {
